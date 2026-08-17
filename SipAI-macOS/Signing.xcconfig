@@ -1,0 +1,44 @@
+// Signing for the SipAI target.
+//
+// A fresh clone signs to run locally — ad hoc, no Apple account, no
+// edits — so `git clone` then ⌘R just works. That is what the empty
+// SIPAI_TEAM below is for. A team id hardcoded here would fail on every
+// machine that is not a member of it, which is the failure this file
+// exists to remove.
+//
+// To sign with your own team WITHOUT touching the project file, drop a
+// `Local.xcconfig` beside this one holding one line:
+//
+//     SIPAI_TEAM = ABCDE12345
+//
+// It is gitignored, and it is included before the settings below, so
+// that one line is enough — the identity follows from it. Selecting a
+// team in Xcode's Signing & Capabilities pane works too, but that writes
+// the team into project.pbxproj, which is exactly what breaks the
+// clone-and-build promise for everyone else.
+//
+// Worth doing if you run the app rather than just build it: macOS
+// identifies an ad-hoc build by the exact bytes of its binary, so every
+// rebuild looks like a different app and asks again for access to
+// Desktop, Documents and Downloads. A real team identity gives the build
+// a stable designated requirement, and the grant sticks.
+//
+// Release builds read none of this — `Release/release.sh` passes the
+// Developer ID identity and team on the xcodebuild command line, where
+// they override both this file and the project.
+
+SIPAI_TEAM =
+
+#include? "Local.xcconfig"
+
+DEVELOPMENT_TEAM = $(SIPAI_TEAM)
+CODE_SIGN_STYLE = Automatic
+
+// The identity has to follow the team, or setting only SIPAI_TEAM
+// leaves this at "-" and hands back an ad-hoc build that looks signed.
+// With no team, `$(SIPAI_TEAM:identifier)` is empty, so this resolves to
+// SIPAI_IDENTITY_ below — ad hoc. With a team it resolves to an
+// undefined variable, i.e. empty, and an empty identity under automatic
+// signing is what makes Xcode pick the right certificate itself.
+SIPAI_IDENTITY_ = -
+CODE_SIGN_IDENTITY = $(SIPAI_IDENTITY_$(SIPAI_TEAM:identifier))

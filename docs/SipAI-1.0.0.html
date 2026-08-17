@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 13px/1.55 -apple-system, BlinkMacSystemFont, sans-serif;
+    margin: 0; padding: 4px 2px;
+  }
+  h3 { font-size: 13px; margin: 14px 0 6px; }
+  h3:first-child { margin-top: 0; }
+  ul { margin: 0; padding-left: 20px; }
+  li { margin-bottom: 6px; }
+  code {
+    font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: color-mix(in srgb, currentColor 10%, transparent);
+    padding: 1px 4px; border-radius: 3px;
+  }
+</style></head>
+<body>
+  <p>First public release.</p>
+  <h3>Added</h3>
+  <ul>
+    <li><strong>Chat with 20 built-in providers</strong> through one interface, plus a custom entry for any OpenAI-compatible URL — which is also how you reach a local server (Ollama, LM Studio, vLLM, …) or anything self-hosted. Region-bound providers ask which endpoint your key came from.</li>
+    <li><strong>Chats, groups and roles.</strong> Organise conversations into folders with their own system prompt, and switch between named, reusable roles.</li>
+    <li><strong>Notes</strong> written by the model from a conversation or an agent session, with optional instructions of your own.</li>
+    <li><strong>Agent sessions</strong> for Claude Code, Codex and Kimi Code — browse, group, rename, resume and delete them, including sessions started in a terminal. Transcripts stream live as the agent works.</li>
+    <li><strong>Inline permission approvals.</strong> Claude Code tool requests appear as Allow / Deny cards in the transcript, with a notification when the app isn't focused.</li>
+    <li><strong>Scheduled agent tasks</strong>, fired in-process by the app rather than by <code>cron</code>, so they inherit the app's own file access. A slot missed while the app was closed fires once on next launch.</li>
+    <li><strong>Session branching</strong> (Claude Code): edit an earlier message and continue from there, as a new session, leaving the original untouched.</li>
+    <li><strong>Automatic updates.</strong> SipAI checks <code>updates.sipai.dev</code> once a day and offers new versions in a small window with these notes in it. Nothing downloads until you say so, an update never interrupts a running agent turn, and the whole thing can be switched off in <strong>Settings → Updates</strong>.</li>
+    <li><strong>English and Simplified Chinese</strong> throughout.</li>
+  </ul>
+</body></html>

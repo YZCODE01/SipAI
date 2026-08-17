@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  This file holds ONLY the keys Xcode's Info.plist generator cannot
+	  carry. `GENERATE_INFOPLIST_FILE` stays YES and Xcode merges
+	  everything it derives from build settings (CFBundleShortVersionString
+	  from MARKETING_VERSION, CFBundleVersion, the display name, the
+	  principal class, …) into this dictionary at build time. Do not
+	  restate any of those here — the generated value wins and a second
+	  copy is a second thing to keep in step.
+
+	  Why this file exists at all: `INFOPLIST_KEY_<name>` build settings
+	  only work for keys Xcode already knows about. Sparkle's are not
+	  among them — an `INFOPLIST_KEY_SUFeedURL` builds without complaint
+	  and simply never appears in the built app. Sparkle then has no
+	  feed to check and no key to verify signatures against, and fails
+	  silently, because a missing feed URL just means "never find an
+	  update".
+	-->
+
+	<!-- Where SipAI looks for new versions. Frozen into every build
+	     that ships: an already-installed copy keeps asking the URL it
+	     was built with, forever, so this can never be changed for
+	     versions already in the wild. It is a subdomain precisely so
+	     the hosting behind it can move without stranding anyone. -->
+	<key>SUFeedURL</key>
+	<string>https://updates.sipai.dev/appcast.xml</string>
+
+	<!-- The public half of the EdDSA key pair. Sparkle refuses any
+	     update whose archive is not signed by the matching private key,
+	     which is what makes a hijacked domain or a tampered download
+	     unable to install anything. The private half lives in the login
+	     keychain of the release machine and NOWHERE else — losing it
+	     means no already-installed copy can ever be updated again. -->
+	<key>SUPublicEDKey</key>
+	<string>2lHRdrqEQsyUkmcVzhW4eOa8ejKaAYb5oIzpjF8EPHQ=</string>
+
+	<!-- Automatic checks are on by default, decided HERE rather than by
+	     Sparkle's first-run permission prompt (the updater delegate
+	     suppresses that prompt so it cannot land on top of onboarding).
+	     This key is what makes the suppression safe: without it Sparkle
+	     only schedules checks once the user has answered the prompt, so
+	     a suppressed prompt plus no key means the scheduled check NEVER
+	     runs. Settings → Updates writes the user's choice to defaults,
+	     which overrides this default. -->
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+</dict>
+</plist>

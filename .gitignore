@@ -1,0 +1,38 @@
+# macOS and editor noise
+.DS_Store
+*.swp
+
+# Xcode — per-user state, never belongs in a shared repo.
+# Local.xcconfig carries YOUR team id; committing it breaks the build on
+# every machine that is not a member of that team, which is the whole
+# reason Signing.xcconfig keeps the team out of project.pbxproj.
+SipAI-macOS/Local.xcconfig
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+DerivedData/
+build/
+*.xcscmblueprint
+*.xccheckout
+
+# Release artefacts. The DMG ships as a GitHub release asset, never as a
+# committed file: a binary in git stays in every clone of every version,
+# forever. release.sh writes its whole working set here, the exported and
+# notarized .app included.
+SipAI-macOS/Release/build/
+*.dmg
+*.zip
+*.xcarchive/
+
+# Python — approver.py and changelog_to_html.py are the only two here,
+# but either can leave bytecode behind.
+__pycache__/
+*.py[cod]
+
+# Secrets — belt and braces for a public repo
+.env
+*.pem
+*.p12
+*.key
+config.json
+secrets.json
