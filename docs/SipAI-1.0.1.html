@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 13px/1.55 -apple-system, BlinkMacSystemFont, sans-serif;
+    margin: 0; padding: 4px 2px;
+  }
+  h3 { font-size: 13px; margin: 14px 0 6px; }
+  h3:first-child { margin-top: 0; }
+  ul { margin: 0; padding-left: 20px; }
+  li { margin-bottom: 6px; }
+  code {
+    font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: color-mix(in srgb, currentColor 10%, transparent);
+    padding: 1px 4px; border-radius: 3px;
+  }
+</style></head>
+<body>
+  <h3>Added</h3>
+  <ul>
+    <li><strong>Attach files to a chat.</strong> Drag an image, a PDF, or a text file onto the message box — or use the <strong>+</strong> button — to send it with your next message. Images and PDFs go to models that can read them; text files are included inline, so you can keep asking about them in later turns. A full paper fits: a PDF's text travels whole up to 400k characters.</li>
+    <li><strong>Notes render mathematics, and export to PDF.</strong> Equations are now laid out properly — fractions, integrals, matrices, aligned equations — instead of approximated. A note can be saved as <strong>PDF</strong> as well as Markdown, from the ••• menu.</li>
+  </ul>
+  <h3>Fixed</h3>
+  <ul>
+    <li><strong>Long-thinking models no longer fail with "Network error".</strong> Chat requests now stream from the provider, so the connection stays alive while a reasoning model thinks for minutes before its first word — the reply still arrives in one piece. Previously, anything on the network path that drops idle connections (a local proxy, a corporate gateway) killed the request before the first byte arrived.</li>
+    <li><strong>A reply could go missing if you switched away while it was arriving.</strong> Send a message, then open another chat, a note, or an agent session, and the answer is now delivered to the conversation that asked for it. You can leave and come back mid-reply, and a turn that is interrupted or fails now says so when you return.</li>
+    <li>Mathematics in chat and agent transcripts renders more faithfully — vectors and subscripts like <code>x_max</code> no longer come out garbled.</li>
+    <li>An agent with no CLI installed and no saved sessions no longer shows an empty section labelled "(read only)".</li>
+    <li>The "no output yet" notice on an agent turn now waits longer before it appears, so a slow first response isn't flagged as a problem.</li>
+    <li>More of the Simplified Chinese interface is translated: find and global search, the model-setup screens, parts of onboarding, the "You" label above your messages, and the built-in starter role.</li>
+  </ul>
+  <h3>Security</h3>
+  <ul>
+    <li>Hardened the new note-rendering and file-attachment features against malformed input: crafted content can't crash note preview, attachments are bounded by file size and image dimensions before being read, and notes render in a tighter sandbox.</li>
+  </ul>
+</body></html>

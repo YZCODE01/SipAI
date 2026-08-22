@@ -297,7 +297,7 @@ struct OnboardingView: View {
                 .foregroundColor(SipDesign.textPrimary)
                 .tracking(-0.4)
 
-            Text("Your AI chat, your way.")
+            Text("Your AI, your way.")
                 .font(.system(size: 14))
                 .foregroundColor(SipDesign.textSecondary)
 
@@ -313,14 +313,14 @@ struct OnboardingView: View {
                     icon: "globe",
                     title: String(localized: "All providers, one app",
                                   comment: "Onboarding welcome bullet title"),
-                    desc: String(localized: "Chat with GPT, Claude, Kimi, and more in one place with your API keys.",
+                    desc: String(localized: "Chat with GPT, Claude, and more with your API keys.",
                                  comment: "Onboarding welcome bullet detail")
                 )
                 featureRow(
                     icon: "terminal",
                     title: String(localized: "Better local AI agent management",
                                   comment: "Onboarding welcome bullet title"),
-                    desc: String(localized: "Manage all your local AI agentic sessions inside one app with efficient workflows.",
+                    desc: String(localized: "Manage your local AI agents with efficient workflows.",
                                  comment: "Onboarding welcome bullet detail")
                 )
                 featureRow(
@@ -481,6 +481,30 @@ struct OnboardingView: View {
         agents.unseenAgents.filter { agents.isAgentInstalled($0.key) }
     }
 
+    /// The detected-agents sentence, assembled so that no English
+    /// fragment is handed to a translated template as an ARGUMENT.
+    /// A joiner and a pronoun passed in from the call site survive
+    /// translation untouched and land as English words in the middle
+    /// of the Chinese sentence, so both are catalog entries of their
+    /// own — the plural sentence carries its pronoun in the template,
+    /// where a translation is free to inflect or drop it.
+    ///
+    /// Names come from `agentLabel`, so this is user-editable text and
+    /// the result stays a String expression: an interpolated `Text`
+    /// literal would markdown-parse a renamed agent.
+    private var agentHintText: String {
+        let names = hintAgents.map { config.agentLabel(for: $0.key, defaultName: $0.name) }
+        guard let last = names.last else { return "" }
+        guard names.count > 1 else {
+            return String(localized: "💡 \(last) detected. You can directly interact with \(last) from SipAI without an additional API key.",
+                          comment: "Onboarding hint naming the one detected agent CLI; both placeholders are its name")
+        }
+        let list = String(localized: "\(names.dropLast().joined(separator: ", ")) and \(last)",
+                          comment: "Joins the last agent name onto the list of the others: “A, B and C”")
+        return String(localized: "💡 \(list) detected. You can directly interact with them from SipAI without an additional API key.",
+                      comment: "Onboarding hint when several agent CLIs are detected; the placeholder is the joined list of names")
+    }
+
     private var providerStepView: some View {
         VStack(spacing: 0) {
             Spacer()
@@ -495,10 +519,8 @@ struct OnboardingView: View {
 
             // Agent CLI detection hint
             if !hintAgents.isEmpty {
-                let names = hintAgents.map(\.name)
-                let nameStr = names.count == 1 ? names[0] : names.dropLast().joined(separator: ", ") + " and " + names.last!
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("💡 \(nameStr) detected. You can directly interact with \(names.count == 1 ? names[0] : "them") from SipAI without an additional API key.")
+                    Text(verbatim: agentHintText)
                         .font(.system(size: 12.5))
                         .foregroundColor(SipDesign.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -588,11 +610,19 @@ struct OnboardingView: View {
                             }
                             // Image Models + Custom
                             if providerSearch.isEmpty {
-                                providerSectionHeader("Other")
-                                providerActionRow("Image Models", icon: "photo") {
+                                providerSectionHeader(
+                                    String(localized: "Other",
+                                           comment: "Model setup: provider list section header"))
+                                providerActionRow(
+                                    String(localized: "Image Models",
+                                           comment: "Model setup: row that opens the image-model page"),
+                                    icon: "photo") {
                                     showImageModels = true
                                 }
-                                providerActionRow("Custom (name & URL)", icon: "plus.circle") {
+                                providerActionRow(
+                                    String(localized: "Custom (name & URL)",
+                                           comment: "Model setup: row that opens the custom-provider form"),
+                                    icon: "plus.circle") {
                                     showCustomProvider = true
                                 }
                             }
@@ -724,10 +754,18 @@ struct OnboardingView: View {
                 .foregroundColor(SipDesign.textSecondary)
 
             VStack(spacing: 0) {
+                // The descriptors are localized HERE: `imageModelCatalogRow`
+                // takes plain `String`s, so a bare literal at the call site
+                // reaches SwiftUI's non-localizing `Text(_: String)` and
+                // ships in English whatever the language. Provider names and
+                // model ids beside them are proper nouns and stay as they are.
                 imageModelCatalogRow(provider: "openai", providerName: "OpenAI (GPT Image)", models: [
-                    ("gpt-image-1.5",    "best quality"),
-                    ("gpt-image-1",      "balanced"),
-                    ("gpt-image-1-mini", "fast, cheap"),
+                    ("gpt-image-1.5",    String(localized: "best quality",
+                                                comment: "Image model descriptor: highest quality, slowest")),
+                    ("gpt-image-1",      String(localized: "balanced",
+                                                comment: "Image model descriptor: middle of the range")),
+                    ("gpt-image-1-mini", String(localized: "fast, cheap",
+                                                comment: "Image model descriptor: fastest and least expensive")),
                 ])
                 imageModelCatalogRow(provider: "google", providerName: "Google (Imagen)", models: [
                     ("imagen-3.0-generate-002", "Imagen 3"),
@@ -1377,8 +1415,12 @@ struct OnboardingView: View {
                         .foregroundColor(SipDesign.textPrimary)
 
                     VStack(alignment: .leading, spacing: 8) {
-                        radioRow("Chat Completions (standard)", value: "openai", selected: $selectedApiStyle)
-                        radioRow("Responses API (advanced)", value: "openai-responses", selected: $selectedApiStyle)
+                        radioRow(String(localized: "Chat Completions (standard)",
+                                        comment: "Model setup: OpenAI chat completions style"),
+                                 value: "openai", selected: $selectedApiStyle)
+                        radioRow(String(localized: "Responses API (advanced)",
+                                        comment: "Model setup: OpenAI responses style"),
+                                 value: "openai-responses", selected: $selectedApiStyle)
                     }
 
                     Text("Required for some models like GPT-5.4 Pro")

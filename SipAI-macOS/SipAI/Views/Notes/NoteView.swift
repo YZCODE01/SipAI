@@ -15,6 +15,10 @@ struct NoteView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var notes: NotesManager
     @EnvironmentObject var config: ConfigManager
+    /// Drives the preview's palette. The web view is a document of our
+    /// own making, so it has to be told the appearance rather than
+    /// inheriting one.
+    @Environment(\.colorScheme) private var colorScheme
 
     /// Markdown source being edited. Meaningful only while
     /// `loadedNoteId` names the note on screen.
@@ -168,16 +172,16 @@ struct NoteView: View {
                         scheduleSave(slug: note.slug)
                     }
             } else {
-                ScrollView {
-                    MarkdownRenderer.render(note.bodyContent)
-                        .font(.system(size: 14))
-                        .foregroundColor(ChatDesign.textPrimary)
-                        .lineSpacing(3)
-                        .textSelection(.enabled)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 16)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                // Rendered by `NoteHTML` in a web view rather than by
+                // the SwiftUI `MarkdownRenderer`, so that LaTeX is laid
+                // out for real instead of approximated with Unicode
+                // symbols — and so the PDF export, which renders the
+                // same document, cannot disagree with what is on screen.
+                NoteWebView(markdown: note.bodyContent,
+                            metadata: NoteHTML.Metadata(title: note.title,
+                                                        model: note.model,
+                                                        date: note.date),
+                            dark: colorScheme == .dark)
             }
         } else {
             VStack {

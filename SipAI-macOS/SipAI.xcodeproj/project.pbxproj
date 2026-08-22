@@ -20,12 +20,14 @@
 		07CAEC2A5E5341C91F8F08F2 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2EEE78E188057F7BEC4230C /* APIClient.swift */; };
 		D80DA46AB451BCAAFC0341B9 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45E750E410EC9DC5FADF63D2 /* AppState.swift */; };
 		94D9EDE85AE67A1D65CE107B /* ChatManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 46BBDE49749EC75C3408BB41 /* ChatManager.swift */; };
+		A1C4E7B29F3D5081A6B0C213 /* ChatAttachment.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2D5F8C3A04E6192B7C1D324 /* ChatAttachment.swift */; };
 		615C9120EF66A00927C00623 /* ConfigManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90D9E610F1B687FEEEA5F3F0 /* ConfigManager.swift */; };
 		9F2150E9EBA27CEE0F7661AA /* ProjectManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 627BE7F4862F0C70EBECB106 /* ProjectManager.swift */; };
 		A6C13D4DC3D31B4C9102AD59 /* SipaiPaths.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D4019D3266F0F4ECA1A5154 /* SipaiPaths.swift */; };
 		FA0CE001B2C3D4E5F6071901 /* FactoryReset.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA0CE002B2C3D4E5F6071902 /* FactoryReset.swift */; };
 		D67A3CC2E8A083B931A35F43 /* SipAIApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 980A3D4407C14977B52F7DCF /* SipAIApp.swift */; };
 		D5026A5B82FD3D3F458EA82C /* MarkdownRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1268E460F00E4691E94EC0D6 /* MarkdownRenderer.swift */; };
+		AA5566778899AABBCC000001 /* NoteHTML.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB5566778899AABBCC000001 /* NoteHTML.swift */; };
 		3C1B154E252EB7E435B6596F /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 96DDDF99A7D666D8F6A3DF08 /* ChatView.swift */; };
 		DA4B348D09CCD338EFDA9AB0 /* MessageBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B8D3096C130003B31C6EEA6 /* MessageBubble.swift */; };
 		0DC88FD53F5C245817A5707F /* MessageInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AA61ABDF04650F28A38CC82 /* MessageInput.swift */; };
@@ -47,6 +49,7 @@
 		AA1122334455667788990000 /* NotesManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1122334455667788990000 /* NotesManager.swift */; };
 		AA1122334455667788990011 /* NotesSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1122334455667788990011 /* NotesSection.swift */; };
 		AA1122334455667788990022 /* NoteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB1122334455667788990022 /* NoteView.swift */; };
+		AA5566778899AABBCC000002 /* NoteWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB5566778899AABBCC000002 /* NoteWebView.swift */; };
 		AC0DE000B2C3D4E5F6071828 /* AgentComposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0DE001B2C3D4E5F6071829 /* AgentComposer.swift */; };
 		AC0DE002B2C3D4E5F607182A /* AgentLaunchOptions.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0DE003B2C3D4E5F607182B /* AgentLaunchOptions.swift */; };
 		AC0DE004B2C3D4E5F607182C /* ScheduledTaskCreator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC0DE005B2C3D4E5F607182D /* ScheduledTaskCreator.swift */; };
@@ -61,6 +64,7 @@
 		CD1122334455667788990000 /* approver.py in Resources */ = {isa = PBXBuildFile; fileRef = CE1122334455667788990000 /* approver.py */; };
 		CD2233445566778899001111 /* THIRD-PARTY-LICENSES.txt in Resources */ = {isa = PBXBuildFile; fileRef = CE2233445566778899001111 /* THIRD-PARTY-LICENSES.txt */; };
 		CD3344556677889900112222 /* Credits.rtf in Resources */ = {isa = PBXBuildFile; fileRef = CE3344556677889900112222 /* Credits.rtf */; };
+		CD5566778899AABBCC000003 /* katex in Resources */ = {isa = PBXBuildFile; fileRef = CE5566778899AABBCC000003 /* katex */; };
 		DE1122334455667788990000 /* NotificationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF1122334455667788990000 /* NotificationCoordinator.swift */; };
 		E01122334455667788990000 /* AgentRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11122334455667788990000 /* AgentRendering.swift */; };
 		E21122334455667788990000 /* LatexSymbols.swift in Sources */ = {isa = PBXBuildFile; fileRef = E31122334455667788990000 /* LatexSymbols.swift */; };
@@ -86,12 +90,14 @@
 		E2EEE78E188057F7BEC4230C /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient.swift"; sourceTree = "<group>"; };
 		45E750E410EC9DC5FADF63D2 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AppState.swift"; sourceTree = "<group>"; };
 		46BBDE49749EC75C3408BB41 /* ChatManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatManager.swift"; sourceTree = "<group>"; };
+		B2D5F8C3A04E6192B7C1D324 /* ChatAttachment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatAttachment.swift"; sourceTree = "<group>"; };
 		90D9E610F1B687FEEEA5F3F0 /* ConfigManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ConfigManager.swift"; sourceTree = "<group>"; };
 		627BE7F4862F0C70EBECB106 /* ProjectManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ProjectManager.swift"; sourceTree = "<group>"; };
 		1D4019D3266F0F4ECA1A5154 /* SipaiPaths.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SipaiPaths.swift"; sourceTree = "<group>"; };
 		FA0CE002B2C3D4E5F6071902 /* FactoryReset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "FactoryReset.swift"; sourceTree = "<group>"; };
 		980A3D4407C14977B52F7DCF /* SipAIApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SipAIApp.swift"; sourceTree = "<group>"; };
 		1268E460F00E4691E94EC0D6 /* MarkdownRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MarkdownRenderer.swift"; sourceTree = "<group>"; };
+		BB5566778899AABBCC000001 /* NoteHTML.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NoteHTML.swift"; sourceTree = "<group>"; };
 		96DDDF99A7D666D8F6A3DF08 /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ChatView.swift"; sourceTree = "<group>"; };
 		3B8D3096C130003B31C6EEA6 /* MessageBubble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MessageBubble.swift"; sourceTree = "<group>"; };
 		6AA61ABDF04650F28A38CC82 /* MessageInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MessageInput.swift"; sourceTree = "<group>"; };
@@ -113,6 +119,7 @@
 		BB1122334455667788990000 /* NotesManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NotesManager.swift"; sourceTree = "<group>"; };
 		BB1122334455667788990011 /* NotesSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NotesSection.swift"; sourceTree = "<group>"; };
 		BB1122334455667788990022 /* NoteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NoteView.swift"; sourceTree = "<group>"; };
+		BB5566778899AABBCC000002 /* NoteWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NoteWebView.swift"; sourceTree = "<group>"; };
 		AC0DE001B2C3D4E5F6071829 /* AgentComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AgentComposer.swift"; sourceTree = "<group>"; };
 		AC0DE003B2C3D4E5F607182B /* AgentLaunchOptions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AgentLaunchOptions.swift"; sourceTree = "<group>"; };
 		AC0DE005B2C3D4E5F607182D /* ScheduledTaskCreator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ScheduledTaskCreator.swift"; sourceTree = "<group>"; };
@@ -126,6 +133,7 @@
 		BC1122334455667788990000 /* MCPBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MCPBridge.swift"; sourceTree = "<group>"; };
 		CE1122334455667788990000 /* approver.py */ = {isa = PBXFileReference; lastKnownFileType = text.script.python; path = "approver.py"; sourceTree = "<group>"; };
 		CE2233445566778899001111 /* THIRD-PARTY-LICENSES.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "THIRD-PARTY-LICENSES.txt"; sourceTree = "<group>"; };
+		CE5566778899AABBCC000003 /* katex */ = {isa = PBXFileReference; lastKnownFileType = folder; path = "katex"; sourceTree = "<group>"; };
 		AA55BB66CC77DD88EE990001 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Signing.xcconfig"; sourceTree = "<group>"; };
 		CE3344556677889900112222 /* Credits.rtf */ = {isa = PBXFileReference; lastKnownFileType = text.rtf; path = "Credits.rtf"; sourceTree = "<group>"; };
 		DF1122334455667788990000 /* NotificationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NotificationCoordinator.swift"; sourceTree = "<group>"; };
@@ -199,6 +207,7 @@
 				E2EEE78E188057F7BEC4230C /* APIClient.swift */,
 				45E750E410EC9DC5FADF63D2 /* AppState.swift */,
 				46BBDE49749EC75C3408BB41 /* ChatManager.swift */,
+				B2D5F8C3A04E6192B7C1D324 /* ChatAttachment.swift */,
 				90D9E610F1B687FEEEA5F3F0 /* ConfigManager.swift */,
 				BC1122334455667788990000 /* MCPBridge.swift */,
 				DF1122334455667788990000 /* NotificationCoordinator.swift */,
@@ -223,6 +232,7 @@
 				B8C9D0E1F20314253647589A /* DesignSystem.swift */,
 				E31122334455667788990000 /* LatexSymbols.swift */,
 				1268E460F00E4691E94EC0D6 /* MarkdownRenderer.swift */,
+				BB5566778899AABBCC000001 /* NoteHTML.swift */,
 				6E5D4C3B2A190807F6E5D4C3 /* ShellEnvironment.swift */,
 				5A7F3C11B9204D6E8F1A2B30 /* TranscriptFollow.swift */,
 				5A0B1C2D3E4F506172839413 /* UpdaterAvailability.swift */,
@@ -249,6 +259,7 @@
 			isa = PBXGroup;
 			children = (
 				BB1122334455667788990022 /* NoteView.swift */,
+				BB5566778899AABBCC000002 /* NoteWebView.swift */,
 			);
 			path = "Notes";
 			sourceTree = "<group>";
@@ -294,6 +305,7 @@
 			children = (
 				CE1122334455667788990000 /* approver.py */,
 				CE2233445566778899001111 /* THIRD-PARTY-LICENSES.txt */,
+				CE5566778899AABBCC000003 /* katex */,
 				CE3344556677889900112222 /* Credits.rtf */,
 				E3F4A5B6C7D80912304B5C6D /* Assets.xcassets */,
 				4F3133CB82A42C2405ECFE76 /* Localizable.xcstrings */,
@@ -371,6 +383,7 @@
 				CD1122334455667788990000 /* approver.py in Resources */,
 				CD2233445566778899001111 /* THIRD-PARTY-LICENSES.txt in Resources */,
 				CD3344556677889900112222 /* Credits.rtf in Resources */,
+				CD5566778899AABBCC000003 /* katex in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -392,12 +405,14 @@
 				07CAEC2A5E5341C91F8F08F2 /* APIClient.swift in Sources */,
 				D80DA46AB451BCAAFC0341B9 /* AppState.swift in Sources */,
 				94D9EDE85AE67A1D65CE107B /* ChatManager.swift in Sources */,
+				A1C4E7B29F3D5081A6B0C213 /* ChatAttachment.swift in Sources */,
 				615C9120EF66A00927C00623 /* ConfigManager.swift in Sources */,
 				9F2150E9EBA27CEE0F7661AA /* ProjectManager.swift in Sources */,
 				A6C13D4DC3D31B4C9102AD59 /* SipaiPaths.swift in Sources */,
 				FA0CE001B2C3D4E5F6071901 /* FactoryReset.swift in Sources */,
 				D67A3CC2E8A083B931A35F43 /* SipAIApp.swift in Sources */,
 				D5026A5B82FD3D3F458EA82C /* MarkdownRenderer.swift in Sources */,
+				AA5566778899AABBCC000001 /* NoteHTML.swift in Sources */,
 				3C1B154E252EB7E435B6596F /* ChatView.swift in Sources */,
 				DA4B348D09CCD338EFDA9AB0 /* MessageBubble.swift in Sources */,
 				0DC88FD53F5C245817A5707F /* MessageInput.swift in Sources */,
@@ -418,6 +433,7 @@
 				AA1122334455667788990000 /* NotesManager.swift in Sources */,
 				AA1122334455667788990011 /* NotesSection.swift in Sources */,
 				AA1122334455667788990022 /* NoteView.swift in Sources */,
+				AA5566778899AABBCC000002 /* NoteWebView.swift in Sources */,
 				AC0DE000B2C3D4E5F6071828 /* AgentComposer.swift in Sources */,
 				AC0DE002B2C3D4E5F607182A /* AgentLaunchOptions.swift in Sources */,
 				AC0DE004B2C3D4E5F607182C /* ScheduledTaskCreator.swift in Sources */,
@@ -573,7 +589,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_ASSET_PATHS = "";
 				ENABLE_HARDENED_RUNTIME = NO;
 				ENABLE_PREVIEWS = YES;
@@ -588,7 +604,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 1.0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.sipai.desktop;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -603,7 +619,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_ASSET_PATHS = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
@@ -618,7 +634,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.0.0;
+				MARKETING_VERSION = 1.0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.sipai.desktop;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

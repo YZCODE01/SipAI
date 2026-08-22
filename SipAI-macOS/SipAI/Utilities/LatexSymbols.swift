@@ -1,6 +1,7 @@
 // LatexSymbols.swift
 // LaTeX symbol translation: a substitution table, `\mathbb`,
-// superscripts, subscripts, `\frac{a}{b}` → `(a)/(b)`, the
+// superscripts and subscripts (all-or-nothing — see `mappedWholly`),
+// `\frac{a}{b}` → `(a)/(b)`, the
 // `\[…\]` / `\(…\)` / `$…$` / `$$…$$` strippers, and the
 // `\text`/`\mathrm`/`\mathbf`/`\left`/`\right`/`\big`/`\Big` removers.
 // Called from `MarkdownRenderer` on non-code text so that `\pi`, `\sqrt`,
@@ -93,28 +94,38 @@ enum LatexSymbols {
             return String(mapped)
         }
 
-        // 3. Superscripts: ^{…} and ^x
-        t = regexReplace(t, pattern: #"\^\{([^}]+)\}"#) { match in
-            translate(match, using: superscript)
-        }
+        // 3. Superscripts: ^x, then ^{…}
+        //
+        //    The BARE form runs FIRST, and the order is load-bearing.
+        //    It cannot reach inside a braced group — `{` is not in its
+        //    character class — but it CAN reach the fallback spelling
+        //    the braced rule emits when a group is unmappable. Run the
+        //    other way round, `e^{-x^2}` falls back to `e^-x^2` and the
+        //    bare rule then lifts the `-` and the `2` independently,
+        //    producing `e⁻x²`: the exact confident-but-wrong rendering
+        //    the fallback exists to avoid.
         t = regexReplace(t, pattern: #"\^([0-9n+\-])"#) { match in
             translate(match, using: superscript)
         }
-
-        // 4. Subscripts: _{…} and _x
-        t = regexReplace(t, pattern: #"_\{([^}]+)\}"#) { match in
-            translate(match, using: `subscript`)
+        t = regexReplace(t, pattern: #"\^\{([^}]+)\}"#) { match in
+            mappedWholly(match, using: superscript) ?? "^" + match
         }
-        // Bare _x only in a MATH context: the char before the
-        // underscore must be a single standalone (Latin/Greek)
-        // letter, and the subscript must not continue as a word.
-        // Unguarded, ordinary snake_case prose would be mangled —
-        // tool_use → toolᵤse, old_string → oldₛtring.
+
+        // 4. Subscripts: _x, then _{…} — same ordering rule as above.
+        //
+        //    Bare _x only in a MATH context: the char before the
+        //    underscore must be a single standalone (Latin/Greek)
+        //    letter, and the subscript must not continue as a word.
+        //    Unguarded, ordinary snake_case prose would be mangled —
+        //    tool_use → toolᵤse, old_string → oldₛtring.
         t = regexReplace(
             t,
             pattern: #"(?<![A-Za-z0-9α-ωΑ-Ω][A-Za-zα-ωΑ-Ω])(?<=[A-Za-zα-ωΑ-Ω])_([0-9aeioujkrstx])(?![a-z])"#
         ) { match in
             translate(match, using: `subscript`)
+        }
+        t = regexReplace(t, pattern: #"_\{([^}]+)\}"#) { match in
+            mappedWholly(match, using: `subscript`) ?? "_" + match
         }
 
         // 5. \frac{a}{b} → (a)/(b)
@@ -135,14 +146,48 @@ enum LatexSymbols {
                           dotAll: true) { match in match }
 
         // 7. Drop presentation-only TeX control words.
+        //    A command that WRAPS its argument has to lose its BRACES
+        //    with it: removing the word alone leaves `\mathbf{v}` on
+        //    screen as `{v}`, which reads as a set, not a vector.
+        t = regexReplace(
+            t,
+            pattern: #"\\(?:text|mathrm|mathbf)\{([^{}]*)\}"#,
+            dotAll: false
+        ) { inner in inner }
+        //    Delimiter sizing takes no argument — `\left(` is a bare
+        //    word in front of the delimiter it sizes — so for these the
+        //    word alone is what goes.
         t = regexReplace(t,
-                          pattern: #"\\(text|mathrm|mathbf|left|right|big|Big)\b"#,
+                          pattern: #"\\(left|right|bigg|Bigg|big|Big)\b"#,
                           dotAll: false) { _ in "" }
 
         return t
     }
 
     // MARK: - Helpers
+
+    /// Map EVERY character, or none of them.
+    ///
+    /// A partial conversion is worse than no conversion: there is no
+    /// subscript `m`, so a per-character pass renders `x_{max}` as
+    /// `xmₐₓ` — which reads as a different expression rather than as an
+    /// unsupported one, and runs the subscript into the base. nil means
+    /// "leave this legible instead", and the caller falls back to the
+    /// flat `x_max` spelling.
+    ///
+    /// The BARE `^x` / `_x` forms need no such guard: their patterns
+    /// already admit only characters the maps cover.
+    private static func mappedWholly(_ s: String,
+                                     using map: [Character: Character]) -> String? {
+        guard !s.isEmpty else { return nil }
+        var out = String()
+        out.reserveCapacity(s.count)
+        for ch in s {
+            guard let mapped = map[ch] else { return nil }
+            out.append(mapped)
+        }
+        return out
+    }
 
     /// Apply a per-character lookup, passing through anything not found.
     private static func translate(_ s: String,

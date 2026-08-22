@@ -1,12 +1,13 @@
 # Third-party licences
 
 SipAI itself is MIT-licensed — see [LICENSE](LICENSE). It links and
-redistributes **one** third-party component, reproduced in full below.
+redistributes **two** third-party components, reproduced in full below.
 Nothing else in this repository is derived from third-party code.
 
 | Component | Version | Licence | Source |
 |---|---|---|---|
 | Sparkle | 2.9.5 | MIT, plus the external licences noted in its own text | [sparkle-project/Sparkle](https://github.com/sparkle-project/Sparkle) |
+| KaTeX | 0.18.4 | MIT | [KaTeX/KaTeX](https://github.com/KaTeX/KaTeX) |
 
 Sparkle is the update framework behind **Settings → Updates**. It is
 pinned as a Swift package (`SipAI.xcodeproj/…/Package.resolved`) and
@@ -15,9 +16,17 @@ to travel with every copy that ships — a byte-identical plain-text copy
 lives at `SipAI-macOS/SipAI/Resources/THIRD-PARTY-LICENSES.txt`, which is
 bundled into `SipAI.app`.
 
+KaTeX lays out the mathematics in notes — both the Preview pane and
+"Save as PDF" render through it. It is bundled as `SipAI/Resources/katex`
+(stylesheet, script and the WOFF2 font files it needs) and copied into
+`SipAI.app`, so it ships with every copy. Nothing is fetched at runtime.
+Only the WOFF2 renditions of the KaTeX fonts are included; the WOFF and
+TrueType fallbacks are dropped because WebKit never requests them.
+
 Apple's system frameworks (SwiftUI, AppKit, Foundation, …) and SF Symbols
-are used under Apple's own terms and are not redistributed here. No
-fonts, icons or artwork from third parties are bundled.
+are used under Apple's own terms and are not redistributed here. Aside
+from the KaTeX maths fonts above, no fonts, icons or artwork from third
+parties are bundled.
 
 ---
 
@@ -160,4 +169,34 @@ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
 STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
 IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
+```
+
+---
+
+## KaTeX 0.18.4
+
+Retrieved from the KaTeX 0.18.4 distribution, unmodified.
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2013-2020 Khan Academy and other contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```

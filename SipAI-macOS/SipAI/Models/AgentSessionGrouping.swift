@@ -1,6 +1,8 @@
 // AgentSessionGrouping.swift
-// How an agent's sidebar list is bucketed: None / Folder / Date / State
-// / Custom. Grouping state lives in this app's own config.json.
+// What an agent's sidebar section shows: which TIER it is in at all
+// (`AgentSectionTier`), and how its list is bucketed once there is one
+// — None / Folder / Date / State / Custom. Grouping state lives in this
+// app's own config.json.
 //
 // Two things about the buckets worth knowing before changing them:
 //
@@ -12,6 +14,67 @@
 //   path; a sidebar has room for one folder name (see `detail` below).
 
 import Foundation
+
+// MARK: - Section tier
+
+/// What an agent's sidebar section can DO right now, derived from three
+/// facts the section already holds.
+///
+/// One value answers all three of the questions that used to be asked
+/// separately — the header suffix, which body row renders, and whether
+/// the grouping menu is offered — so they cannot contradict each other.
+/// They did: the header appended "(read only)" whenever the agent was
+/// not ready, directly above a body row saying the CLI is not installed.
+/// On a machine with no Claude Code and no session store, that is a
+/// section claiming to hold sessions it cannot drive while holding none
+/// at all.
+///
+/// Read-only is a claim about ROWS: sessions that list, open and read
+/// but cannot be sent to. An agent with nothing to list has nothing to
+/// be read-only about, whatever its credentials are doing — so the
+/// suffix is earned by rows, not by the absence of a binary.
+enum AgentSectionTier {
+    /// CLI installed and signed in: new sessions, sends, hand-offs.
+    case interactive
+    /// Rows to read, no way to drive them — the CLI is missing, or it
+    /// is present without working auth. Sessions a desktop app wrote
+    /// land here on a machine that never installed the CLI.
+    case readOnly
+    /// CLI present, auth missing, nothing synced yet. Nothing to read;
+    /// what the user needs is the sign-in step.
+    case notConfigured
+    /// No CLI and no sessions. The section stays in the sidebar to say
+    /// the agent is supported and what to install, and says nothing
+    /// about reading.
+    case unavailable
+
+    /// `isReady` is installed AND signed in (`AgentManager.isAgentReady`);
+    /// `hasRows` counts scheduled tasks as well as regular sessions,
+    /// since a task's runs are rows too.
+    ///
+    /// Rows outrank the binary deliberately: an agent whose CLI lost its
+    /// auth still lists everything it recorded, and that list is the
+    /// point of the tier.
+    static func resolve(isReady: Bool,
+                        isInstalled: Bool,
+                        hasRows: Bool) -> AgentSectionTier {
+        if isReady { return .interactive }
+        if hasRows { return .readOnly }
+        return isInstalled ? .notConfigured : .unavailable
+    }
+
+    /// Whether the section header names the tier — only `.readOnly`
+    /// does. The other two non-interactive tiers say more in one body
+    /// sentence than a two-word suffix could, and a suffix promising
+    /// readable sessions over a section that lists none is simply false.
+    var namesTierInTitle: Bool { self == .readOnly }
+
+    /// Grouping is a READ operation, so it is offered wherever there is
+    /// something to group — and to an installed agent whose first
+    /// session has not landed yet, so the choice is already made when
+    /// one does.
+    var offersGrouping: Bool { self != .unavailable }
+}
 
 // MARK: - Mode
 

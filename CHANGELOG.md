@@ -12,6 +12,50 @@ GitHub release body, and — once that window exists — the "what's new"
 panel shown after updating. Write each entry for the person reading it
 inside the app, not for someone reading a diff.
 
+## [1.0.1] — 2026-08-21
+
+### Added
+
+- **Attach files to a chat.** Drag an image, a PDF, or a text file onto
+  the message box — or use the **+** button — to send it with your next
+  message. Images and PDFs go to models that can read them; text files
+  are included inline, so you can keep asking about them in later turns.
+  A full paper fits: a PDF's text travels whole up to 400k characters.
+- **Notes render mathematics, and export to PDF.** Equations are now laid
+  out properly — fractions, integrals, matrices, aligned equations — instead
+  of approximated. A note can be saved as **PDF** as well as Markdown, from
+  the ••• menu.
+
+### Fixed
+
+- **Long-thinking models no longer fail with "Network error".** Chat
+  requests now stream from the provider, so the connection stays alive
+  while a reasoning model thinks for minutes before its first word — the
+  reply still arrives in one piece. Previously, anything on the network
+  path that drops idle connections (a local proxy, a corporate gateway)
+  killed the request before the first byte arrived.
+- **A reply could go missing if you switched away while it was arriving.**
+  Send a message, then open another chat, a note, or an agent session, and
+  the answer is now delivered to the conversation that asked for it. You can
+  leave and come back mid-reply, and a turn that is interrupted or fails now
+  says so when you return.
+- Mathematics in chat and agent transcripts renders more faithfully —
+  vectors and subscripts like `x_max` no longer come out garbled.
+- An agent with no CLI installed and no saved sessions no longer shows an
+  empty section labelled "(read only)".
+- The "no output yet" notice on an agent turn now waits longer before it
+  appears, so a slow first response isn't flagged as a problem.
+- More of the Simplified Chinese interface is translated: find and global
+  search, the model-setup screens, parts of onboarding, the "You" label
+  above your messages, and the built-in starter role.
+
+### Security
+
+- Hardened the new note-rendering and file-attachment features against
+  malformed input: crafted content can't crash note preview, attachments
+  are bounded by file size and image dimensions before being read, and
+  notes render in a tighter sandbox.
+
 ## [1.0.0] — 2026-08-17
 
 First public release.
@@ -45,4 +89,5 @@ First public release.
   **Settings → Updates**.
 - **English and Simplified Chinese** throughout.
 
+[1.0.1]: https://github.com/YZCODE01/SipAI/releases/tag/v1.0.1
 [1.0.0]: https://github.com/YZCODE01/SipAI/releases/tag/v1.0.0

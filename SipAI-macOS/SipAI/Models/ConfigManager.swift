@@ -80,9 +80,57 @@ struct DisplaySettings {
     static let defaultTagline = "My AI, My Way."
     static let taglineCharLimit = 100
 
-    static let defaultUserLabel = "You"
+    /// LOCALIZED, and computed for the same reason `defaultRoles` is:
+    /// this is a word the user reads above their own messages, not a
+    /// wire value, and a stored `static let` would resolve before the
+    /// bundle's language is the one on screen. It is only ever a
+    /// DEFAULT — `user_label` is written to config.json when the user
+    /// edits or resets the field, and is that user's data from then on.
+    ///
+    /// `defaultAILabel` stays "AI": it reads the same in both languages
+    /// and is already what a Chinese UI would call it.
+    static var defaultUserLabel: String {
+        String(localized: "You",
+               comment: "Default label shown above the user's own messages")
+    }
     static let defaultAILabel = "AI"
     static let labelCharLimit = 25
+
+    /// Every spelling the app itself would produce for the user label:
+    /// the source string, plus each shipped localization of it.
+    ///
+    /// Needed because `user_label` is written on EVERY `setDisplay`
+    /// call, so any install that has ever flipped a Display switch,
+    /// edited the tagline or opened Labels has the default frozen into
+    /// config.json in whatever language was on screen at the time.
+    /// Without this, localizing the default would reach only installs
+    /// that had never touched Settings — a real config on the author's
+    /// machine already carried `"user_label": "You"`.
+    ///
+    /// A stored value in this set means the user never CHOSE a label, so
+    /// it is ignored on load and dropped on save and the localized
+    /// default applies again — the same "old configs converge" rule the
+    /// retired keys in `setDisplay` follow. Anything else is the user's
+    /// own word and is kept exactly as they typed it.
+    ///
+    /// A `let` is correct despite `defaultUserLabel` being computed:
+    /// this enumerates ALL localizations rather than resolving the
+    /// current one, so it does not depend on the language in force.
+    static let userLabelDefaultSpellings: Set<String> = {
+        var out: Set<String> = ["You"]
+        for code in Bundle.main.localizations {
+            guard let path = Bundle.main.path(forResource: code, ofType: "lproj"),
+                  let bundle = Bundle(path: path) else { continue }
+            out.insert(bundle.localizedString(forKey: "You", value: "You",
+                                              table: "Localizable"))
+        }
+        return out
+    }()
+
+    /// True when a stored label is merely some language's default.
+    static func userLabelIsDefault(_ value: String) -> Bool {
+        userLabelDefaultSpellings.contains(value.trimmingCharacters(in: .whitespaces))
+    }
 }
 
 @MainActor
@@ -319,7 +367,10 @@ final class ConfigManager: ObservableObject {
         s.showTokenAgent = d["token_agent"] as? Bool ?? legacyToken ?? true
         s.showSidebarBrand = d["sidebar_brand"] as? Bool ?? true
         s.spellCheck = d["spell_check"] as? Bool ?? true
-        if let ul = (d["user_label"] as? String)?.trimmingCharacters(in: .whitespaces), !ul.isEmpty {
+        // A stored value that is only some language's default is not a
+        // choice — leave `userLabel` on the localized default.
+        if let ul = (d["user_label"] as? String)?.trimmingCharacters(in: .whitespaces),
+           !ul.isEmpty, !DisplaySettings.userLabelIsDefault(ul) {
             s.userLabel = ul
         }
         if let al = (d["ai_label"] as? String)?.trimmingCharacters(in: .whitespaces), !al.isEmpty {
@@ -408,7 +459,15 @@ final class ConfigManager: ObservableObject {
         d["spell_check"] = s.spellCheck
         // `d` starts from the stored dict, so any key this app does not
         // model passes through this save untouched — which is the point.
-        d["user_label"] = s.userLabel
+        // Written only when the user actually picked a word. Writing the
+        // default would freeze one language's spelling into a file the
+        // CLI shares — and the CLI falls back to "You" on a missing key,
+        // which is what it already shows on a fresh install.
+        if DisplaySettings.userLabelIsDefault(s.userLabel) {
+            d.removeValue(forKey: "user_label")
+        } else {
+            d["user_label"] = s.userLabel
+        }
         d["ai_label"] = s.aiLabel
         d["agent_labels"] = s.agentLabels
         d["font_tier"] = s.fontTier
@@ -539,9 +598,23 @@ final class ConfigManager: ObservableObject {
     ///
     /// ONE role, deliberately: a single worked example says what a role
     /// is, and "Add Role" is right there.
-    static let defaultRoles: [RoleConfig] = [
-        RoleConfig(name: "Code Reviewer", prompt: "You are a senior code reviewer. When the user shares code, analyze it for: bugs and logic errors, security vulnerabilities, performance issues, readability and style. Be specific — reference line numbers when possible. Suggest concrete fixes. If the code is good, say so briefly. If no code is shared, ask for it."),
-    ]
+    ///
+    /// LOCALIZED, and computed rather than stored for that reason: this
+    /// is example copy the user reads and edits, not a wire value, so a
+    /// Chinese install must not open on an English prompt. The name is
+    /// `RoleConfig.id`, so once the user saves, the localized name IS
+    /// the identity — it is user data from that point and never
+    /// re-resolves. A `static let` would freeze the resolution at first
+    /// touch, which is before the pane that shows it exists.
+    static var defaultRoles: [RoleConfig] {
+        [
+            RoleConfig(
+                name: String(localized: "Code Reviewer",
+                             comment: "Name of the built-in starter role shipped on a fresh install"),
+                prompt: String(localized: "You are a senior code reviewer. When the user shares code, analyze it for: bugs and logic errors, security vulnerabilities, performance issues, readability and style. Be specific — reference line numbers when possible. Suggest concrete fixes. If the code is good, say so briefly. If no code is shared, ask for it.",
+                               comment: "System prompt of the built-in starter role shipped on a fresh install")),
+        ]
+    }
 
     /// Persist the appearance override. No-op when unchanged to avoid a
     /// round-trip write on every launch.

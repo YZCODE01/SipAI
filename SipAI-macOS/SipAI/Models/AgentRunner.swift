@@ -669,10 +669,16 @@ final class AgentRunner: ObservableObject {
     }
 
     /// How long a turn may produce NOTHING before the transcript says
-    /// so. Generous on purpose: a cold agent start behind a slow link
-    /// can legitimately take tens of seconds to first token, and this
-    /// row is worth nothing if it cries wolf.
-    private static let firstOutputGrace: TimeInterval = 60
+    /// so. Generous on purpose: a cold agent start behind a slow link,
+    /// or a first tool call that takes a while to come back, can
+    /// legitimately run for minutes before the first visible event,
+    /// and this row is worth nothing if it cries wolf.
+    ///
+    /// `AgentSessionView.stalledNoticeRow` NAMES this duration in its
+    /// sentence, in every language it is translated into. Moving the
+    /// number here means moving that string and its translations with
+    /// it, or the transcript reports a wait it never made.
+    private static let firstOutputGrace: TimeInterval = 180
 
     /// Bound the SILENCE at the start of a turn — the one failure mode
     /// the transcript had no way to describe.

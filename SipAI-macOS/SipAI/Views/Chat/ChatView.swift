@@ -156,8 +156,6 @@ struct ChatView: View {
     /// Reset per chat by `reloadFromAppState`; this view is reused
     /// across chats rather than re-created, so nothing else resets it.
     @State private var messageDisplayCap = 40
-    @State private var sending: Bool = false
-    @State private var turnStartedAt: Date? = nil
     @State private var liveMessages: [ChatMessage] = []
     @State private var liveTitle: String = ""
     /// `last_user_message_at` of the loaded chat, carried in live state
@@ -173,11 +171,10 @@ struct ChatView: View {
     @State private var errorBanner: String? = nil
     @State private var infoBanner: String? = nil
     @State private var noteGenerating: Bool = false
-    /// The in-flight send, retained so the Stop button can cancel it
-    /// (URLSession honors cooperative cancellation).
-    @State private var sendTask: Task<Void, Never>? = nil
-    /// Files picked via the + button, inlined into the NEXT send.
-    @State private var pendingAttachments: [URL] = []
+    /// Files staged for the NEXT send — picked with the + button or
+    /// dropped onto the composer. Loaded at stage time, so what is
+    /// here is already known to be sendable.
+    @State private var pendingAttachments: [ChatAttachment] = []
     /// The sent message currently open for editing, and its draft text.
     /// Held HERE rather than inside the row: this view rebuilds its
     /// message list on every reload, and a half-typed edit must not
@@ -206,6 +203,27 @@ struct ChatView: View {
     @Environment(\.sipFontScale) private var fontScale
 
     private var apiClient: APIClient { APIClient(config: config) }
+
+    /// Whether THIS chat has a reply in flight — asked of the manager,
+    /// never held here.
+    ///
+    /// The router replaces this view on every detour, so a view-owned
+    /// flag describes the pane rather than the turn: it comes back
+    /// false for a chat whose turn is still running, leaving the
+    /// composer idle, the clock stopped and Stop with nothing to stop.
+    /// Deriving it means returning to a chat mid-turn shows the turn.
+    private var sending: Bool {
+        guard let slug = loadedChatSlug, !slug.isEmpty else { return false }
+        return chats.isChatInFlight(slug: slug, project: loadedChatProject)
+    }
+
+    /// The in-flight turn's own start time, so the "Sipping… (m:ss)"
+    /// clock counts from the send rather than from whenever this view
+    /// happened to be created.
+    private var turnStartedAt: Date? {
+        guard let slug = loadedChatSlug, !slug.isEmpty else { return nil }
+        return chats.chatTurn(slug: slug, project: loadedChatProject)?.startedAt
+    }
 
     private var isEmptyState: Bool {
         liveMessages.isEmpty && !sending
@@ -268,6 +286,18 @@ struct ChatView: View {
                 guard FileManager.default.fileExists(atPath: url.path) else { return }
             }
             persistCurrentChat()
+        }
+        // A reply (or a failure) delivered to this chat by the manager,
+        // possibly while the user was looking at something else. The
+        // reply is already on disk — this is what puts it on screen
+        // without making the user switch away and back to see it.
+        .onReceive(NotificationCenter.default.publisher(for: .sipChatMessagesChanged)) { note in
+            guard let slug = note.userInfo?["slug"] as? String,
+                  slug == loadedChatSlug,
+                  (note.userInfo?["project"] as? String ?? "")
+                      == (loadedChatProject ?? "") else { return }
+            reloadMessagesFromDisk()
+            applyTurnOutcome()
         }
         .onReceive(NotificationCenter.default.publisher(for: .sipChatRenamed)) { note in
             // Keep the title bar (and the next persist) in sync when the
@@ -374,7 +404,7 @@ struct ChatView: View {
             // through to the catcher on the container's background).
             UnifiedInputCard(
                 draft: $draft,
-                sending: $sending,
+                sending: sending,
                 noteGenerating: $noteGenerating,
                 // Empty state: nothing to summarise and nothing to
                 // find, so both controls are dimmed by the same flag.
@@ -383,6 +413,9 @@ struct ChatView: View {
                 onSend: send,
                 onStop: stopSending,
                 onUpload: handleUpload,
+                attachments: pendingAttachments,
+                onRemoveAttachment: removeAttachment,
+                onDropFiles: stageAttachments,
                 onGenerateNote: generateNote,
                 onSelectProject: changeProject,
                 onToggleFind: { refreshFind() }
@@ -656,7 +689,7 @@ struct ChatView: View {
                                 )
                             } else {
                                 MessageBubble(
-                                    message: msg,
+                                    message: displayMessage(msg),
                                     onEdit: canBranch(from: msg)
                                         ? { beginMessageEdit(msg) } : nil,
                                     editHint: String(
@@ -758,13 +791,16 @@ struct ChatView: View {
             // session's composer (AgentSessionView.inputArea).
             UnifiedInputCard(
                 draft: $draft,
-                sending: $sending,
+                sending: sending,
                 noteGenerating: $noteGenerating,
                 canGenerateNote: !liveMessages.isEmpty,
                 find: find,
                 onSend: send,
                 onStop: stopSending,
                 onUpload: handleUpload,
+                attachments: pendingAttachments,
+                onRemoveAttachment: removeAttachment,
+                onDropFiles: stageAttachments,
                 onGenerateNote: generateNote,
                 onSelectProject: changeProject,
                 onToggleFind: { refreshFind() }
@@ -815,9 +851,13 @@ struct ChatView: View {
     /// chat nobody is searching.
     private func refreshFind() {
         find.refresh {
+            // Counted on what the transcript DRAWS: an inlined
+            // attachment is stripped from the bubble, so a match
+            // inside one would be a number with nothing to tint.
             liveMessages.map {
                 FindableRow(id: $0.id,
-                            text: MarkdownRenderer.plainText($0.content))
+                            text: MarkdownRenderer.plainText(
+                                ChatAttachment.strippingInlineBlocks(from: $0.content)))
             }
         }
     }
@@ -870,51 +910,106 @@ struct ChatView: View {
         }
     }
 
-    // MARK: - Upload handler
+    // MARK: - Attachments
 
-    /// Per-file cap on inlined attachment content: text goes into the
-    /// prompt, and an oversized file is refused rather than silently
-    /// truncated mid-thought.
-    private static let attachmentCharLimit = 100_000
+    /// Stage files for the next message. Shared by the + button and by
+    /// a drop onto the composer, so both refuse the same things in the
+    /// same words.
+    ///
+    /// Every file is read, decoded and measured HERE rather than at
+    /// send. A file the app cannot use is something to learn while
+    /// still picking files; the same refusal at send costs a typed
+    /// message and produces no reply.
+    private func stageAttachments(_ urls: [URL]) {
+        var refused: [String] = []
+        var staged = false
+        for url in urls where url.isFileURL {
+            guard pendingAttachments.count < AttachmentLimits.maxPerMessage else {
+                refused.append(AttachmentError.tooMany.localizedDescription)
+                break
+            }
+            // The same file dropped twice is one attachment.
+            guard !pendingAttachments.contains(where: { $0.url == url }) else { continue }
+            do {
+                pendingAttachments.append(try ChatAttachment.load(url))
+                staged = true
+            } catch {
+                refused.append(error.localizedDescription)
+            }
+        }
+        if !refused.isEmpty {
+            errorBanner = refused.joined(separator: "\n")
+        }
+        // The chips are the receipt for a successful attach. The banner
+        // is spent only on what a chip cannot show — that a file was
+        // cut short, which changes what the model will actually read.
+        // PDFs and text files have DIFFERENT ceilings (a PDF's text is
+        // billed once, an inlined file rides every later turn), so the
+        // sentence is grouped per ceiling rather than naming one number
+        // that is wrong for half the files.
+        if staged {
+            let cut = pendingAttachments.filter { $0.textTruncated }
+            if !cut.isEmpty {
+                let byCap = Dictionary(grouping: cut) { a in
+                    if case .pdf = a.kind { return AttachmentLimits.pdfTextCharLimit }
+                    return AttachmentLimits.textCharLimit
+                }
+                infoBanner = byCap.sorted { $0.key < $1.key }.map { cap, files in
+                    String(
+                        localized: "Only the first \(cap / 1000)k characters of \(files.map(\.name).joined(separator: ", ")) are sent.",
+                        comment: "Banner: an attached file was truncated to the inline limit")
+                }.joined(separator: "\n")
+            }
+        }
+    }
 
     private func handleUpload() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = true
-        panel.prompt = "Upload"
-        panel.message = "Select files to attach to your message"
-        if panel.runModal() == .OK, !panel.urls.isEmpty {
-            pendingAttachments.append(contentsOf: panel.urls)
-            let names = pendingAttachments.map { $0.lastPathComponent }
-            infoBanner = String(
-                localized: "Attached to next message: \(names.joined(separator: ", "))",
-                comment: "Banner listing files that will be inlined into the next send")
-        }
+        panel.prompt = String(localized: "Attach",
+                              comment: "Confirm button of the chat attachment picker")
+        panel.message = String(localized: "Select files to attach to your message",
+                               comment: "Prompt of the chat attachment picker")
+        guard panel.runModal() == .OK else { return }
+        stageAttachments(panel.urls)
     }
 
-    /// Read the pending attachments as text for inlining. Returns nil
-    /// (and sets the error banner) if any file is unreadable or too
-    /// large — failing the send beats silently dropping the file the
-    /// user just attached.
-    private func renderedAttachments() -> String? {
-        var blocks: [String] = []
-        for url in pendingAttachments {
-            guard let text = try? String(contentsOf: url, encoding: .utf8) else {
-                errorBanner = String(
-                    localized: "Could not read \(url.lastPathComponent) as text — remove it or attach a text file.",
-                    comment: "Send-time error for an unreadable attachment")
-                return nil
-            }
-            guard text.count <= Self.attachmentCharLimit else {
-                errorBanner = String(
-                    localized: "\(url.lastPathComponent) is too large to inline (over \(Self.attachmentCharLimit / 1000)k characters).",
-                    comment: "Send-time error for an oversized attachment")
-                return nil
-            }
-            blocks.append("--- Attached file: \(url.lastPathComponent) ---\n\(text)")
+    private func removeAttachment(_ id: UUID) {
+        pendingAttachments.removeAll { $0.id == id }
+    }
+
+    /// The message body as it will be STORED, and therefore replayed on
+    /// every later turn: text attachments inlined ahead of what the
+    /// user typed, so a follow-up question about the file still has the
+    /// file. Images and PDFs are deliberately absent — they ride the
+    /// one request that carries them (see `ChatAttachment`).
+    private func outgoingContent(for text: String) -> String {
+        let blocks = pendingAttachments.compactMap { a -> String? in
+            guard a.isText, let t = a.text else { return nil }
+            return ChatAttachment.inlineBlock(name: a.name, text: t,
+                                              truncated: a.textTruncated)
         }
-        return blocks.isEmpty ? "" : "\n\n" + blocks.joined(separator: "\n\n")
+        guard !blocks.isEmpty else { return text }
+        return blocks.joined(separator: "\n\n") + "\n\n" + text
+    }
+
+    /// A stored message as the transcript DRAWS it: inlined attachment
+    /// blocks removed. The paperclip line under the bubble already
+    /// names the files, and a 50k-character dump between the reader and
+    /// their own question is a wall to scroll past.
+    ///
+    /// Display only — the stored message keeps the block, which is what
+    /// makes the follow-up turn work. `refreshFind` applies the same
+    /// transform, or the counter would name matches nothing tints.
+    private func displayMessage(_ m: ChatMessage) -> ChatMessage {
+        guard m.role == "user" else { return m }
+        let stripped = ChatAttachment.strippingInlineBlocks(from: m.content)
+        guard stripped != m.content else { return m }
+        return ChatMessage(id: m.id, role: m.role, content: stripped,
+                           model: m.model, time: m.time, tokens: m.tokens,
+                           files: m.files)
     }
 
     // MARK: - Data loading & sending
@@ -1012,15 +1107,16 @@ struct ChatView: View {
             liveTitle = ""
             liveLastUserMessageAt = nil
         }
-        // Transient turn state belongs to the OUTGOING chat: without
-        // this reset the incoming chat shows the old chat's "Sipping…"
-        // spinner (denying an empty chat its empty state) and later
-        // inherits its error banner. The in-flight task itself keeps
-        // running — its reply is delivered to the right chat by
-        // identity capture in send().
+        // Transient PANE state belongs to the OUTGOING chat: without
+        // this reset the incoming chat inherits the old chat's error
+        // banner and its half-open find.
+        //
+        // The turn itself is no longer in this list. `sending` and
+        // `turnStartedAt` are read off `ChatManager`, so they follow
+        // the CHAT rather than the pane — an incoming chat with a live
+        // turn correctly shows the spinner, and an incoming chat
+        // without one correctly does not.
         if !sameChat {
-            sending = false
-            turnStartedAt = nil
             errorBanner = nil
             infoBanner = nil
             pendingAttachments = []
@@ -1043,6 +1139,45 @@ struct ChatView: View {
         }
         loadedChatSlug = appState.openChatSlug
         loadedChatProject = appState.openChatProject
+        // Anything the chat's last turn left unsaid — a truncation, a
+        // Stop, a failure that landed while this conversation was off
+        // screen. Consumed here so it is shown once, on the chat it
+        // belongs to, whichever view instance gets there first.
+        applyTurnOutcome()
+    }
+
+    /// Re-read the open chat's messages after the manager delivered
+    /// something into it. Messages only: the draft, the find, the
+    /// expanded window and any open edit belong to the pane and have
+    /// not changed.
+    private func reloadMessagesFromDisk() {
+        guard let slug = loadedChatSlug,
+              let chat = chats.loadChat(slug: slug, project: loadedChatProject)
+        else { return }
+        liveMessages = chat.messages
+        liveLastUserMessageAt = chat.lastUserMessageAt
+    }
+
+    /// Show what the chat's last turn left behind, then forget it — an
+    /// outcome describes one turn, and must neither be shown twice nor
+    /// follow the user into the next conversation.
+    private func applyTurnOutcome() {
+        guard let slug = loadedChatSlug, !slug.isEmpty,
+              let outcome = chats.consumeTurnOutcome(slug: slug,
+                                                     project: loadedChatProject)
+        else { return }
+        switch outcome {
+        case .truncated:
+            infoBanner = String(
+                localized: "Response may be incomplete \u{2014} the model reached its output limit.",
+                comment: "Truncation warning")
+        case .interrupted:
+            infoBanner = String(
+                localized: "Interrupted — the reply was stopped before it arrived.",
+                comment: "Chat banner after the user stops an in-flight reply")
+        case .failed(let message):
+            errorBanner = message
+        }
     }
 
     /// Move the open chat to another project (nil = root "Chats") — the
@@ -1083,7 +1218,9 @@ struct ChatView: View {
 
     private func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !sending else { return }
+        // An image with no words is a legitimate message — "what is
+        // this?" is implied by the act of attaching it.
+        guard !text.isEmpty || !pendingAttachments.isEmpty, !sending else { return }
 
         guard let modelId = appState.activeModel ?? config.defaultModel else {
             if agents.hasInstalledAgent {
@@ -1098,16 +1235,17 @@ struct ChatView: View {
             return
         }
 
-        // Inline any pending attachments into the outgoing content;
-        // an unreadable/oversized file aborts the send with a banner
-        // (the user just attached it — dropping it silently is worse).
-        guard let attachmentBlock = renderedAttachments() else { return }
-        var userMessage = ChatMessage(role: "user", content: text + attachmentBlock)
+        var userMessage = ChatMessage(role: "user", content: outgoingContent(for: text))
         if !pendingAttachments.isEmpty {
-            userMessage.files = pendingAttachments
-                .map { $0.lastPathComponent }
-                .joined(separator: ", ")
+            // The one trace an image leaves on disk, and the key the
+            // CLI writes and reads for the same purpose.
+            userMessage.files = pendingAttachments.map(\.name).joined(separator: ", ")
         }
+        // Images and PDFs ride THIS request and are never stored, so
+        // they have to be carried into the turn separately. The text
+        // ones are already inside `userMessage.content`; sending them
+        // again here would put every attached file in twice.
+        let sentAttachments = pendingAttachments.filter { !$0.isText }
         pendingAttachments = []
         liveMessages.append(userMessage)
         // What the sidebar shows and orders by. Stamped HERE, at the
@@ -1119,20 +1257,16 @@ struct ChatView: View {
         // another chat while the reply is in flight.
         let targetSlug = persistCurrentChat()
         let targetProject = loadedChatProject
-        // The same identity, published so the SIDEBAR can see this chat
-        // is working — `sending` below is this pane's flag and is reset
-        // on a switch, which is precisely when a row has to keep saying
-        // it is live. Cleared by the task's `defer`, whichever way the
-        // turn ends.
-        chats.setChatInFlight(true, slug: targetSlug, project: targetProject)
         draft = ""
         // Drop the stashed copy too, or switching away and back would
         // resurrect the just-sent text into the composer.
         stashComposerDraft()
-        sending = true
-        turnStartedAt = Date()
         errorBanner = nil
         infoBanner = nil
+        // Whatever the PREVIOUS turn left unsaid is settled — this one
+        // supersedes it, and an outcome that outlived its turn would
+        // surface under the new reply.
+        chats.clearTurnOutcome(slug: targetSlug, project: targetProject)
 
         let systemPrompt: String
         if let role = appState.activeRole {
@@ -1142,57 +1276,53 @@ struct ChatView: View {
             systemPrompt = general.isEmpty ? "You are a helpful assistant." : general
         }
         let snapshot = liveMessages
+        let startedAt = Date()
 
-        sendTask = Task {
-            defer { sendTask = nil }
+        // NOTHING in here may write this view's `@State`, and nothing
+        // may read it to decide where the reply goes. The centre-pane
+        // router destroys this view the moment the user clicks a
+        // session or a note, and a destroyed view's `@State` still
+        // reads back the values it held when it died — so a
+        // `loadedChatSlug == targetSlug` test passes for a view nobody
+        // is looking at, and the reply is appended to a state box that
+        // renders nowhere and then written over the live file. The turn
+        // outlives the pane; its result must be addressed to the CHAT.
+        let task = Task { @MainActor in
             // Every exit from here — reply, error, Stop — releases the
-            // row. The view's own `sending` flag cannot do this job:
-            // this task outlives the view when the user routes away.
-            defer {
-                chats.setChatInFlight(false, slug: targetSlug,
-                                      project: targetProject)
-            }
+            // row and the sidebar's activity dot.
+            defer { chats.endTurn(slug: targetSlug, project: targetProject) }
             do {
                 let result = try await apiClient.sendChat(
                     messages: snapshot,
                     modelId: modelId,
-                    systemPrompt: systemPrompt
+                    systemPrompt: systemPrompt,
+                    attachments: sentAttachments
                 )
                 let reply = ChatMessage(role: "assistant", content: result.text, model: modelId, time: result.time,
                                         tokens: result.usage.map { $0.input + $0.output })
-                sending = false
-                turnStartedAt = nil
-                if loadedChatSlug == targetSlug && loadedChatProject == targetProject {
-                    liveMessages.append(reply)
-                    if result.truncated {
-                        infoBanner = String(localized: "Response may be incomplete \u{2014} the model reached its output limit.", comment: "Truncation warning")
-                    }
-                    persistCurrentChat()
-                } else if var chat = chats.loadChat(slug: targetSlug, project: targetProject) {
-                    // The user switched chats mid-flight — deliver the
-                    // reply to the chat that asked, on disk only.
-                    chat.messages.append(reply)
-                    chats.saveChat(chat)
-                }
+                chats.appendAssistantReply(reply,
+                                           slug: targetSlug,
+                                           project: targetProject,
+                                           outcome: result.truncated ? .truncated : nil)
             } catch {
-                sending = false
-                turnStartedAt = nil
-                if error is CancellationError {
-                    // User pressed Stop — not an error, but not
-                    // silence either: say the reply was interrupted,
-                    // in the neutral banner voice.
-                    if loadedChatSlug == targetSlug && loadedChatProject == targetProject {
-                        infoBanner = String(
-                            localized: "Interrupted — the reply was stopped before it arrived.",
-                            comment: "Chat banner after the user stops an in-flight reply")
-                    }
-                } else if loadedChatSlug == targetSlug && loadedChatProject == targetProject {
-                    errorBanner = error.localizedDescription
-                }
-                // A failure for a chat the user has already left is
-                // dropped — banners must never surface on the wrong chat.
+                // User pressed Stop — not an error, but not silence
+                // either: say the reply was interrupted, in the neutral
+                // banner voice. Either way the verdict is stored
+                // against the chat, so it is still there to be read if
+                // the user was elsewhere when it landed.
+                chats.noteTurnOutcome(error is CancellationError
+                                        ? .interrupted
+                                        : .failed(error.localizedDescription),
+                                      slug: targetSlug, project: targetProject)
             }
         }
+        // Registered AFTER the handle exists and BEFORE the task can
+        // run: a task enqueued from the main actor cannot start until
+        // this synchronous body yields, so the turn is never in flight
+        // without the manager knowing, and `endTurn` can never race
+        // ahead of the `beginTurn` it undoes.
+        chats.beginTurn(slug: targetSlug, project: targetProject,
+                        startedAt: startedAt, task: task)
     }
 
     // MARK: - Branching from an earlier message
@@ -1287,10 +1417,15 @@ struct ChatView: View {
 
     /// Stop button: cancel the in-flight request. URLSession surfaces
     /// that as URLError(.cancelled); `postJSON` normalizes it to
-    /// CancellationError, and send() answers with the "Interrupted"
+    /// CancellationError, and the turn answers with the "Interrupted"
     /// banner instead of an error.
+    ///
+    /// Asked of the manager, not of a handle held here — this view may
+    /// have been created long after the send, which is exactly the case
+    /// where a view-held handle is nil and Stop does nothing.
     private func stopSending() {
-        sendTask?.cancel()
+        guard let slug = loadedChatSlug, !slug.isEmpty else { return }
+        chats.stopChatTurn(slug: slug, project: loadedChatProject)
     }
 
     /// Summarise the current chat into a note via the active model and persist
@@ -1376,6 +1511,20 @@ struct ChatView: View {
     /// published to `appState` so the sidebar selects it.
     @discardableResult
     private func persistChat(slug: String, project: String?) -> String {
+        // A chat with a turn in flight is the MANAGER's to write. This
+        // view has nothing legitimate to add mid-turn — `send()` refuses
+        // to overlap turns and `canBranch` holds the edit pencil — so
+        // the only thing a write from here can carry is a conversation
+        // that predates the reply, and this path runs on every switch,
+        // every teardown and every rename. Left unguarded it silently
+        // erases a reply that has already been delivered.
+        //
+        // The turn's own writes go through `ChatManager`, which re-reads
+        // the file; a model or title change made mid-turn is picked up
+        // by the next persist after it ends.
+        if !slug.isEmpty, chats.isChatInFlight(slug: slug, project: project) {
+            return slug
+        }
         var title = liveTitle
         if title.isEmpty {
             let firstUser = liveMessages.first(where: { $0.role == "user" })?.content ?? "chat"
@@ -1414,7 +1563,9 @@ struct UnifiedInputCard: View {
     @EnvironmentObject var config: ConfigManager
 
     @Binding var draft: String
-    @Binding var sending: Bool
+    /// Read-only: the turn belongs to `ChatManager`, not to this card
+    /// and not to the pane it sits in.
+    var sending: Bool
     @Binding var noteGenerating: Bool
     /// True when the chat has at least one message — i.e. there's something
     /// to summarise. Used to dim the notebook button.
@@ -1428,6 +1579,13 @@ struct UnifiedInputCard: View {
     /// replaces the send button while `sending` is true.
     var onStop: () -> Void
     var onUpload: () -> Void
+    /// Files staged for the next send, drawn as removable chips above
+    /// the text field.
+    var attachments: [ChatAttachment]
+    var onRemoveAttachment: (UUID) -> Void
+    /// Files dropped anywhere on this card. The host loads them — a
+    /// drop and the + button must refuse the same things the same way.
+    var onDropFiles: ([URL]) -> Void
     /// nil = direct note; non-nil = the user's extra instructions from
     /// the note-prompt box.
     var onGenerateNote: (String?) -> Void
@@ -1442,13 +1600,25 @@ struct UnifiedInputCard: View {
     @State private var plusHovered: Bool = false
     @State private var noteHovered: Bool = false
     @State private var showingNoteOptions: Bool = false
+    /// A file drag is over the card. Drawn as a border tint, so the
+    /// drop has a target the user can see before they let go.
+    @State private var dropTargeted: Bool = false
 
     private var hasText: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// An attached file is a message on its own — the send arrow must
+    /// appear for one even with an empty text field.
+    private var hasSomethingToSend: Bool { hasText || !attachments.isEmpty }
+
     var body: some View {
         VStack(spacing: 0) {
+            if !attachments.isEmpty {
+                AttachmentChipRow(attachments: attachments, onRemove: onRemoveAttachment)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 8)
+            }
             // Text field area — 2/3 of the original 32/140 pt frame; the
             // placeholder offsets track the scroll-view padding (4 pt) +
             // the NSTextView's vertical inset (2 pt, see MessageInput).
@@ -1463,7 +1633,9 @@ struct UnifiedInputCard: View {
                 }
                 MultilineTextField(text: $draft,
                                    onSubmit: onSend,
-                                   spellChecking: config.display.spellCheck)
+                                   spellChecking: config.display.spellCheck,
+                                   onDropFiles: onDropFiles,
+                                   onDropTargeted: { dropTargeted = $0 })
                     .frame(minHeight: 21, maxHeight: 93)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
@@ -1564,7 +1736,7 @@ struct UnifiedInputCard: View {
                 // thing in the row, so the whole card grew the moment
                 // the arrow appeared (and the .animation(value: hasText)
                 // animated the growth) — typing must never resize the box.
-                if hasText && !sending {
+                if hasSomethingToSend && !sending {
                     Button(action: onSend) {
                         Image(systemName: "arrow.up.circle.fill")
                             .font(.system(size: 24))
@@ -1597,12 +1769,55 @@ struct UnifiedInputCard: View {
                 .fill(SipDesign.surface)
                 .overlay(
                     RoundedRectangle(cornerRadius: 14)
-                        .stroke(SipDesign.borderLight, lineWidth: 1)
+                        .stroke(dropTargeted ? SipDesign.blue : SipDesign.borderLight,
+                                lineWidth: dropTargeted ? 2 : 1)
                 )
         )
-        .animation(.easeInOut(duration: 0.15), value: hasText)
+        // The WHOLE card is the drop target, text field included — a
+        // file dragged at a composer is aimed at the message, not at a
+        // particular few points of it.
+        //
+        // This handler covers the card AROUND the text field only. The
+        // text view itself is the deepest view registered for file
+        // drags, so it wins every drop aimed at the box the user is
+        // actually looking at, and no ancestor drop target can take
+        // that away from it. It therefore forwards those to
+        // `onDropFiles` itself — see `DropForwardingTextView`. Both
+        // routes end in the same host closure, so a drop stages what
+        // the + button stages, wherever it lands.
+        //
+        // `public.file-url` read through the item provider, not
+        // `dropDestination(for: URL.self)`: a Finder drag always
+        // carries that type, and this is the door it is guaranteed to
+        // arrive at.
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            // The providers resolve on their own queues and in no
+            // fixed order, so the collection is locked and the handoff
+            // waits for all of them. Delivering per provider would
+            // stage a multi-file drop as several separate batches, and
+            // each batch's refusals would overwrite the last one's.
+            let lock = NSLock()
+            var collected: [URL] = []
+            let group = DispatchGroup()
+            for provider in providers {
+                group.enter()
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    if let url, url.isFileURL {
+                        lock.lock(); collected.append(url); lock.unlock()
+                    }
+                    group.leave()
+                }
+            }
+            group.notify(queue: .main) {
+                guard !collected.isEmpty else { return }
+                onDropFiles(collected)
+            }
+            return true
+        }
+        .animation(.easeInOut(duration: 0.15), value: hasSomethingToSend)
         .animation(.easeInOut(duration: 0.15), value: sending)
         .animation(.easeInOut(duration: 0.15), value: noteGenerating)
+        .animation(.easeInOut(duration: 0.12), value: dropTargeted)
     }
 }
 

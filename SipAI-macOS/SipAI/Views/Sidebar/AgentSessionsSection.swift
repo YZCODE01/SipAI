@@ -122,6 +122,16 @@ struct AgentSessionsSection: View {
         !sectionScheduledTasks.isEmpty || !sectionRegularSessions.isEmpty
     }
 
+    /// What this section can do right now. The header suffix, the body
+    /// and the grouping menu all read this ONE value, so none of them
+    /// can describe a different section than the other two — see
+    /// `AgentSectionTier`.
+    private var tier: AgentSectionTier {
+        AgentSectionTier.resolve(isReady: isReady,
+                                 isInstalled: isInstalled,
+                                 hasRows: hasAnyRows)
+    }
+
     private var sectionRegularSessions: [AgentSession] {
         agents.regularSessions(for: agentKey)
     }
@@ -130,11 +140,14 @@ struct AgentSessionsSection: View {
         agents.scheduledTasks(for: agentKey)
     }
 
+    /// The agent's name, plus "(read only)" only when the section
+    /// actually lists sessions it cannot drive. An agent with no CLI
+    /// and no sessions says so in its body row instead.
     private var sectionTitle: String {
-        isReady ? agentName
-            : agentName + " " + String(
-                localized: "(read only)",
-                comment: "Sidebar section title suffix when the agent CLI is missing or not configured")
+        guard tier.namesTierInTitle else { return agentName }
+        return agentName + " " + String(
+            localized: "(read only)",
+            comment: "Sidebar section title suffix when the agent's listed sessions cannot be driven")
     }
 
     private var groupMode: AgentGroupMode {
@@ -151,16 +164,17 @@ struct AgentSessionsSection: View {
             isExpanded: $expanded,
             accessory: { groupMenu }
         ) {
-            if isReady {
+            switch tier {
+            case .interactive:
                 newSessionButton
                 sessionList
-            } else if hasAnyRows {
+            case .readOnly:
                 readOnlyHintRow
                 sessionList
-            } else if isInstalled {
+            case .notConfigured:
                 // Binary present, auth missing, nothing synced yet.
                 readOnlyHintRow
-            } else {
+            case .unavailable:
                 notInstalledRow
             }
         }
@@ -256,7 +270,7 @@ struct AgentSessionsSection: View {
     @ViewBuilder
     private var groupMenu: some View {
         // Grouping is a read operation — offered for read-only stores too.
-        if isInstalled || hasAnyRows {
+        if tier.offersGrouping {
             Menu {
                 Picker(selection: groupModeBinding) {
                     ForEach(AgentGroupMode.allCases) { mode in

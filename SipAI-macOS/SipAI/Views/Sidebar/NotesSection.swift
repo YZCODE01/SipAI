@@ -1,12 +1,13 @@
 // NotesSection.swift
 // Sidebar section listing notes from NotesManager. Each row carries a
 // vertical kebab menu (••• rotated) at the trailing edge that hovers
-// independently of the row body and exposes Download / Delete actions.
+// independently of the row body and exposes Rename / Save as / Delete.
 // Tapping the row body routes the center column to NoteView via
 // AppState.openNoteId.
 
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 struct NotesSection: View {
     @EnvironmentObject var appState: AppState
@@ -59,6 +60,11 @@ struct NoteRow: View {
     @State private var editingTitle = false
     @State private var renameDraft = ""
     @FocusState private var renameFocused: Bool
+    /// Message from the last failed export, or nil. A save panel that
+    /// closes and produces no file reads as the app ignoring the click,
+    /// so the reason is shown rather than dropped.
+    @State private var exportFailure: String? = nil
+    @State private var exporting: Bool = false
 
     var body: some View {
         Group {
@@ -87,6 +93,18 @@ struct NoteRow: View {
                    role: .cancel) { }
         } message: {
             Text(note.title)
+        }
+        .alert(String(localized: "Couldn't save the note",
+                      comment: "Alert title when a note export fails"),
+               isPresented: Binding(get: { exportFailure != nil },
+                                    set: { if !$0 { exportFailure = nil } })) {
+            Button(String(localized: "OK", comment: "Alert dismiss button")) {
+                exportFailure = nil
+            }
+        } message: {
+            // verbatim: the message is an error string, not a template —
+            // the interpolating overload would markdown-parse it.
+            Text(verbatim: exportFailure ?? "")
         }
     }
 
@@ -168,12 +186,20 @@ struct NoteRow: View {
             Text("Rename", comment: "Note row menu item — edits in place")
         }
         Button {
-            downloadNote()
+            saveAsMarkdown()
         } label: {
-            Label(String(localized: "Download…",
+            Label(String(localized: "Save as Markdown…",
                          comment: "Note kebab menu item"),
                   systemImage: "arrow.down.circle")
         }
+        Button {
+            saveAsPDF()
+        } label: {
+            Label(String(localized: "Save as PDF…",
+                         comment: "Note kebab menu item"),
+                  systemImage: "doc.richtext")
+        }
+        .disabled(exporting)
         Divider()
         Button(role: .destructive) {
             showingDeleteConfirm = true
@@ -192,14 +218,39 @@ struct NoteRow: View {
         notes.renameNote(slug: note.slug, newTitle: name)
     }
 
-    private func downloadNote() {
+    /// Save panel shared by both formats. Returns nil when the user
+    /// cancels.
+    private func destination(extension ext: String, type: UTType) -> URL? {
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "\(note.slug).md"
-        panel.allowedContentTypes = [.init(filenameExtension: "md") ?? .plainText]
+        panel.nameFieldStringValue = "\(note.slug).\(ext)"
+        panel.allowedContentTypes = [type]
         panel.canCreateDirectories = true
-        panel.title = String(localized: "Download Note",
-                             comment: "NSSavePanel title for downloading a note")
-        guard panel.runModal() == .OK, let dest = panel.url else { return }
-        _ = notes.exportNote(slug: note.slug, to: dest)
+        panel.title = String(localized: "Save Note",
+                             comment: "NSSavePanel title for saving a note to a file")
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
+    }
+
+    private func saveAsMarkdown() {
+        guard let dest = destination(extension: "md",
+                                     type: UTType(filenameExtension: "md") ?? .plainText)
+        else { return }
+        if !notes.exportNote(slug: note.slug, to: dest) {
+            exportFailure = String(localized: "The file could not be written.",
+                                   comment: "Export failure: the destination refused the write")
+        }
+    }
+
+    private func saveAsPDF() {
+        guard let dest = destination(extension: "pdf", type: .pdf) else { return }
+        exporting = true
+        Task { @MainActor in
+            defer { exporting = false }
+            do {
+                try await notes.exportPDF(slug: note.slug, to: dest)
+            } catch {
+                exportFailure = error.localizedDescription
+            }
+        }
     }
 }

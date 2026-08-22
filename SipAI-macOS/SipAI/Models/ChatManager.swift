@@ -134,50 +134,166 @@ struct StoredChat: Codable, Identifiable {
     }
 }
 
+/// A chat turn in flight, owned by `ChatManager` rather than by the
+/// view that started it.
+struct ChatTurn {
+    /// When the turn began — the composer's clock reads this, so it
+    /// survives the view being replaced mid-turn.
+    let startedAt: Date
+    /// The unstructured send task. Retained so Stop can cancel it;
+    /// `URLSession` honours cooperative cancellation. Releasing this
+    /// handle does NOT cancel the task, which is what lets a reply
+    /// asked for and then walked away from still arrive.
+    let task: Task<Void, Never>
+}
+
+/// How a chat turn ended, for whichever view opens the chat next.
+enum ChatTurnOutcome: Equatable {
+    /// The model hit its output limit.
+    case truncated
+    /// The user pressed Stop.
+    case interrupted
+    /// Anything else, already localized for display.
+    case failed(String)
+}
+
+extension Notification.Name {
+    /// Posted by `ChatManager` after a chat's messages change behind
+    /// the open view's back — a reply delivered to a conversation the
+    /// user may or may not still be looking at. An open `ChatView`
+    /// answers it by re-reading that chat.
+    ///
+    /// A notification rather than a `@Published` read by the view: the
+    /// delivery has to reach whichever `ChatView` INSTANCE is showing
+    /// the chat, and the router mints a new one on every detour. Same
+    /// shape, and same reason, as `.sipChatRenamed`.
+    static let sipChatMessagesChanged =
+        Notification.Name("sipChatMessagesChanged")
+}
+
 @MainActor
 final class ChatManager: ObservableObject {
     @Published private(set) var rootChats: [StoredChat] = []     // sorted newest first
     @Published private(set) var projectChats: [String: [StoredChat]] = [:]
 
-    /// Chats with a reply in flight, by `liveKey`. The agent side's
-    /// counterpart is `AgentManager.inFlightSends`, and this exists for
-    /// the same reason: the sidebar has to be able to ask "is this one
-    /// working right now?" about a conversation it is not showing.
+    /// Chat turns in flight, by `liveKey`. The agent side's counterpart
+    /// is `AgentManager.inFlightSends` + `AgentRunner`, and this exists
+    /// for the same reason: the sidebar has to be able to ask "is this
+    /// one working right now?" about a conversation it is not showing —
+    /// and the turn has to survive the pane the user started it from.
     ///
-    /// It cannot live on `ChatView`. That view is replaced by the
-    /// centre-pane router on any detour, and it deliberately CLEARS its
-    /// own `sending` flag when the user switches chats (the flag
-    /// describes the pane, not the turn) — while the send task keeps
-    /// running and delivers its reply to the chat that asked. So a
-    /// view-owned flag answers "no" for every chat except the one on
-    /// screen, which is exactly the case the sidebar needs it for.
-    @Published private(set) var inFlightChats: Set<String> = []
+    /// None of this can live on `ChatView`. That view is replaced by
+    /// the centre-pane router on any detour, so a turn started in a
+    /// chat and then walked away from outlives the view that started
+    /// it. A view-owned flag answers "no" for every chat except the
+    /// one on screen; a view-owned RESULT is worse — see
+    /// `appendAssistantReply`.
+    @Published private(set) var liveTurns: [String: ChatTurn] = [:]
+
+    /// What a finished turn left behind for whichever view opens the
+    /// chat next. Kept off the view for the same reason as the turn
+    /// itself: a reply that arrives truncated, is stopped, or fails
+    /// while the user is looking at something else has to be able to
+    /// say so when they come back, instead of leaving a question
+    /// sitting there with no answer and no explanation.
+    @Published private(set) var turnOutcomes: [String: ChatTurnOutcome] = [:]
 
     /// Identity of one chat for the live set — the same (project, slug)
     /// pair every save, draft and reply-delivery is keyed by. A chat
     /// that has never been persisted has no slug and cannot be in the
-    /// set; `send()` marks it after the first persist, which is where
-    /// its slug is minted.
+    /// set; `send()` registers it after the first persist, which is
+    /// where its slug is minted.
     static func liveKey(slug: String, project: String?) -> String {
         "\(project ?? "")/\(slug)"
     }
 
     func isChatInFlight(slug: String, project: String?) -> Bool {
-        inFlightChats.contains(Self.liveKey(slug: slug, project: project))
+        liveTurns[Self.liveKey(slug: slug, project: project)] != nil
     }
 
-    /// Mark / unmark a chat as awaiting a reply. Callers pass the
-    /// identity they CAPTURED at send time and hand the same one back
-    /// when the turn ends, however it ends — a marker cleared by
-    /// whatever identity happens to be open would strand the row of a
-    /// chat the user has since left.
-    func setChatInFlight(_ inFlight: Bool, slug: String, project: String?) {
-        let key = Self.liveKey(slug: slug, project: project)
-        if inFlight {
-            inFlightChats.insert(key)
-        } else {
-            inFlightChats.remove(key)
-        }
+    /// The in-flight turn for a chat, if any — the composer reads its
+    /// `startedAt` for the "Sipping… (m:ss)" clock, so the clock keeps
+    /// the turn's own start time across a detour rather than restarting
+    /// at zero with a freshly created view.
+    func chatTurn(slug: String, project: String?) -> ChatTurn? {
+        liveTurns[Self.liveKey(slug: slug, project: project)]
+    }
+
+    /// Register a turn. Callers pass the identity they CAPTURED at send
+    /// time and hand the same one back when the turn ends, however it
+    /// ends — a marker cleared by whatever identity happens to be open
+    /// would strand the row of a chat the user has since left.
+    func beginTurn(slug: String, project: String?,
+                   startedAt: Date, task: Task<Void, Never>) {
+        liveTurns[Self.liveKey(slug: slug, project: project)] =
+            ChatTurn(startedAt: startedAt, task: task)
+    }
+
+    func endTurn(slug: String, project: String?) {
+        liveTurns.removeValue(forKey: Self.liveKey(slug: slug, project: project))
+    }
+
+    /// Stop button. Reaches the turn through the manager rather than a
+    /// view-held handle, so it works from a `ChatView` created AFTER
+    /// the send — which is what the user gets back when they return to
+    /// a chat they left mid-turn.
+    func stopChatTurn(slug: String, project: String?) {
+        liveTurns[Self.liveKey(slug: slug, project: project)]?.task.cancel()
+    }
+
+    /// Deliver a reply to the chat that asked for it.
+    ///
+    /// Re-reads the chat FROM DISK rather than writing a snapshot the
+    /// caller was holding: the view that sent the message may have been
+    /// destroyed by the router mid-turn, and its `@State` still reads
+    /// back the values it held when it died — so a snapshot-based
+    /// delivery writes a stale conversation over the live file, and the
+    /// reply lands in a state box nothing renders. Disk is the
+    /// authority, and this is the ONLY path a reply takes, whether or
+    /// not the sending view survived.
+    ///
+    /// A chat deleted while its turn was in flight has nowhere to put
+    /// the reply, and must not be resurrected by it.
+    func appendAssistantReply(_ message: ChatMessage,
+                              slug: String, project: String?,
+                              outcome: ChatTurnOutcome? = nil) {
+        guard var chat = loadChat(slug: slug, project: project) else { return }
+        chat.messages.append(message)
+        saveChat(chat)
+        if let outcome { noteTurnOutcome(outcome, slug: slug, project: project) }
+        else { announceMessagesChanged(slug: slug, project: project) }
+    }
+
+    /// Record how a turn ended, and wake the open chat so it can say
+    /// so. Posting on this path too means an error or a Stop reaches
+    /// the pane by the same route a reply does.
+    ///
+    /// Addressed to the CHAT exactly as the reply is: a conversation
+    /// deleted or moved away mid-turn takes its outcome with it.
+    /// Without the guard the banner is filed under a (project, slug)
+    /// the chat no longer owns, and surfaces under whatever chat next
+    /// takes that name.
+    func noteTurnOutcome(_ outcome: ChatTurnOutcome,
+                         slug: String, project: String?) {
+        guard loadChat(slug: slug, project: project) != nil else { return }
+        turnOutcomes[Self.liveKey(slug: slug, project: project)] = outcome
+        announceMessagesChanged(slug: slug, project: project)
+    }
+
+    /// Read and clear — an outcome describes one turn and must not be
+    /// shown twice, nor follow the user into the next conversation.
+    func consumeTurnOutcome(slug: String, project: String?) -> ChatTurnOutcome? {
+        turnOutcomes.removeValue(forKey: Self.liveKey(slug: slug, project: project))
+    }
+
+    func clearTurnOutcome(slug: String, project: String?) {
+        turnOutcomes.removeValue(forKey: Self.liveKey(slug: slug, project: project))
+    }
+
+    private func announceMessagesChanged(slug: String, project: String?) {
+        NotificationCenter.default.post(
+            name: .sipChatMessagesChanged, object: nil,
+            userInfo: ["slug": slug, "project": project as Any])
     }
 
     func reload() {
@@ -301,9 +417,26 @@ final class ChatManager: ObservableObject {
     }
 
     func deleteChat(slug: String, project: String?) {
+        // The turn dies with the chat. Left alone, the (project, slug)
+        // key outlives the file: `uniqueSlug` checks only disk, so a
+        // new chat given the same title mints the SAME slug and
+        // inherits the spinner, a Stop wired to a dead conversation —
+        // and, when the in-flight task delivers, the deleted
+        // conversation's reply.
+        teardownTurn(slug: slug, project: project)
         let url = SipaiPaths.chatStateFile(slug: slug, project: project)
         try? FileManager.default.removeItem(at: url)
         reload()
+    }
+
+    /// Cancel and forget a chat's live turn, and drop any unconsumed
+    /// outcome. For delete and move, where the (project, slug) key is
+    /// about to stop meaning this conversation.
+    private func teardownTurn(slug: String, project: String?) {
+        let key = Self.liveKey(slug: slug, project: project)
+        liveTurns[key]?.task.cancel()
+        liveTurns.removeValue(forKey: key)
+        turnOutcomes.removeValue(forKey: key)
     }
 
     func renameChat(slug: String, project: String?, newTitle: String) {
@@ -323,6 +456,11 @@ final class ChatManager: ObservableObject {
               var chat = loadChat(slug: slug, project: project) else {
             return nil
         }
+        // Same teardown as deleteChat, same reason: this vacates the
+        // old (project, slug) for reuse, and the in-flight reply could
+        // not follow the chat anyway — delivery re-reads the OLD key
+        // and finds nothing. Cancelling is the honest version of that.
+        teardownTurn(slug: slug, project: project)
         let oldURL = SipaiPaths.chatStateFile(slug: slug, project: project)
         chat.project = toProject
         if FileManager.default.fileExists(

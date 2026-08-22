@@ -25,6 +25,21 @@ enum NoteWriteOutcome {
     case failed
 }
 
+/// Why an export could not be produced. Thrown rather than collapsed
+/// into a Bool: "Save as PDF" opens a save panel and then appears to do
+/// nothing, so the reason has to survive as far as the message shown.
+enum NoteExportError: LocalizedError {
+    case missing
+
+    var errorDescription: String? {
+        switch self {
+        case .missing:
+            return String(localized: "That note no longer exists.",
+                          comment: "Export failure: the note was deleted or moved")
+        }
+    }
+}
+
 struct StoredNote: Identifiable, Hashable {
     var slug: String           // filename stem (without ".md")
     var title: String          // resolved: header → body H1 → slug
@@ -370,6 +385,28 @@ final class NotesManager: ObservableObject {
         } catch {
             return false
         }
+    }
+
+    /// Render a note to PDF at `destination`.
+    ///
+    /// Goes through the same `NoteHTML` document the Preview pane draws,
+    /// so the file is the page the reader was just looking at — that
+    /// agreement is the whole reason the two share a converter. Only the
+    /// BODY is passed: the metadata header is a SipAI storage detail and
+    /// is re-emitted as a real title block, never dumped as an HTML
+    /// comment into the document.
+    func exportPDF(slug: String, to destination: URL) async throws {
+        // Export what is on SCREEN, exactly as the markdown path does.
+        flushPendingEdit(slug: slug)
+        guard let note = notes.first(where: { $0.slug == slug }) else {
+            throw NoteExportError.missing
+        }
+        try await NotePDFExporter.export(
+            markdown: note.bodyContent,
+            metadata: NoteHTML.Metadata(title: note.title,
+                                        model: note.model,
+                                        date: note.date),
+            to: destination)
     }
 
     // MARK: - Header parsing

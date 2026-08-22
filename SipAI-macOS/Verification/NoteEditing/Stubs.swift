@@ -43,3 +43,29 @@ struct ChatMessage {
     var role: String
     var content: String
 }
+
+/// Stand-ins for the note RENDER path. `NotesManager.exportPDF` flushes
+/// the staged body and resolves the note before handing off, and those
+/// two steps are what this harness is about; laying the document out
+/// needs a web view and is checked by `Verification/NoteExport`
+/// instead.
+enum NoteHTML {
+    struct Metadata {
+        var title: String
+        var model: String?
+        var date: Date?
+    }
+}
+
+enum NotePDFExporter {
+    /// Records the last call so the harness can assert the manager
+    /// passed the BODY (never the raw file, header included).
+    nonisolated(unsafe) static var lastMarkdown: String?
+
+    static func export(markdown: String,
+                       metadata: NoteHTML.Metadata,
+                       to destination: URL) async throws {
+        lastMarkdown = markdown
+        try Data("%PDF-1.4\n".utf8).write(to: destination)
+    }
+}

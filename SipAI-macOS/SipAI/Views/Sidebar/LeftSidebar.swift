@@ -136,18 +136,25 @@ struct LeftSidebar: View {
     }
 
     /// The sections that exist RIGHT NOW (files needs a dedicated
-    /// folder, the non-claude agents their CLI or session store), in
-    /// the user's dragged order. Conditional sections keep their saved
-    /// slot while hidden only if the user had dragged them; otherwise
-    /// they reappear at their default position.
+    /// folder, every agent its CLI or session store), in the user's
+    /// dragged order. Conditional sections keep their saved slot while
+    /// hidden only if the user had dragged them; otherwise they
+    /// reappear at their default position.
     private var orderedSectionIds: [SectionId] {
         var present: [SectionId] = [.notes]
         if config.dedicatedFolder != nil { present.append(.files) }
-        present.append(contentsOf: [.chats, .chatGroups, .agentClaude])
-        // Codex and Kimi Code each earn a section when their CLI or
-        // their session store exists; store-only renders read-only.
-        // Detection refreshes every few seconds, so installing either
-        // one surfaces its section without a relaunch.
+        present.append(contentsOf: [.chats, .chatGroups])
+        // ONE rule for all three agents, and a fourth joins it here:
+        // a section is earned by a CLI or a session store, and
+        // store-only renders read-only. Claude Code used to be exempt —
+        // its section rendered on every machine — which put a header
+        // naming an agent, and a suffix claiming read-only sessions, on
+        // machines that had neither the CLI nor a single session. An
+        // agent nothing on this machine can reach is not a section.
+        //
+        // Detection refreshes every few seconds, so installing any of
+        // them surfaces its section without a relaunch.
+        if agents.isAgentAvailable("claude_code") { present.append(.agentClaude) }
         if agents.isAgentAvailable("codex") { present.append(.agentCodex) }
         if agents.isAgentAvailable("kimi") { present.append(.agentKimi) }
         return SidebarOrdering.apply(present,

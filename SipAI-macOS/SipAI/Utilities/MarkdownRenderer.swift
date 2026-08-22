@@ -218,7 +218,10 @@ enum MarkdownRenderer {
     /// skip child re-evaluation entirely. A computed
     /// `var id: UUID { UUID() }` would mint a NEW identity on every
     /// access and defeat every one of those skips.
-    fileprivate enum Block: Equatable {
+    /// Internal rather than fileprivate so `NoteHTML` can render the
+    /// same block structure to HTML — one block parser for the note
+    /// Preview, the note PDF and the chat transcript.
+    enum Block: Equatable {
         case heading(level: Int, text: String)
         case paragraph(text: String)
         case horizontalRule
@@ -273,7 +276,7 @@ enum MarkdownRenderer {
     /// instead of dozens of cold parses (a visible delay at open).
     private static let parseCacheLock = NSLock()
 
-    fileprivate static func parse(_ source: String) -> [Block] {
+    static func parse(_ source: String) -> [Block] {
         let key = ParseKey(text: source)
         parseCacheLock.lock()
         let hit = parseCache[key]

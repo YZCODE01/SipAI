@@ -510,7 +510,7 @@ struct SidebarChatRow: View {
 
     /// True while this chat is waiting on a reply — including one asked
     /// for and then walked away from, which is the whole reason the flag
-    /// lives on the manager (see `ChatManager.inFlightChats`).
+    /// lives on the manager (see `ChatManager.liveTurns`).
     private var isLive: Bool {
         chats.isChatInFlight(slug: chat.slug, project: chat.project)
     }

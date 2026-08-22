@@ -3174,8 +3174,10 @@ private struct RunnerStreamView: View {
     }
 
     /// Shown under the spinner once the runner latches
-    /// `turnProducedNothing` — a full minute of a turn producing
-    /// literally nothing.
+    /// `turnProducedNothing` — `AgentRunner.firstOutputGrace` of a
+    /// turn producing literally nothing. The sentence NAMES that
+    /// duration, so the two move together or the row states a wait
+    /// the runner never made.
     ///
     /// It exists because that failure had no other voice. Every other
     /// way a turn goes wrong ends with the child exiting, and a
@@ -3198,7 +3200,7 @@ private struct RunnerStreamView: View {
                         comment: "Heading of the stalled-turn notice; placeholder is the agent's label"))
                 .font(.system(size: 12 * fontScale, weight: .medium))
                 .foregroundColor(ChatDesign.textPrimary)
-            Text("The turn is still running, but nothing has come back for a minute. This may be fine. However, if it persists for too long, it may indicate a blocked or misconfigured network route, which looks exactly like this because the agent retries in silence — agent CLIs read the HTTP_PROXY and HTTPS_PROXY environment variables and ignore the macOS system proxy setting.",
+            Text("The turn is still running, but nothing has come back for 3 minutes. This may be fine. However, if it persists for too long, it may indicate a blocked or misconfigured network route, which looks exactly like this because the agent retries in silence — agent CLIs read the HTTP_PROXY and HTTPS_PROXY environment variables and ignore the macOS system proxy setting.",
                  comment: "Body of the stalled-turn notice")
                 .font(.system(size: 11 * fontScale))
                 .foregroundColor(ChatDesign.textSecondary)
