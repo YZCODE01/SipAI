@@ -28,6 +28,13 @@ swiftc -O -o "$out/noteexport" \
   "$src/SipAI/Utilities/DesignSystem.swift" \
   "$src/SipAI/Utilities/LatexSymbols.swift" \
   "$src/SipAI/Utilities/SearchMatching.swift" \
+  "$src/SipAI/Utilities/MathAlphabets.swift" \
+  "$src/SipAI/Utilities/MathSymbols.swift" \
+  "$src/SipAI/Utilities/MathParser.swift" \
+  "$src/SipAI/Utilities/MathFont.swift" \
+  "$src/SipAI/Utilities/MathLayout.swift" \
+  "$src/SipAI/Utilities/MathDelimiters.swift" \
+  "$src/SipAI/Utilities/MathDisplayBlock.swift" \
   "$src/SipAI/Views/Notes/NoteWebView.swift" \
   "$here/main.swift"
 "$out/noteexport"

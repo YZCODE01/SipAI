@@ -178,14 +178,46 @@ final class AgentRunner: ObservableObject {
     /// the status flip.
     @Published private(set) var lastContextTokens: Int = 0
 
-    /// Full model id from the newest system.init event of OUR
-    /// subprocess ("claude-opus-5"). Feeds the composer's model chip
-    /// the resolved model the moment a send starts — the JSONL doesn't
-    /// carry it until the first assistant record lands, and an alias
-    /// like "opus" says nothing about the version that actually ran.
-    /// Same delivery pattern as `lastContextTokens` for the same
-    /// ordering reasons.
-    @Published private(set) var lastModelId: String? = nil
+    /// The context WINDOW the footprint above sits in, when the agent
+    /// records one — codex stamps `model_context_window` on the same
+    /// rollout record the footprint is read from, and kimi's config
+    /// declares `max_context_size` per model. 0 = not recorded (claude
+    /// among them), and the occupancy tooltip falls back to its
+    /// constant. Published beside `lastContextTokens` so the two ride
+    /// the same delivery contract; display-only — nothing is ever
+    /// launched with it.
+    @Published private(set) var lastContextWindow: Int = 0
+
+    /// What our own subprocess's newest system.init resolved to, PAIRED
+    /// with the picker alias that turn was LAUNCHED with. Feeds the
+    /// composer's model chip the resolved model the moment a send
+    /// starts — the JSONL doesn't carry it until the first assistant
+    /// record lands, and an alias like "opus" says nothing about the
+    /// version that actually ran. Same delivery pattern as
+    /// `lastContextTokens` for the same ordering reasons.
+    ///
+    /// The pair is the point, and it is one value rather than two
+    /// publishers. An observation is only ever ground truth ABOUT THE
+    /// ALIAS IT RAN UNDER: an id delivered on its own says "claude
+    /// answered with this", and the reader is left to guess which
+    /// alias it belongs to — which it can only do by reading whatever
+    /// the chips say NOW. A chip the user has since changed then
+    /// silently claims a model it never ran (see
+    /// `AgentSessionView`'s handler, and `ClaudeModelDisplay.canResolve`
+    /// for the contradiction that survives in config once it does).
+    struct ResolvedModel: Equatable {
+        /// Picker alias the turn was launched with; "" is claude's own
+        /// default, which is a legitimate key in the observed-id map.
+        let alias: String
+        /// Full id claude reported for it ("claude-fable-5").
+        let fullId: String
+    }
+    @Published private(set) var resolvedModel: ResolvedModel? = nil
+
+    /// The alias the in-flight turn was launched with, captured at
+    /// `send` — the only moment it is knowable, since the chips are
+    /// free to move while the turn runs.
+    private var launchedModelAlias: String = ""
 
     /// Seconds the most recently finished turn took — the very number
     /// the "Sipping…" row was counting up to, read off the same clock
@@ -371,11 +403,18 @@ final class AgentRunner: ObservableObject {
         }
         lastCodexTokenRead = now
         Task.detached(priority: .utility) { [weak self] in
-            let total = CodexSessionScanner.lastContextTokens(of: url)
-            guard total > 0 else { return }
+            let info = CodexSessionScanner.lastContextInfo(of: url)
+            guard info.tokens > 0 else { return }
             await MainActor.run { [weak self] in
-                guard let self, total != self.lastContextTokens else { return }
-                self.lastContextTokens = total
+                guard let self else { return }
+                if info.tokens != self.lastContextTokens {
+                    self.lastContextTokens = info.tokens
+                }
+                // Window only when the record carried one — a 0 must
+                // not erase a window an earlier record stated.
+                if info.window > 0, info.window != self.lastContextWindow {
+                    self.lastContextWindow = info.window
+                }
             }
         }
     }
@@ -399,11 +438,26 @@ final class AgentRunner: ObservableObject {
     private func refreshKimiContextTokens() {
         guard agentKey == "kimi", let url = sessionFileURL else { return }
         Task.detached(priority: .utility) { [weak self] in
-            let total = KimiSessionScanner.lastContextTokens(of: url)
-            guard total > 0 else { return }
+            let usage = KimiSessionScanner.lastContextUsage(of: url)
+            guard usage.tokens > 0 else { return }
             await MainActor.run { [weak self] in
-                guard let self, total != self.lastContextTokens else { return }
-                self.lastContextTokens = total
+                guard let self else { return }
+                if usage.tokens != self.lastContextTokens {
+                    self.lastContextTokens = usage.tokens
+                }
+                // The record names its model; the config names that
+                // model's window. Joined here because the catalog is
+                // MainActor state and the scan above is not. A model
+                // the catalog does not know keeps the previous window
+                // rather than erasing it with a guess. `ensureLoaded`
+                // is one stat when nothing changed — a session driven
+                // before the composer ever appeared still resolves.
+                KimiCatalog.shared.ensureLoaded()
+                if let window = KimiCatalog.shared
+                    .maxContextSize(forModel: usage.model),
+                   window > 0, window != self.lastContextWindow {
+                    self.lastContextWindow = window
+                }
             }
         }
     }
@@ -490,6 +544,10 @@ final class AgentRunner: ObservableObject {
 
         events.append(StreamEvent(kind: .userMessage(text: trimmed)))
         inFlightUserText = trimmed
+        // Whatever the chips say when this turn's system.init lands is
+        // not what this turn ran as — the user is free to move them
+        // mid-turn. Captured here, it can only ever describe this send.
+        launchedModelAlias = options.model ?? ""
         stderrTail = ""
         stderrBuffer = ""
         retryNotice = ""
@@ -942,9 +1000,12 @@ final class AgentRunner: ObservableObject {
     /// the newer source, and a read taken mid-turn is behind it. An
     /// external turn is the opposite case: the transcript is the only
     /// place its usage is recorded, so it must be able to land here.
-    func noteTranscriptContextTokens(_ total: Int) {
+    func noteTranscriptContextTokens(_ total: Int, window: Int = 0) {
         guard total > 0, !status.isRunning else { return }
         lastContextTokens = total
+        // Same delivery rule as the total it rides with; 0 means the
+        // read found none and must not erase a window already known.
+        if window > 0 { lastContextWindow = window }
     }
 
     /// Drop the live event buffer. The session view calls this after a
@@ -1138,6 +1199,19 @@ final class AgentRunner: ObservableObject {
             for (k, v) in bridge.environmentOverlay(sessionIdOrTaskUuid: sipaiIdentity) {
                 env[k] = v
             }
+        }
+        // Background tasks do not survive `claude -p` — a still-running
+        // one is killed five seconds after the turn's `result`, and
+        // nothing on either feed says so. Disabling the feature makes
+        // claude drop `run_in_background` from the Bash tool's schema
+        // outright, so the agent runs the command in the foreground
+        // where its result can actually land. See
+        // `ClaudePrintMode.environmentOverlay` for the measurements,
+        // for why this OVERRIDES anything inherited from the user's
+        // shell rather than deferring to it, and for why codex and kimi
+        // are deliberately left alone.
+        for (k, v) in ClaudePrintMode.environmentOverlay(agentKey: agentKey) {
+            env[k] = v
         }
         // Kimi's effort is the one per-send choice that does not travel
         // as an argument — it has no flag, so the composer's chip
@@ -1483,8 +1557,17 @@ final class AgentRunner: ObservableObject {
                 lastContextTokens = ctx
             }
             if case .systemInit(_, let model, _) = event.kind,
-               !model.isEmpty, model != "<synthetic>" {
-                lastModelId = model
+               !model.isEmpty, model != "<synthetic>",
+               agentKey == "claude_code" {
+                // Claude only: what this feeds is claude's ALIAS→id
+                // map, and a codex slug or a kimi one is not an alias
+                // resolving to anything. Codex reports no model here
+                // today and kimi emits no system.init at all, so the
+                // guard costs nothing now and is what stops the day
+                // either starts reporting one from filing another
+                // agent's vocabulary in that map.
+                resolvedModel = ResolvedModel(alias: launchedModelAlias,
+                                              fullId: model)
             }
             if case .result = event.kind {
                 // This segment is over. Read the Sipping… clock (one

@@ -1652,6 +1652,17 @@
         }
       }
     },
+    "Copy LaTeX" : {
+      "comment" : "Context-menu item on a typeset equation; copies its LaTeX source",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "复制 LaTeX"
+          }
+        }
+      }
+    },
     "Copy this message" : {
       "comment" : "Tooltip for the copy button on a sent message",
       "localizations" : {
@@ -2341,6 +2352,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "每个角色都是一段可复用的系统提示词，你可以在对话中随时切换。"
+          }
+        }
+      }
+    },
+    "Earlier turns aren't loaded — this session's transcript is %@ and the newest %@ are shown." : {
+      "comment" : "Static note atop a transcript too big to load whole; placeholders are the file size and the loaded size",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更早的对话未加载——本会话的记录共 %@，当前显示最新的 %@。"
           }
         }
       }
@@ -3261,6 +3283,17 @@
         }
       }
     },
+    "Loading earlier turns…" : {
+      "comment" : "Disabled state of the Show-earlier button while older turns are read from disk",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在加载更早的对话…"
+          }
+        }
+      }
+    },
     "Loading session history…" : {
       "comment" : "State while the JSONL is being parsed",
       "localizations" : {
@@ -4160,7 +4193,7 @@
       }
     },
     "OK" : {
-      "comment" : "Alert dismiss button\nDismiss the branch-failure alert\nDismiss the incomplete-reset alert\nDismiss the session-note error alert",
+      "comment" : "Alert dismiss button\nDismiss the branch-failure alert\nDismiss the incomplete-reset alert\nDismiss the rename-failure alert\nDismiss the session-note error alert",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -4804,6 +4837,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "重命名此任务"
+          }
+        }
+      }
+    },
+    "Renamed in SipAI only" : {
+      "comment" : "Title of the alert shown when a rename could not be written into the agent's own store",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅在 SipAI 中重命名"
           }
         }
       }
@@ -5617,6 +5661,17 @@
         }
       }
     },
+    "Show earlier — load older turns" : {
+      "comment" : "Show-earlier button when older turns must first be read from disk",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示更早——加载更早的对话"
+          }
+        }
+      }
+    },
     "Show less" : {
       "comment" : "Sidebar: re-apply the row cap on a list that was expanded",
       "localizations" : {
@@ -6016,6 +6071,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "将创建该分组，并把“%@”移入其中。"
+          }
+        }
+      }
+    },
+    "The new name is saved here, but writing it into %@ failed: %@" : {
+      "comment" : "Body of the rename-failure alert — agent label, then the underlying reason",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新名称已在此保存，但写入 %1$@ 失败：%2$@"
           }
         }
       }

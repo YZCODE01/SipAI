@@ -41,6 +41,7 @@
 		E6F7A8B9C0D1E2F304152607 /* AgentSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = F7A8B9C0D1E2F30415260718 /* AgentSession.swift */; };
 		AA01B2C3D4E5F60718293A4B /* AgentSessionGrouping.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB01B2C3D4E5F60718293A4C /* AgentSessionGrouping.swift */; };
 		AA02C3D4E5F60718293A4B5C /* AgentSessionFork.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB02C3D4E5F60718293A4B5D /* AgentSessionFork.swift */; };
+		AA02C3D4E5F60718293A4B60 /* AgentSessionRename.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB02C3D4E5F60718293A4B61 /* AgentSessionRename.swift */; };
 		E7F8A9B0C1D2E3F405162708 /* AgentSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8A9B0C1D2E3F40516270819 /* AgentSessionView.swift */; };
 		C1B2D3E4F5A60718293A4B5C /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2C3E4F5A6B70819203B4C5D /* OnboardingView.swift */; };
 		7AB84AC4DC6B0A59B113F751 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 4F3133CB82A42C2405ECFE76 /* Localizable.xcstrings */; };
@@ -68,6 +69,13 @@
 		DE1122334455667788990000 /* NotificationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF1122334455667788990000 /* NotificationCoordinator.swift */; };
 		E01122334455667788990000 /* AgentRendering.swift in Sources */ = {isa = PBXBuildFile; fileRef = E11122334455667788990000 /* AgentRendering.swift */; };
 		E21122334455667788990000 /* LatexSymbols.swift in Sources */ = {isa = PBXBuildFile; fileRef = E31122334455667788990000 /* LatexSymbols.swift */; };
+		E211334455667788990010 /* MathAlphabets.swift in Sources */ = {isa = PBXBuildFile; fileRef = E311334455667788990010 /* MathAlphabets.swift */; };
+		E211334455667788990011 /* MathSymbols.swift in Sources */ = {isa = PBXBuildFile; fileRef = E311334455667788990011 /* MathSymbols.swift */; };
+		E211334455667788990012 /* MathParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = E311334455667788990012 /* MathParser.swift */; };
+		E211334455667788990013 /* MathFont.swift in Sources */ = {isa = PBXBuildFile; fileRef = E311334455667788990013 /* MathFont.swift */; };
+		E211334455667788990014 /* MathLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = E311334455667788990014 /* MathLayout.swift */; };
+		E211334455667788990015 /* MathDelimiters.swift in Sources */ = {isa = PBXBuildFile; fileRef = E311334455667788990015 /* MathDelimiters.swift */; };
+		E211334455667788990016 /* MathDisplayBlock.swift in Sources */ = {isa = PBXBuildFile; fileRef = E311334455667788990016 /* MathDisplayBlock.swift */; };
 		E41122334455667788990000 /* AgentEventParsing.swift in Sources */ = {isa = PBXBuildFile; fileRef = E51122334455667788990000 /* AgentEventParsing.swift */; };
 		E41122334455667788990001 /* CodexEventParsing.swift in Sources */ = {isa = PBXBuildFile; fileRef = E51122334455667788990001 /* CodexEventParsing.swift */; };
 		E41122334455667788990002 /* KimiSessions.swift in Sources */ = {isa = PBXBuildFile; fileRef = E51122334455667788990002 /* KimiSessions.swift */; };
@@ -111,6 +119,7 @@
 		F7A8B9C0D1E2F30415260718 /* AgentSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AgentSession.swift"; sourceTree = "<group>"; };
 		BB01B2C3D4E5F60718293A4C /* AgentSessionGrouping.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AgentSessionGrouping.swift"; sourceTree = "<group>"; };
 		BB02C3D4E5F60718293A4B5D /* AgentSessionFork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AgentSessionFork.swift"; sourceTree = "<group>"; };
+		BB02C3D4E5F60718293A4B61 /* AgentSessionRename.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AgentSessionRename.swift"; sourceTree = "<group>"; };
 		F8A9B0C1D2E3F40516270819 /* AgentSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AgentSessionView.swift"; sourceTree = "<group>"; };
 		D2C3E4F5A6B70819203B4C5D /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "OnboardingView.swift"; sourceTree = "<group>"; };
 		4F3133CB82A42C2405ECFE76 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = "Localizable.xcstrings"; sourceTree = "<group>"; };
@@ -139,6 +148,13 @@
 		DF1122334455667788990000 /* NotificationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NotificationCoordinator.swift"; sourceTree = "<group>"; };
 		E11122334455667788990000 /* AgentRendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AgentRendering.swift"; sourceTree = "<group>"; };
 		E31122334455667788990000 /* LatexSymbols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "LatexSymbols.swift"; sourceTree = "<group>"; };
+		E311334455667788990010 /* MathAlphabets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MathAlphabets.swift"; sourceTree = "<group>"; };
+		E311334455667788990011 /* MathSymbols.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MathSymbols.swift"; sourceTree = "<group>"; };
+		E311334455667788990012 /* MathParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MathParser.swift"; sourceTree = "<group>"; };
+		E311334455667788990013 /* MathFont.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MathFont.swift"; sourceTree = "<group>"; };
+		E311334455667788990014 /* MathLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MathLayout.swift"; sourceTree = "<group>"; };
+		E311334455667788990015 /* MathDelimiters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MathDelimiters.swift"; sourceTree = "<group>"; };
+		E311334455667788990016 /* MathDisplayBlock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MathDisplayBlock.swift"; sourceTree = "<group>"; };
 		5A7F3C11B9204D6E8F1A2B30 /* TranscriptFollow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TranscriptFollow.swift"; sourceTree = "<group>"; };
 		E51122334455667788990000 /* AgentEventParsing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "AgentEventParsing.swift"; sourceTree = "<group>"; };
 		E51122334455667788990001 /* CodexEventParsing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CodexEventParsing.swift"; sourceTree = "<group>"; };
@@ -203,6 +219,7 @@
 				F7A8B9C0D1E2F30415260718 /* AgentSession.swift */,
 				BB01B2C3D4E5F60718293A4C /* AgentSessionGrouping.swift */,
 				BB02C3D4E5F60718293A4B5D /* AgentSessionFork.swift */,
+				BB02C3D4E5F60718293A4B61 /* AgentSessionRename.swift */,
 				E71122334455667788990000 /* AgentSessionTailer.swift */,
 				E2EEE78E188057F7BEC4230C /* APIClient.swift */,
 				45E750E410EC9DC5FADF63D2 /* AppState.swift */,
@@ -231,6 +248,13 @@
 				E11122334455667788990000 /* AgentRendering.swift */,
 				B8C9D0E1F20314253647589A /* DesignSystem.swift */,
 				E31122334455667788990000 /* LatexSymbols.swift */,
+				E311334455667788990010 /* MathAlphabets.swift */,
+				E311334455667788990011 /* MathSymbols.swift */,
+				E311334455667788990012 /* MathParser.swift */,
+				E311334455667788990013 /* MathFont.swift */,
+				E311334455667788990014 /* MathLayout.swift */,
+				E311334455667788990015 /* MathDelimiters.swift */,
+				E311334455667788990016 /* MathDisplayBlock.swift */,
 				1268E460F00E4691E94EC0D6 /* MarkdownRenderer.swift */,
 				BB5566778899AABBCC000001 /* NoteHTML.swift */,
 				6E5D4C3B2A190807F6E5D4C3 /* ShellEnvironment.swift */,
@@ -427,6 +451,7 @@
 				E6F7A8B9C0D1E2F304152607 /* AgentSession.swift in Sources */,
 				AA01B2C3D4E5F60718293A4B /* AgentSessionGrouping.swift in Sources */,
 				AA02C3D4E5F60718293A4B5C /* AgentSessionFork.swift in Sources */,
+				AA02C3D4E5F60718293A4B60 /* AgentSessionRename.swift in Sources */,
 				E7F8A9B0C1D2E3F405162708 /* AgentSessionView.swift in Sources */,
 				C1B2D3E4F5A60718293A4B5C /* OnboardingView.swift in Sources */,
 				A7B8C9D0E1F2031425364758 /* DesignSystem.swift in Sources */,
@@ -448,6 +473,13 @@
 				DE1122334455667788990000 /* NotificationCoordinator.swift in Sources */,
 				E01122334455667788990000 /* AgentRendering.swift in Sources */,
 				E21122334455667788990000 /* LatexSymbols.swift in Sources */,
+				E211334455667788990010 /* MathAlphabets.swift in Sources */,
+				E211334455667788990011 /* MathSymbols.swift in Sources */,
+				E211334455667788990012 /* MathParser.swift in Sources */,
+				E211334455667788990013 /* MathFont.swift in Sources */,
+				E211334455667788990014 /* MathLayout.swift in Sources */,
+				E211334455667788990015 /* MathDelimiters.swift in Sources */,
+				E211334455667788990016 /* MathDisplayBlock.swift in Sources */,
 				E41122334455667788990000 /* AgentEventParsing.swift in Sources */,
 				E41122334455667788990001 /* CodexEventParsing.swift in Sources */,
 				E41122334455667788990002 /* KimiSessions.swift in Sources */,
@@ -589,7 +621,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_ASSET_PATHS = "";
 				ENABLE_HARDENED_RUNTIME = NO;
 				ENABLE_PREVIEWS = YES;
@@ -604,7 +636,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.sipai.desktop;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -619,7 +651,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_ASSET_PATHS = "";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
@@ -634,7 +666,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.0.1;
+				MARKETING_VERSION = 1.0.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.sipai.desktop;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

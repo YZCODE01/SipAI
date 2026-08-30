@@ -30,6 +30,12 @@ final class AgentHistoryCache {
     struct Entry {
         let items: [AgentSessionHistoryItem]
         let contextTokens: Int
+        /// Window the footprint sits in, when the agent records one
+        /// (codex rollout, kimi config); 0 = unknown. Cached because a
+        /// cache hit on an unchanged file returns before any re-read —
+        /// without it the tooltip falls back to its constant until the
+        /// next turn.
+        let contextWindow: Int
         /// Seconds the transcript's newest finished turn took — the
         /// cold seed for the composer's turn clock, 0 when unknown.
         let turnDuration: Double
@@ -74,6 +80,7 @@ final class AgentHistoryCache {
         entries[sessionId] = Entry(
             items: cleaned,
             contextTokens: existing.contextTokens,
+            contextWindow: existing.contextWindow,
             turnDuration: existing.turnDuration,
             commands: existing.commands,
             fileSize: existing.fileSize,

@@ -117,8 +117,12 @@ enum MarkdownRenderer {
                 out.append(body)
             case .table(let header, _, let rows):
                 out.append(tableDisplayedText(header: header, rows: rows))
-            case .horizontalRule, .blank:
-                // Draws no text. Still emitted, so this array stays
+            case .horizontalRule, .blank, .displayMath:
+                // Draws no text a find bar could tint. A display
+                // equation is typeset glyphs, so counting its LaTeX
+                // would name matches the reader cannot see and cannot
+                // be stepped to — the shape `SearchMatching` exists to
+                // forbid. Still emitted, so this array stays
                 // index-aligned with `blocks` — MarkdownBlockList walks
                 // them together.
                 out.append("")
@@ -230,6 +234,10 @@ enum MarkdownRenderer {
         case blockquote(depth: Int, text: String)
         case codeBlock(language: String, body: String)
         case table(header: [String], alignments: [TableAlignment], rows: [[String]])
+        /// A display equation, typeset by `MathTypesetter` rather than
+        /// drawn as text. The LaTeX rides verbatim: it is the source the
+        /// renderer needs and the string "Copy LaTeX" hands back.
+        case displayMath(latex: String)
         case blank
     }
 
@@ -322,6 +330,17 @@ enum MarkdownRenderer {
                 let cb = codeBlocks[idx]
                 blocks.append(.codeBlock(language: cb.language, body: cb.body))
                 i += 1
+                continue
+            }
+
+            // Display math: `$$…$$`, `\[…\]`, or a bare
+            // `\begin{aligned}`. Detected before everything else so a
+            // multi-line equation never reaches the paragraph merger,
+            // which would glue its lines together with spaces and hand
+            // the result to the inline pass as prose.
+            if let (latex, next) = MathDelimiters.displayMath(lines, from: i) {
+                blocks.append(.displayMath(latex: latex))
+                i = next
                 continue
             }
 
@@ -690,6 +709,9 @@ private struct MarkdownBlockList: View {
                                       alignments: alignments,
                                       rows: rows,
                                       slot: slot)
+                        .padding(.vertical, 6)
+                case .displayMath(let latex):
+                    MathDisplayBlock(latex: latex)
                         .padding(.vertical, 6)
                 case .blank:
                     Spacer().frame(height: 6)

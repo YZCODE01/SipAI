@@ -28,6 +28,13 @@ swiftc -O -target arm64-apple-macos15.0 -o "$out/searchharness" \
   "$here/../../SipAI/Utilities/DesignSystem.swift" \
   "$here/../../SipAI/Utilities/LatexSymbols.swift" \
   "$here/../../SipAI/Utilities/SearchMatching.swift" \
+  "$here/../../SipAI/Utilities/MathAlphabets.swift" \
+  "$here/../../SipAI/Utilities/MathSymbols.swift" \
+  "$here/../../SipAI/Utilities/MathParser.swift" \
+  "$here/../../SipAI/Utilities/MathFont.swift" \
+  "$here/../../SipAI/Utilities/MathLayout.swift" \
+  "$here/../../SipAI/Utilities/MathDelimiters.swift" \
+  "$here/../../SipAI/Utilities/MathDisplayBlock.swift" \
   "$here/../../SipAI/Utilities/MarkdownRenderer.swift" \
   "$here/../../SipAI/Views/Chat/TranscriptFind.swift" \
   "$here/main.swift"

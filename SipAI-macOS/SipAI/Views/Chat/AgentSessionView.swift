@@ -87,6 +87,15 @@ struct AgentSessionView: View {
     /// (see `displayContextTokens`).
     @State private var seededContextTokens: Int = 0
 
+    /// The WINDOW that footprint sits in, when the agent records one
+    /// (codex stamps `model_context_window` on the rollout record the
+    /// footprint is read from; kimi's config declares
+    /// `max_context_size` per model). 0 = not recorded — claude among
+    /// them — and the tooltip falls back to its constant. Two feeds
+    /// with one authority each, exactly like the tokens they ride
+    /// with.
+    @State private var seededContextWindow: Int = 0
+
     /// Newest context-token total delivered by the runner's
     /// `$lastContextTokens` publisher. Mirrored into local @State (which
     /// the body reads) because this view deliberately does NOT observe
@@ -96,6 +105,10 @@ struct AgentSessionView: View {
     /// flip) also sidesteps the actor-scheduling race where the
     /// turn-end re-render lands before the result event does.
     @State private var liveContextTokens: Int = 0
+
+    /// Live mirror of the runner's `$lastContextWindow`, guarded and
+    /// reset exactly like `liveContextTokens`.
+    @State private var liveContextWindow: Int = 0
 
     /// Latest finished turn's duration — two feeds, mirroring the token
     /// counter.
@@ -113,6 +126,12 @@ struct AgentSessionView: View {
     /// and the chip stays hidden.
     @State private var seededTurnDuration: Double = 0
     @State private var liveTurnDuration: Double? = nil
+
+    /// Mirror of the runner's `$resolvedModel`, held for the same
+    /// reason as the two above: the feed replays on every render, and
+    /// the handler has to be able to tell a REPLAY from a new
+    /// observation. Nothing renders this — it is the guard's memory.
+    @State private var liveResolvedModel: AgentRunner.ResolvedModel? = nil
 
     /// Mirrors of the runner's external-turn state (this view
     /// deliberately does not observe the runner — see the token
@@ -135,13 +154,28 @@ struct AgentSessionView: View {
     /// global-search result seeds it, both of which outlive the bar.
     @StateObject private var find = TranscriptFindState()
     /// True when the loaded transcript is only the newest slice of the
-    /// file — the turn cap bit, or the file is bigger than the tail
-    /// budget. Drives the find bar's scope note, which is what keeps
-    /// "3 of 47" from reading as "47 in this session".
+    /// file — the turn cap bit, or the file is bigger than the read
+    /// budget. Drives the find bar's scope note (what keeps "3 of 47"
+    /// from reading as "47 in this session") AND the transcript's
+    /// "Show earlier" button, which must keep offering while older
+    /// turns exist ON DISK — the loaded rows running out is not the
+    /// session's start.
     @State private var historyPartial: Bool = false
-    /// Set once "Search whole session" has re-read with the search
-    /// budget, so the offer is not made twice.
-    @State private var historyWidened: Bool = false
+    /// Byte budget the CURRENT `historicalItems` were read with — the
+    /// rung of the widen ladder already spent. Starts at the ordinary
+    /// open's bound and moves only forward; a widen to a SMALLER
+    /// budget would replace loaded rows with fewer.
+    @State private var historyLoadedBudget: Int = AgentSessionScanner.historyByteBudget
+    /// Whether the 50-turn cap applied to that read. Only the initial
+    /// open caps turns; every widen reads `maxTurns: .max`, so a
+    /// partiality verdict after one is about bytes alone.
+    @State private var historyTurnCapApplies: Bool = true
+    /// Static, honest statement for the one state the button cannot
+    /// help: the ladder is exhausted and the file is STILL bigger than
+    /// the widest read. nil otherwise. Computed where partiality is
+    /// (never in `body` — it names file sizes, and a body that stats
+    /// the filesystem runs on every streamed event).
+    @State private var historyTruncationNote: String? = nil
     @State private var wideningHistory: Bool = false
 
     /// Set just before handleSessionIdDiscovered flips AppState so the
@@ -383,47 +417,10 @@ struct AgentSessionView: View {
             // Find bar — above the transcript, never over the composer
             // or the newest turn.
             if find.isOpen {
-                FindBar(find: find,
-                        scopeNote: historyPartial ? partialScopeNote : nil,
-                        widenTitle: historyPartial
-                            ? String(localized: "Search whole session",
-                                     comment: "Find bar action that re-reads the full transcript")
-                            : nil,
-                        onWiden: historyPartial ? widenHistoryForSearch : nil,
-                        widening: wideningHistory)
-                    .padding(.horizontal, 60)
-                    .padding(.bottom, 8)
-                    .transition(.opacity)
+                findBarSection
             }
             if let runner = currentRunner {
-                RunnerStreamView(
-                    runner: runner,
-                    historicalItems: historicalItems,
-                    isLoadingHistory: isLoading,
-                    expandedToolResults: $expandedToolResults,
-                    draftCwd: draftCwdForEmptyState,
-                    emptySessionCommands: emptySessionCommands,
-                    assistantLabel: sessionAgentName,
-                    repositionNonce: repositionNonce,
-                    find: find,
-                    canBranch: canBranch,
-                    editingRowId: $editingRowId,
-                    editDraft: $editDraft,
-                    branching: branching,
-                    onBeginEdit: beginMessageEdit,
-                    onCreateBranch: createSessionBranch,
-                    onCancelEdit: cancelMessageEdit
-                )
-                // New structural identity per session: session switches
-                // otherwise reuse the view (same type, same position),
-                // so onAppear never re-fires and two sessions with
-                // equal capped history counts kept each other's scroll
-                // offset instead of landing at the newest turn.
-                .id(runner.key)
-                // Transcript text tracks the sidebar row size (13 pt at
-                // Default) instead of the chat-content scale, so session
-                // text never outsizes the session's own name.
-                .environment(\.sipFontScale, SipFont.contentScale(fontScale))
+                runnerStream(runner)
             } else if case .draft = mode {
                 // Draft before its first send: no runner exists yet, by
                 // design — the composer's folder choice must stay open.
@@ -555,65 +552,16 @@ struct AgentSessionView: View {
             guard url != nil else { return }
             handleSessionIdDiscovered(currentRunner?.sessionId)
         }
-        .onReceive(contextTokensPublisher) { value in
-            // Equality guard: @Published replays its current value to
-            // every (re)subscription, and onReceive resubscribes per
-            // render — without the guard that replay would loop.
-            guard value > 0, value != liveContextTokens else { return }
-            liveContextTokens = value
+        .onReceive(contextUsagePublisher) { (usage: (Int, Int)) in
+            adoptContextUsage(usage.0, usage.1)
         }
         .onReceive(turnDurationPublisher) { value in
             // Equality-guarded like the token feed, same reason.
             guard let value, value > 0, value != liveTurnDuration else { return }
             liveTurnDuration = value
         }
-        .onReceive(externalTurnPublisher) { inProgress in
-            if inProgress {
-                // Proof the session is NOT abandoned: something is
-                // writing to it right now. Any "Interrupted" marker
-                // derived at load time was a snapshot of a gap — the
-                // exact case where the turn's answer then lands
-                // underneath a marker saying it never finished.
-                dropInterruptedMarker()
-                return
-            }
-            // External turns (another terminal) never emit a `.result`
-            // stream event here — re-derive the footprint from the
-            // session file the external claude just finished writing.
-            // Same for the mode/model/effort chips: the external turn
-            // may have switched any of them.
-            guard case .existing(_, let url, _, _) = mode else { return }
-            // Per agent, like every other read keyed on a session's
-            // owner: the two scanners decode different schemas, and
-            // claude's would quietly answer 0 on a codex rollout. This
-            // publisher rides the tailer, which only claude starts;
-            // the per-agent branch keeps the wrong scanner from ever
-            // being wired in.
-            let scanned = sessionAgentKey == "codex"
-                ? CodexSessionScanner.lastContextTokens(of: url)
-                : AgentSessionScanner.lastContextTokens(of: url)
-            if scanned > 0 { liveContextTokens = scanned }
-            // Refresh the clock's resting value from the turn the other
-            // terminal just finished — we have no live clock for it, so
-            // the transcript is the only source. OFF-MAIN, unlike the
-            // token read above it: this scan can escalate to a 4 MB
-            // read, and doing that on the main actor at every external
-            // turn boundary is a visible stall on a big session.
-            Task.detached(priority: .utility) {
-                let took = AgentSessionScanner.lastTurnDurationSeconds(of: url)
-                guard took > 0 else { return }
-                await MainActor.run {
-                    // The user may have switched sessions mid-read.
-                    guard case .existing(_, let current, _, _) = mode,
-                          current == url else { return }
-                    // Into the runner, not `liveTurnDuration` — the
-                    // publisher's replay would otherwise put the older
-                    // in-app value straight back. See
-                    // `noteExternalTurnDuration`.
-                    currentRunner?.noteExternalTurnDuration(took)
-                }
-            }
-            seedLaunchOptions()
+        .onReceive(externalTurnPublisher) { (inProgress: Bool) in
+            handleExternalTurnFlip(inProgress)
         }
         .onReceive(externalTurnStartPublisher) { value in
             // Equality-guarded like the token feed (@Published replays
@@ -628,23 +576,49 @@ struct AgentSessionView: View {
             guard stoppable != externalStoppable else { return }
             externalStoppable = stoppable
         }
-        .onReceive(liveModelIdPublisher) { fullId in
-            // The subprocess's system.init names the model that will
-            // actually serve the turn — more precise than the picker
-            // alias. Equality-guarded like the token feed (@Published
-            // replays on resubscribe).
-            guard let fullId, !fullId.isEmpty,
-                  launchOptions.modelFullId != fullId else { return }
-            // Remember what this alias (or "" = claude's default)
-            // resolved to — the only no-hardcoding source of versioned
-            // names for fresh drafts and the picker rows.
-            config.setAgentModelFullId(fullId,
-                                       forAlias: launchOptions.model ?? "")
-            // A mirror of recorded state, not a user edit: arm the
-            // seeding flag so onChange skips persisting it as a pref.
-            seedingOptions = true
-            launchOptions.modelFullId = fullId
+        .onReceive(liveModelIdPublisher) { (resolved: AgentRunner.ResolvedModel?) in
+            adoptResolvedModel(resolved)
         }
+    }
+
+    /// The subprocess's system.init names the model that will actually
+    /// serve the turn — more precise than the picker alias.
+    ///
+    /// Equality-guarded against THIS FEED'S OWN mirror, like the token
+    /// and duration feeds: @Published replays its current value to
+    /// every resubscription and onReceive resubscribes per render, so
+    /// an unguarded handler re-runs on every frame carrying a value
+    /// that can be several turns old.
+    ///
+    /// Guarding on `launchOptions` instead — which is what this did —
+    /// inverts the guard into a trigger. The user picks a different
+    /// model, the pick clears `modelFullId`, and the very next render
+    /// replays the OLD turn's id into a handler that now reads "this
+    /// is new": the chip snaps back to the model the session was
+    /// already running, and `setAgentModelFullId` files that id under
+    /// the alias the user just picked, renaming it in every picker on
+    /// this machine, permanently.
+    private func adoptResolvedModel(_ resolved: AgentRunner.ResolvedModel?) {
+        guard let resolved, !resolved.fullId.isEmpty,
+              resolved != liveResolvedModel else { return }
+        liveResolvedModel = resolved
+        // Remember what THAT alias (or "" = claude's default)
+        // resolved to — the only no-hardcoding source of versioned
+        // names for fresh drafts and the picker rows. The alias
+        // rides with the id from the runner precisely so this
+        // cannot be attributed to whatever the chip says now.
+        config.setAgentModelFullId(resolved.fullId,
+                                   forAlias: resolved.alias)
+        // Refine the CHIP only while it still shows the alias this
+        // observation is about. A pick made since describes a model
+        // that has not run yet, and it names itself from the alias
+        // map — which the line above has just made accurate.
+        guard (launchOptions.model ?? "") == resolved.alias,
+              launchOptions.modelFullId != resolved.fullId else { return }
+        // A mirror of recorded state, not a user edit: arm the
+        // seeding flag so onChange skips persisting it as a pref.
+        seedingOptions = true
+        launchOptions.modelFullId = resolved.fullId
     }
 
     /// The current runner's context-token feed. The value is published
@@ -652,16 +626,91 @@ struct AgentSessionView: View {
     /// AgentRunner) — live during the turn, from its first API call —
     /// so it can never race the status flip; the replay-on-subscribe
     /// also heals any emission a re-render gap might have missed.
-    private var contextTokensPublisher: AnyPublisher<Int, Never> {
+    private var contextUsagePublisher: AnyPublisher<(Int, Int), Never> {
         guard let runner = currentRunner else {
             return Empty().eraseToAnyPublisher()
         }
-        return runner.$lastContextTokens.eraseToAnyPublisher()
+        // The window rides the same delivery as the tokens it divides;
+        // combineLatest re-emits on either and replays both on
+        // (re)subscription, exactly like the single feed did.
+        return runner.$lastContextTokens
+            .combineLatest(runner.$lastContextWindow)
+            .eraseToAnyPublisher()
+    }
+
+    /// Handler bodies for the feeds above live in METHODS, not in the
+    /// `.onReceive` closures: the body's modifier chain sits at the
+    /// type-checker's complexity limit, and a closure of any size in
+    /// it is inference work multiplied by the whole chain.
+    private func adoptContextUsage(_ tokens: Int, _ window: Int) {
+        // Equality guards: @Published replays its current value to
+        // every (re)subscription, and onReceive resubscribes per
+        // render — without them that replay would loop. Each value is
+        // guarded on its OWN mirror.
+        if tokens > 0, tokens != liveContextTokens {
+            liveContextTokens = tokens
+        }
+        if window > 0, window != liveContextWindow {
+            liveContextWindow = window
+        }
+    }
+
+    private func handleExternalTurnFlip(_ inProgress: Bool) {
+        if inProgress {
+            // Proof the session is NOT abandoned: something is
+            // writing to it right now. Any "Interrupted" marker
+            // derived at load time was a snapshot of a gap — the
+            // exact case where the turn's answer then lands
+            // underneath a marker saying it never finished.
+            dropInterruptedMarker()
+            return
+        }
+        // External turns (another terminal) never emit a `.result`
+        // stream event here — re-derive the footprint from the
+        // session file the external claude just finished writing.
+        // Same for the mode/model/effort chips: the external turn
+        // may have switched any of them.
+        guard case .existing(_, let url, _, _) = mode else { return }
+        // Per agent, like every other read keyed on a session's
+        // owner: the two scanners decode different schemas, and
+        // claude's would quietly answer 0 on a codex rollout. This
+        // publisher rides the tailer, which only claude starts;
+        // the per-agent branch keeps the wrong scanner from ever
+        // being wired in.
+        if sessionAgentKey == "codex" {
+            let info = CodexSessionScanner.lastContextInfo(of: url)
+            if info.tokens > 0 { liveContextTokens = info.tokens }
+            if info.window > 0 { liveContextWindow = info.window }
+        } else {
+            let scanned = AgentSessionScanner.lastContextTokens(of: url)
+            if scanned > 0 { liveContextTokens = scanned }
+        }
+        // Refresh the clock's resting value from the turn the other
+        // terminal just finished — we have no live clock for it, so
+        // the transcript is the only source. OFF-MAIN, unlike the
+        // token read above it: this scan can escalate to a 4 MB
+        // read, and doing that on the main actor at every external
+        // turn boundary is a visible stall on a big session.
+        Task.detached(priority: .utility) {
+            let took = AgentSessionScanner.lastTurnDurationSeconds(of: url)
+            guard took > 0 else { return }
+            await MainActor.run {
+                // The user may have switched sessions mid-read.
+                guard case .existing(_, let current, _, _) = mode,
+                      current == url else { return }
+                // Into the runner, not `liveTurnDuration` — the
+                // publisher's replay would otherwise put the older
+                // in-app value straight back. See
+                // `noteExternalTurnDuration`.
+                currentRunner?.noteExternalTurnDuration(took)
+            }
+        }
+        seedLaunchOptions()
     }
 
     /// The runner's transcript path, which for a draft's first turn is
     /// resolved AFTER the session id (see `AgentRunner.awaitSessionFile`).
-    /// Same delivery contract as `contextTokensPublisher`.
+    /// Same delivery contract as `contextUsagePublisher`.
     private var sessionFilePublisher: AnyPublisher<URL?, Never> {
         guard let runner = currentRunner else {
             return Empty().eraseToAnyPublisher()
@@ -670,7 +719,7 @@ struct AgentSessionView: View {
     }
 
     /// The runner's latest finished-turn duration — see
-    /// `contextTokensPublisher` for the delivery contract it mirrors.
+    /// `contextUsagePublisher` for the delivery contract it mirrors.
     private var turnDurationPublisher: AnyPublisher<Double?, Never> {
         guard let runner = currentRunner else {
             return Empty().eraseToAnyPublisher()
@@ -708,11 +757,13 @@ struct AgentSessionView: View {
 
     /// Resolved-model feed from the runner's system.init events; keeps
     /// the composer's model chip on the exact model id mid-session.
-    private var liveModelIdPublisher: AnyPublisher<String?, Never> {
+    /// Carries the alias the turn was launched with — see
+    /// `AgentRunner.ResolvedModel`.
+    private var liveModelIdPublisher: AnyPublisher<AgentRunner.ResolvedModel?, Never> {
         guard let runner = currentRunner else {
             return Empty().eraseToAnyPublisher()
         }
-        return runner.$lastModelId.eraseToAnyPublisher()
+        return runner.$resolvedModel.eraseToAnyPublisher()
     }
 
     // MARK: - Empty (.empty-mode fallback)
@@ -773,6 +824,14 @@ struct AgentSessionView: View {
     /// the value seeded from the session JSONL.
     private var displayContextTokens: Int {
         liveContextTokens > 0 ? liveContextTokens : seededContextTokens
+    }
+
+    /// Window for the counter's occupancy tooltip, same precedence as
+    /// the footprint it divides. nil = the agent records none, and the
+    /// counter keeps its claude-window constant.
+    private var displayContextWindow: Int? {
+        if liveContextWindow > 0 { return liveContextWindow }
+        return seededContextWindow > 0 ? seededContextWindow : nil
     }
 
     /// Same shape for the turn clock's resting value: a turn this app
@@ -918,6 +977,7 @@ struct AgentSessionView: View {
             find: find,
             canFind: hasSearchableTranscript,
             contextTokens: displayContextTokens,
+            contextWindowTokens: displayContextWindow,
             turnStartedAt: turnStartedAt,
             lastTurnDuration: displayTurnDuration,
             onSend: handleSend,
@@ -968,45 +1028,185 @@ struct AgentSessionView: View {
                comment: "Find bar note when the transcript on screen is a bounded tail of the file")
     }
 
-    /// Is what is loaded the whole conversation?
-    ///
-    /// `readHistory` returns the newest 50 turns of an 8 MB tail, so
-    /// two things mean "there is more": the turn cap was reached, or
-    /// the file is bigger than the tail. Evaluated when the bar OPENS
-    /// rather than per render — it stats the file, and a body that
-    /// touches the filesystem runs on every streamed event.
-    private func evaluateHistoryScope() {
-        guard case .existing(_, let url, _, _) = mode, !historyWidened else {
-            historyPartial = false
-            return
-        }
-        let turns = historicalItems.reduce(into: 0) { total, item in
-            if case .userText = item.kind { total += 1 }
-        }
-        let big = (Self.fileStat(url)?.size ?? 0) > UInt64(8 * 1024 * 1024)
-        historyPartial = turns >= 50 || big
+    /// The widen ladder: each rung re-reads the transcript with a
+    /// bigger (still bounded) tail. The first rung is search's own
+    /// budget; past the last, `historyTruncationNote` states what was
+    /// left unread instead of a button that could not deliver. Budgets
+    /// stay BOUNDS — "read it all" on a transcript that can run to
+    /// hundreds of MB is the freeze `historyByteBudget` exists to
+    /// prevent; the ceiling is a deliberate multiple of it that covers
+    /// every session on a working machine.
+    private static let historyWidenLadder = [
+        SearchTextExtractor.searchByteBudget,
+        256 * 1024 * 1024,
+    ]
+
+    /// The next rung above what is already loaded; nil at the ceiling.
+    private var nextWidenBudget: Int? {
+        Self.historyWidenLadder.first { $0 > historyLoadedBudget }
     }
 
-    /// Re-read the transcript with search's own (larger, still bounded)
-    /// budget so the counter can describe the whole file.
+    /// Older turns exist on disk AND a wider read can still fetch them
+    /// — what keeps "Show earlier" offered past the loaded rows, and
+    /// what the find bar's widen offer needs too. At the ladder's
+    /// ceiling this is false while `historyPartial` stays true: the
+    /// scope note still says partial, and an action that would re-read
+    /// the same bytes is not offered.
+    private var historyHasMore: Bool {
+        historyPartial && nextWidenBudget != nil
+    }
+
+    /// The transcript, with its long init — its own builder because
+    /// the main body's modifier chain sits at the type-checker's
+    /// complexity limit, and this call is the heaviest expression in
+    /// it.
+    private func runnerStream(_ runner: AgentRunner) -> some View {
+        RunnerStreamView(
+            runner: runner,
+            historicalItems: historicalItems,
+            isLoadingHistory: isLoading,
+            historyHasMore: historyHasMore,
+            isWideningHistory: wideningHistory,
+            historyTruncationNote: historyTruncationNote,
+            onLoadEarlier: loadEarlierHistory,
+            expandedToolResults: $expandedToolResults,
+            draftCwd: draftCwdForEmptyState,
+            emptySessionCommands: emptySessionCommands,
+            assistantLabel: sessionAgentName,
+            repositionNonce: repositionNonce,
+            find: find,
+            canBranch: canBranch,
+            editingRowId: $editingRowId,
+            editDraft: $editDraft,
+            branching: branching,
+            onBeginEdit: beginMessageEdit,
+            onCreateBranch: createSessionBranch,
+            onCancelEdit: cancelMessageEdit
+        )
+        // New structural identity per session: session switches
+        // otherwise reuse the view (same type, same position), so
+        // onAppear never re-fires and two sessions with equal capped
+        // history counts kept each other's scroll offset instead of
+        // landing at the newest turn.
+        .id(runner.key)
+        // Transcript text tracks the sidebar row size (13 pt at
+        // Default) instead of the chat-content scale, so session text
+        // never outsizes the session's own name.
+        .environment(\.sipFontScale, SipFont.contentScale(fontScale))
+    }
+
+    /// Find bar with its widen offer — its own builder because the
+    /// main body's modifier chain sits at the type-checker's
+    /// complexity limit.
+    @ViewBuilder
+    private var findBarSection: some View {
+        FindBar(find: find,
+                scopeNote: historyPartial ? partialScopeNote : nil,
+                widenTitle: historyHasMore
+                    ? String(localized: "Search whole session",
+                             comment: "Find bar action that re-reads the full transcript")
+                    : nil,
+                onWiden: historyHasMore ? widenHistoryForSearch : nil,
+                widening: wideningHistory)
+            .padding(.horizontal, 60)
+            .padding(.bottom, 8)
+            .transition(.opacity)
+    }
+
+    /// Is what is loaded the whole conversation?
+    ///
+    /// Two things mean "there is more": the 50-turn cap bit (initial
+    /// opens only — every widen reads `maxTurns: .max`), or the file
+    /// is bigger than the budget the loaded rows were read with.
+    /// Evaluated at discrete moments — a load landing, a widen
+    /// landing, the find bar opening — never per render: it stats the
+    /// file, and a body that touches the filesystem runs on every
+    /// streamed event.
+    private func evaluateHistoryScope() {
+        guard case .existing(_, let url, _, _) = mode else {
+            historyPartial = false
+            historyTruncationNote = nil
+            return
+        }
+        updateHistoryScope(items: historicalItems,
+                           fileSize: Self.fileStat(url)?.size ?? 0)
+    }
+
+    /// One verdict, shared by the find bar's scope note and the
+    /// transcript's "Show earlier" — asked two ways they drift, and a
+    /// counter's caveat ends up disagreeing with the button under it.
+    private func updateHistoryScope(items: [AgentSessionHistoryItem],
+                                    fileSize: UInt64) {
+        let capBit: Bool
+        if historyTurnCapApplies {
+            let turns = items.reduce(into: 0) { total, item in
+                if case .userText = item.kind { total += 1 }
+            }
+            capBit = turns >= 50
+        } else {
+            capBit = false
+        }
+        historyPartial = capBit || fileSize > UInt64(historyLoadedBudget)
+        // The one state "Show earlier" cannot help: ladder exhausted,
+        // file still bigger than the widest read. Say so, with the
+        // sizes — a bound the reader cannot see reads as "this is the
+        // whole session" (the no-silent-caps rule).
+        if historyPartial, nextWidenBudget == nil {
+            let total = ByteCountFormatter.string(
+                fromByteCount: Int64(fileSize), countStyle: .file)
+            let shown = ByteCountFormatter.string(
+                fromByteCount: Int64(historyLoadedBudget), countStyle: .file)
+            historyTruncationNote = String(
+                localized: "Earlier turns aren't loaded — this session's transcript is \(total) and the newest \(shown) are shown.",
+                comment: "Static note atop a transcript too big to load whole; placeholders are the file size and the loaded size")
+        } else {
+            historyTruncationNote = nil
+        }
+    }
+
+    /// "Show earlier" ran out of loaded rows with the session's start
+    /// still on disk: climb one rung.
+    private func loadEarlierHistory() {
+        guard let next = nextWidenBudget else { return }
+        widenHistory(toBudget: next)
+    }
+
+    /// The find bar's "Search whole session" — the same climb, so the
+    /// two features cannot hold two ideas of what is loaded.
+    private func widenHistoryForSearch() {
+        guard let next = nextWidenBudget else { return }
+        widenHistory(toBudget: next)
+    }
+
+    /// Re-read the transcript with a bigger (still bounded) budget and
+    /// swap it in.
     ///
     /// Deliberately NOT written into `AgentHistoryCache`: that cache
-    /// feeds every ordinary open, and seeding it with a whole-file read
-    /// would make every later visit to this session pay for one find.
+    /// feeds every ordinary open, and seeding it with a near-whole-file
+    /// read would make every later visit to this session pay for one
+    /// click.
     ///
     /// No jump afterwards, on purpose. The re-read mints fresh row ids,
-    /// so the active match cannot be preserved by identity, and sending
-    /// the reader to match 1 of 400 would render every row between here
-    /// and the start of the session. The counter updates; ↑ walks back
-    /// one match — and one window growth — at a time.
-    private func widenHistoryForSearch() {
-        guard case .existing(_, let url, _, _) = mode, !wideningHistory else { return }
+    /// so a find's active match cannot be preserved by identity (and
+    /// expanded tool chips collapse); sending the reader anywhere would
+    /// render every row between here and there. The counter updates;
+    /// ↑ walks back one match — and one window growth — at a time, and
+    /// "Show earlier" reveals the next 200 rows above the top exactly
+    /// as an ordinary reveal does.
+    ///
+    /// `trimmedForInFlight` applies exactly as it does on an ordinary
+    /// load: the re-read includes a turn the live buffer is already
+    /// rendering, and keeping both shows the user's message and the
+    /// turn's partial records twice. (The search widen shipped without
+    /// it — same bug, reachable by widening mid-turn.)
+    private func widenHistory(toBudget budget: Int) {
+        guard case .existing(_, let url, _, _) = mode, !wideningHistory,
+              budget > historyLoadedBudget else { return }
         wideningHistory = true
         let agentKey = sessionAgentKey
         Task {
             let items = await Task.detached(priority: .userInitiated) {
                 () -> [AgentSessionHistoryItem] in
-                let budget = SearchTextExtractor.searchByteBudget
                 switch agentKey {
                 case "codex":
                     return CodexSessionScanner.readHistory(
@@ -1025,10 +1225,14 @@ struct AgentSessionView: View {
                 return
             }
             wideningHistory = false
+            // A failed read keeps what is on screen; partiality stays
+            // true, so the button remains and a later click retries.
             guard !items.isEmpty else { return }
-            historicalItems = items
-            historyWidened = true
-            historyPartial = false
+            historicalItems = trimmedForInFlight(items)
+            historyLoadedBudget = budget
+            historyTurnCapApplies = false
+            updateHistoryScope(items: items,
+                               fileSize: Self.fileStat(url)?.size ?? 0)
         }
     }
 
@@ -1517,8 +1721,10 @@ struct AgentSessionView: View {
         // global-search result re-opens it a runloop turn later
         // (`consumePendingFind`), so this cannot fight that.
         find.close()
-        historyWidened = false
+        historyLoadedBudget = AgentSessionScanner.historyByteBudget
+        historyTurnCapApplies = true
         historyPartial = false
+        historyTruncationNote = nil
         wideningHistory = false
         guard case .existing(_, let url, _, _) = mode else {
             // Draft mode: nothing on disk yet. RunnerStreamView
@@ -1526,9 +1732,12 @@ struct AgentSessionView: View {
             historicalItems = []
             expandedToolResults = []
             seededContextTokens = 0
+            seededContextWindow = 0
             liveContextTokens = 0
+            liveContextWindow = 0
             seededTurnDuration = 0
             liveTurnDuration = nil
+            liveResolvedModel = nil
             externalTurnStart = nil
             externalStoppable = false
             emptySessionCommands = []
@@ -1551,7 +1760,13 @@ struct AgentSessionView: View {
         // previous session's total from flashing on the new one. Same
         // for the duration chip and the external-turn mirrors.
         liveContextTokens = 0
+        liveContextWindow = 0
         liveTurnDuration = nil
+        // Cleared with them: the incoming runner replays its own value
+        // within a frame, and a mirror still holding the OUTGOING
+        // session's pair would suppress an identical observation here
+        // as though it had already been seen.
+        liveResolvedModel = nil
         externalTurnStart = nil
         externalStoppable = false
 
@@ -1569,6 +1784,7 @@ struct AgentSessionView: View {
             Self.prewarmMarkdown(cached.items, tail: 30)
             historicalItems = trimmedForInFlight(cached.items)
             seededContextTokens = cached.contextTokens
+            seededContextWindow = cached.contextWindow
             seededTurnDuration = cached.turnDuration
             emptySessionCommands = cached.commands
             isLoading = false
@@ -1579,7 +1795,15 @@ struct AgentSessionView: View {
             // relying on the swap's own geometry to imply it.
             repositionNonce &+= 1
             currentRunner?.clearEvents()
-            if let stat = Self.fileStat(url),
+            let stat = Self.fileStat(url)
+            // "Show earlier" needs the partial verdict from the first
+            // frame, not from the find bar opening. Cache entries are
+            // always initial-budget reads (widens never store), and
+            // `reload()` reset the budget a moment ago, so the inputs
+            // agree with what this cache entry was read with.
+            updateHistoryScope(items: cached.items,
+                               fileSize: stat?.size ?? 0)
+            if let stat,
                stat.size == cached.fileSize, stat.mtime == cached.fileMtime {
                 return
             }
@@ -1589,6 +1813,7 @@ struct AgentSessionView: View {
 
         isLoading = true
         seededContextTokens = 0
+        seededContextWindow = 0
         seededTurnDuration = 0
         emptySessionCommands = []
         startHistoryLoad(url: url, viaSpinner: true)
@@ -1607,6 +1832,7 @@ struct AgentSessionView: View {
         Task {
             let loaded = await Task.detached(priority: .userInitiated)
             { () -> (items: [AgentSessionHistoryItem], contextTokens: Int,
+                     contextWindow: Int, kimiModel: String?,
                      turnDuration: Double, commands: [String]) in
                 if agentKey == "codex" {
                     // No turn duration: codex reports no wall-clock time
@@ -1617,9 +1843,8 @@ struct AgentSessionView: View {
                     // a codex session (the chip hides itself at 0).
                     let items = CodexSessionScanner.readHistory(of: url)
                     Self.prewarmMarkdown(items)
-                    return (items,
-                            CodexSessionScanner.lastContextTokens(of: url),
-                            0, [])
+                    let info = CodexSessionScanner.lastContextInfo(of: url)
+                    return (items, info.tokens, info.window, nil, 0, [])
                 }
                 if agentKey == "kimi" {
                     // No derived "Interrupted" marker: the two liveness
@@ -1637,9 +1862,12 @@ struct AgentSessionView: View {
                     // and nothing says why.
                     let items = KimiSessionScanner.readHistory(of: url)
                     Self.prewarmMarkdown(items)
-                    return (items,
-                            KimiSessionScanner.lastContextTokens(of: url),
-                            0, [])
+                    // Tokens travel with the MODEL, not a window: the
+                    // window is a config fact (`max_context_size`) and
+                    // the catalog holding it is MainActor state, so
+                    // the join happens after this task lands.
+                    let usage = KimiSessionScanner.lastContextUsage(of: url)
+                    return (items, usage.tokens, 0, usage.model, 0, [])
                 }
                 var items = AgentSessionScanner.readHistory(of: url)
                 // Kill/quit residue: the newest turn's records simply
@@ -1680,6 +1908,9 @@ struct AgentSessionView: View {
                     : []
                 return (items,
                         AgentSessionScanner.lastContextTokens(of: url),
+                        // Claude records no window anywhere in the
+                        // transcript; the counter keeps its constant.
+                        0, nil,
                         // Off-main by construction — this is the only
                         // place the transcript is read for the clock.
                         AgentSessionScanner.lastTurnDurationSeconds(of: url),
@@ -1689,10 +1920,24 @@ struct AgentSessionView: View {
                 // The user switched away mid-load.
                 return
             }
+            // Kimi's window joins here: the wire named the model, the
+            // config names that model's `max_context_size`, and the
+            // catalog holding the config is MainActor state the
+            // detached read could not touch. `ensureLoaded()` is one
+            // stat when nothing changed.
+            var window = loaded.contextWindow
+            if window == 0, let model = loaded.kimiModel {
+                KimiCatalog.shared.ensureLoaded()
+                if let w = KimiCatalog.shared.maxContextSize(forModel: model),
+                   w > 0 {
+                    window = w
+                }
+            }
             historyCache.store(
                 AgentHistoryCache.Entry(
                     items: loaded.items,
                     contextTokens: loaded.contextTokens,
+                    contextWindow: window,
                     turnDuration: loaded.turnDuration,
                     commands: loaded.commands,
                     fileSize: stat?.size ?? 0,
@@ -1701,7 +1946,16 @@ struct AgentSessionView: View {
                 for: sid
             )
             historicalItems = trimmedForInFlight(loaded.items)
+            // This read used the DEFAULT budget whatever the view held
+            // before (a turn-end reload of a widened transcript lands
+            // here too), so the scope verdict is judged against that
+            // budget, not a stale wider one.
+            historyLoadedBudget = AgentSessionScanner.historyByteBudget
+            historyTurnCapApplies = true
+            updateHistoryScope(items: loaded.items,
+                               fileSize: stat?.size ?? 0)
             seededContextTokens = loaded.contextTokens
+            seededContextWindow = window
             // Into the runner as well, for the same reason
             // `noteExternalTurnDuration` exists: `reload()` cleared the
             // live mirror a moment ago and the runner's replay is about
@@ -1710,7 +1964,8 @@ struct AgentSessionView: View {
             // would go on showing the older number over a transcript
             // that has moved on. This read IS of the current file, so it
             // is never the staler of the two.
-            currentRunner?.noteTranscriptContextTokens(loaded.contextTokens)
+            currentRunner?.noteTranscriptContextTokens(loaded.contextTokens,
+                                                       window: window)
             seededTurnDuration = loaded.turnDuration
             emptySessionCommands = loaded.commands
             if viaSpinner {
@@ -1841,6 +2096,22 @@ private struct RunnerStreamView: View {
     let historicalItems: [AgentSessionHistoryItem]
     let isLoadingHistory: Bool
 
+    /// Older turns exist ON DISK beyond `historicalItems` and a wider
+    /// read can still fetch them. Keeps "Show earlier" offered when
+    /// the loaded rows run out — without it the button silently
+    /// vanished at the read bound (50 turns of an 8 MB tail) with the
+    /// session's start unreachable, however long the file was.
+    let historyHasMore: Bool
+    /// A wider read is in flight; the button says so and stops taking
+    /// clicks it could not serve.
+    let isWideningHistory: Bool
+    /// Non-nil once the widen ladder is exhausted with the file still
+    /// bigger than the widest read — rendered as a STATIC line in the
+    /// button's place, naming the sizes (the no-silent-caps rule).
+    let historyTruncationNote: String?
+    /// Climb one rung of the parent's widen ladder.
+    let onLoadEarlier: () -> Void
+
     /// Shared with the live path — `eventId` for live rows, `item.id`
     /// for historical rows. The two never collide because both are
     /// freshly-minted UUIDs.
@@ -1891,6 +2162,10 @@ private struct RunnerStreamView: View {
     init(runner: AgentRunner,
          historicalItems: [AgentSessionHistoryItem],
          isLoadingHistory: Bool,
+         historyHasMore: Bool,
+         isWideningHistory: Bool,
+         historyTruncationNote: String?,
+         onLoadEarlier: @escaping () -> Void,
          expandedToolResults: Binding<Set<UUID>>,
          draftCwd: URL?,
          emptySessionCommands: [String],
@@ -1907,6 +2182,10 @@ private struct RunnerStreamView: View {
         self.runner = runner
         self.historicalItems = historicalItems
         self.isLoadingHistory = isLoadingHistory
+        self.historyHasMore = historyHasMore
+        self.isWideningHistory = isWideningHistory
+        self.historyTruncationNote = historyTruncationNote
+        self.onLoadEarlier = onLoadEarlier
         self._expandedToolResults = expandedToolResults
         self.draftCwd = draftCwd
         self.emptySessionCommands = emptySessionCommands
@@ -2458,19 +2737,56 @@ private struct RunnerStreamView: View {
                         let pairing: (byUseId: [String: PairedResult],
                                       consumed: Set<UUID>,
                                       labelled: Set<UUID>) = toolPairing
-                        if historicalItems.count > historyDisplayCap {
+                        let hiddenLoaded = historicalItems.count - historyDisplayCap
+                        if hiddenLoaded > 0 || historyHasMore {
                             Button {
+                                // Fetch AHEAD of need: once the loaded
+                                // remainder is under one reveal, kick
+                                // the wider read so the next click has
+                                // rows waiting. The cap bump stands
+                                // either way — when the read lands,
+                                // `suffix(cap)` reveals the next ~200
+                                // rows above the top exactly as an
+                                // ordinary reveal does, and the button
+                                // returns with the true remainder.
+                                if historyHasMore, hiddenLoaded < 200 {
+                                    onLoadEarlier()
+                                }
                                 historyDisplayCap += 200
                             } label: {
-                                Text(String(localized: "Show earlier — \(historicalItems.count - historyDisplayCap) older rows",
-                                            comment: "Button above a truncated transcript; placeholder is the hidden row count"))
-                                    .font(.system(size: 12 * fontScale))
-                                    .foregroundColor(ChatDesign.textSecondary)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 6)
-                                    .contentShape(Rectangle())
+                                Group {
+                                    if hiddenLoaded > 0 {
+                                        Text(String(localized: "Show earlier — \(hiddenLoaded) older rows",
+                                                    comment: "Button above a truncated transcript; placeholder is the hidden row count"))
+                                    } else if isWideningHistory {
+                                        Text(String(localized: "Loading earlier turns…",
+                                                    comment: "Disabled state of the Show-earlier button while older turns are read from disk"))
+                                    } else {
+                                        // No count: the remainder is
+                                        // unparsed rows on disk, and a
+                                        // number here would be a guess
+                                        // stated as a fact.
+                                        Text(String(localized: "Show earlier — load older turns",
+                                                    comment: "Show-earlier button when older turns must first be read from disk"))
+                                    }
+                                }
+                                .font(.system(size: 12 * fontScale))
+                                .foregroundColor(ChatDesign.textSecondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 6)
+                                .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
+                            // With loaded rows still hidden a click can
+                            // always reveal; only a pure fetch-click
+                            // has nothing to do while one is running.
+                            .disabled(isWideningHistory && hiddenLoaded <= 0)
+                        } else if let note = historyTruncationNote {
+                            Text(note)
+                                .font(.system(size: 12 * fontScale))
+                                .foregroundColor(ChatDesign.textSecondary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 6)
                         }
                         // EAGER on purpose — see the container's note.
                         ForEach(displayedHistory) { item in

@@ -61,9 +61,10 @@ enum CodexEventParser {
             // permanent key, exactly as claude's system.init does.
             //
             // Model and cwd are deliberately blank: codex does not
-            // report either here. `lastModelId` already guards on a
-            // non-empty model, so the composer keeps showing the
-            // picker's alias rather than being blanked by this.
+            // report either here. `AgentRunner.resolvedModel` already
+            // guards on a non-empty model, so the composer keeps
+            // showing the picker's alias rather than being blanked by
+            // this.
             let tid = (obj["thread_id"] as? String) ?? ""
             guard !tid.isEmpty else { return Parsed() }
             return Parsed(events: [StreamEvent(kind: .systemInit(

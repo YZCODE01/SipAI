@@ -77,6 +77,14 @@ struct AgentComposer: View {
     /// Context-window footprint (tokens) for the usage ring. 0 = fresh.
     var contextTokens: Int
 
+    /// The window that footprint sits in, when the session's agent
+    /// RECORDS one — codex stamps `model_context_window` on the very
+    /// rollout record the footprint is read from, kimi's config
+    /// declares `max_context_size` per model. nil = not recorded
+    /// (claude among them), and the counter keeps its constant.
+    /// Display-only; nothing is ever launched with it.
+    var contextWindowTokens: Int? = nil
+
     /// When the in-flight turn started, or nil if none is running.
     /// Non-nil makes the turn clock count up live.
     ///
@@ -401,7 +409,9 @@ struct AgentComposer: View {
             // from the first assistant event) — "0 tokens" says
             // nothing.
             if config.display.showTokenAgent && contextTokens > 0 {
-                ContextTokenCounter(contextTokens: contextTokens)
+                ContextTokenCounter(contextTokens: contextTokens,
+                                    windowTokens: contextWindowTokens
+                                        ?? ContextTokenCounter.claudeWindow)
             }
         }
         .padding(.horizontal, 4)
@@ -1388,10 +1398,17 @@ struct TurnClockChip: View {
 /// not others is worse than none).
 /// The call site gates visibility behind Settings → "Show token count".
 struct ContextTokenCounter: View {
+    /// The standard Claude window, the FALLBACK when the session's
+    /// agent records no window of its own. Codex and kimi both record
+    /// theirs and pass it in (`contextWindowTokens`): dividing a codex
+    /// footprint by this constant overstated occupancy on every codex
+    /// session — the recorded window on this machine is 258,400 — and
+    /// kimi's run to 1,048,576.
+    static let claudeWindow = 200_000
+
     var contextTokens: Int
-    /// Context-window size for the occupancy tooltip. The Claude window
-    /// constant is good enough for a tooltip.
-    var windowTokens: Int = 200_000
+    /// Context-window size for the occupancy tooltip.
+    var windowTokens: Int = ContextTokenCounter.claudeWindow
 
     /// The value currently rendered — ticked toward `contextTokens` by
     /// `animate(to:)` on every change. Born AT the current value, not
@@ -1402,9 +1419,13 @@ struct ContextTokenCounter: View {
     @State private var shown: Int
     @State private var ticker: Task<Void, Never>? = nil
 
-    init(contextTokens: Int, windowTokens: Int = 200_000) {
+    init(contextTokens: Int,
+         windowTokens: Int = ContextTokenCounter.claudeWindow) {
         self.contextTokens = contextTokens
-        self.windowTokens = windowTokens
+        // A window is a divisor; a bogus 0 upstream must degrade to
+        // the constant, never to a division by zero.
+        self.windowTokens = windowTokens > 0
+            ? windowTokens : ContextTokenCounter.claudeWindow
         self._shown = State(initialValue: contextTokens)
     }
 

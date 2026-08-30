@@ -12,6 +12,55 @@ GitHub release body, and — once that window exists — the "what's new"
 panel shown after updating. Write each entry for the person reading it
 inside the app, not for someone reading a diff.
 
+## [1.0.2] — 2026-08-30
+
+### Added
+
+- **Equations are typeset, not approximated.** Mathematics in chats and
+  agent transcripts is now laid out properly — real fraction bars, sums
+  and integrals with their limits in place, matrices, aligned
+  derivations, and brackets that grow to fit what they hold. Notes
+  already rendered this way; chats and transcripts now agree with them.
+  Right-click an equation for **Copy LaTeX**. One trade: a displayed
+  equation is drawn rather than kept as text, so its source no longer
+  turns up in search — Copy LaTeX is how to get it.
+- **Renaming an agent session reaches the agent.** Rename a session in
+  the sidebar and Claude Code's and Kimi Code's own session pickers show
+  the new name too, instead of only SipAI showing it. Codex rebuilds its
+  titles from the first message on every run, so a Codex rename stays
+  SipAI's — and if a write to an agent doesn't land, SipAI now says so
+  rather than leaving the two quietly disagreeing.
+
+### Fixed
+
+- **Work the agent backgrounds no longer disappears (Claude Code).**
+  Asking for something long — "start this and tell me when it's done" —
+  could end with the answer never arriving: no error, no exit, and
+  nothing in the transcript on reopen. That work now runs in the
+  foreground, where its result actually lands.
+- **Choosing a model no longer renames the others.** Picking a different
+  model mid-session could show the previously running model's name — for
+  that model and then for every other one in the menu — and the wrong
+  name survived a restart. The model you picked always ran; only the
+  name was wrong. An install already affected corrects itself on first
+  launch.
+- **"Show earlier" now reaches the start of a long session.** It used to
+  walk back a few hundred rows and then vanish with the beginning of the
+  transcript still out of reach, and nothing saying so. It keeps loading
+  older turns now, and when a session really is too large to show whole
+  it says that plainly instead of going quiet.
+- Symbols such as `\varphi` and `\ell` no longer print as source, and a
+  nested expression — a fraction inside an exponent — is no longer
+  scrambled into a different one.
+- In an agent session, the context tooltip reports the model's real
+  context window for Codex and Kimi Code sessions rather than assuming
+  200,000 tokens.
+
+### Security
+
+- The new equation renderer bounds what it reads out of a font file, so
+  a malformed or hostile one can stall neither the drawing nor the app.
+
 ## [1.0.1] — 2026-08-21
 
 ### Added
@@ -89,5 +138,6 @@ First public release.
   **Settings → Updates**.
 - **English and Simplified Chinese** throughout.
 
+[1.0.2]: https://github.com/YZCODE01/SipAI/releases/tag/v1.0.2
 [1.0.1]: https://github.com/YZCODE01/SipAI/releases/tag/v1.0.1
 [1.0.0]: https://github.com/YZCODE01/SipAI/releases/tag/v1.0.0

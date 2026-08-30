@@ -391,6 +391,7 @@ type = "anthropic"
 [models."kimi-for-coding/k3-256k"]
 provider = "kimi-for-coding"
 model = "k3-256k"
+max_context_size = 262_144
 capabilities = [ "image_in", "thinking", "tool_use" ]
 display_name = "Kimi K3-256K"
 support_efforts = [ "low", "high", "max" ]
@@ -423,6 +424,16 @@ check("a model publishing no support_efforts offers NO levels",
         .map { $0.efforts.isEmpty } == true)
 check("the union is not reachable from a model we DO know",
       real.models.allSatisfy { $0.efforts != KimiCapabilities.effortLevels })
+// `max_context_size` feeds the token chip's occupancy tooltip; TOML
+// allows `262_144`, and kimi's writer emits bare digits — both must
+// read as one number.
+check("max_context_size is read per model, underscores included",
+      real.models.first { $0.slug == "kimi-for-coding/k3-256k" }?
+        .maxContextSize == 262_144,
+      "\(String(describing: real.models.first { $0.slug == "kimi-for-coding/k3-256k" }?.maxContextSize))")
+check("a model declaring no max_context_size answers nil, not a guess",
+      real.models.first { $0.slug.hasSuffix("highspeed") }?
+        .maxContextSize == nil)
 
 // A dot inside a QUOTED alias is part of the name; a dot in a BARE
 // header separates a sub-table. Getting this backwards truncates every
@@ -543,6 +554,13 @@ check("the derived title comes from the real prompt, not the reminder",
 check("context tokens sum the four usage fields",
       KimiSessionScanner.lastContextTokens(of: realWire) == 2045 + 18944 + 42,
       "\(KimiSessionScanner.lastContextTokens(of: realWire))")
+// The record's `model` string IS the config alias — the join that
+// lets the occupancy tooltip divide by that entry's
+// `max_context_size` instead of the claude constant.
+check("the usage record's model rides out with the tokens",
+      KimiSessionScanner.lastContextUsage(of: realWire).model
+        == "moonshot-ai/kimi-k3",
+      "\(String(describing: KimiSessionScanner.lastContextUsage(of: realWire).model))")
 
 // Kimi's own announcement of its session id, verbatim from a real run.
 check("the resume hint yields the session id",

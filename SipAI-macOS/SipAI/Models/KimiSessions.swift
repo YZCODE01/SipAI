@@ -688,6 +688,20 @@ enum KimiSessionScanner {
     /// Newest record wins even when it DROPS — a compaction genuinely
     /// lowers the footprint, and the smaller number is the honest one.
     static func lastContextTokens(of wire: URL) -> Int {
+        lastContextUsage(of: wire).tokens
+    }
+
+    /// The footprint PLUS the model that produced it. The record's
+    /// `model` string IS the config alias (measured:
+    /// `"model":"moonshot-ai/kimi-k3"` against
+    /// `[models."moonshot-ai/kimi-k3"]` in the same install's
+    /// config.toml), which is what lets the occupancy tooltip divide by
+    /// that entry's `max_context_size` instead of a constant — kimi
+    /// windows on this machine run from 262,144 to 1,048,576 where the
+    /// constant says 200,000. The join itself lives at the caller
+    /// (`KimiCatalog.maxContextSize(forModel:)`): this scan runs off
+    /// the main actor and the catalog is MainActor state.
+    static func lastContextUsage(of wire: URL) -> (tokens: Int, model: String?) {
         // Escalating bounded tail, same shape as `lastUserMessageDate`:
         // the newest usage record sits near the end, and only a file
         // that comes up empty pays for the wider read.
@@ -695,18 +709,20 @@ enum KimiSessionScanner {
             .attributesOfItem(atPath: wire.path)
         let size = (attributes?[.size] as? NSNumber)?.uint64Value
         for budget in [256 * 1024, 4 * 1024 * 1024] {
-            if let found = usageScan(of: wire, budget: budget), found > 0 {
+            if let found = usageScan(of: wire, budget: budget),
+               found.tokens > 0 {
                 return found
             }
             if let size, size <= UInt64(budget) { break }
         }
-        return 0
+        return (0, nil)
     }
 
-    private static func usageScan(of wire: URL, budget: Int) -> Int? {
+    private static func usageScan(of wire: URL,
+                                  budget: Int) -> (tokens: Int, model: String?)? {
         guard let text = AgentSessionScanner.boundedTail(
             of: wire, budget: budget) else { return nil }
-        var newest: Int? = nil
+        var newest: (tokens: Int, model: String?)? = nil
         text.enumerateLines { line, _ in
             guard let data = line.trimmingCharacters(in: .whitespaces)
                     .data(using: .utf8),
@@ -719,7 +735,10 @@ enum KimiSessionScanner {
             let total = ["inputOther", "inputCacheRead",
                          "inputCacheCreation", "output"]
                 .reduce(0) { $0 + ((usage[$1] as? NSNumber)?.intValue ?? 0) }
-            if total > 0 { newest = total }
+            // Model rides the winning record, like the codex window:
+            // a mid-session model switch moves footprint and window
+            // together or not at all.
+            if total > 0 { newest = (total, obj["model"] as? String) }
         }
         return newest
     }

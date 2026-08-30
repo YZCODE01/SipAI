@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 13px/1.55 -apple-system, BlinkMacSystemFont, sans-serif;
+    margin: 0; padding: 4px 2px;
+  }
+  h3 { font-size: 13px; margin: 14px 0 6px; }
+  h3:first-child { margin-top: 0; }
+  ul { margin: 0; padding-left: 20px; }
+  li { margin-bottom: 6px; }
+  code {
+    font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: color-mix(in srgb, currentColor 10%, transparent);
+    padding: 1px 4px; border-radius: 3px;
+  }
+</style></head>
+<body>
+  <h3>Added</h3>
+  <ul>
+    <li><strong>Equations are typeset, not approximated.</strong> Mathematics in chats and agent transcripts is now laid out properly — real fraction bars, sums and integrals with their limits in place, matrices, aligned derivations, and brackets that grow to fit what they hold. Notes already rendered this way; chats and transcripts now agree with them. Right-click an equation for <strong>Copy LaTeX</strong>. One trade: a displayed equation is drawn rather than kept as text, so its source no longer turns up in search — Copy LaTeX is how to get it.</li>
+    <li><strong>Renaming an agent session reaches the agent.</strong> Rename a session in the sidebar and Claude Code's and Kimi Code's own session pickers show the new name too, instead of only SipAI showing it. Codex rebuilds its titles from the first message on every run, so a Codex rename stays SipAI's — and if a write to an agent doesn't land, SipAI now says so rather than leaving the two quietly disagreeing.</li>
+  </ul>
+  <h3>Fixed</h3>
+  <ul>
+    <li><strong>Work the agent backgrounds no longer disappears (Claude Code).</strong> Asking for something long — "start this and tell me when it's done" — could end with the answer never arriving: no error, no exit, and nothing in the transcript on reopen. That work now runs in the foreground, where its result actually lands.</li>
+    <li><strong>Choosing a model no longer renames the others.</strong> Picking a different model mid-session could show the previously running model's name — for that model and then for every other one in the menu — and the wrong name survived a restart. The model you picked always ran; only the name was wrong. An install already affected corrects itself on first launch.</li>
+    <li><strong>"Show earlier" now reaches the start of a long session.</strong> It used to walk back a few hundred rows and then vanish with the beginning of the transcript still out of reach, and nothing saying so. It keeps loading older turns now, and when a session really is too large to show whole it says that plainly instead of going quiet.</li>
+    <li>Symbols such as <code>\varphi</code> and <code>\ell</code> no longer print as source, and a nested expression — a fraction inside an exponent — is no longer scrambled into a different one.</li>
+    <li>In an agent session, the context tooltip reports the model's real context window for Codex and Kimi Code sessions rather than assuming 200,000 tokens.</li>
+  </ul>
+  <h3>Security</h3>
+  <ul>
+    <li>The new equation renderer bounds what it reads out of a font file, so a malformed or hostile one can stall neither the drawing nor the app.</li>
+  </ul>
+</body></html>

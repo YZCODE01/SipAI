@@ -34,11 +34,14 @@ func write(_ name: String, _ lines: [String]) -> URL {
     return url
 }
 
-/// A token_count record as codex writes it.
+/// A token_count record as codex writes it. `window: nil` drops the
+/// `model_context_window` field the way pre-window rollouts do.
 func tokenCount(last: Int, total: Int,
-                lastIn: Int? = nil, lastOut: Int? = nil) -> String {
+                lastIn: Int? = nil, lastOut: Int? = nil,
+                window: Int? = 258400) -> String {
     let i = lastIn ?? last
     let o = lastOut ?? 0
+    let windowField = window.map { ",\"model_context_window\":\($0)" } ?? ""
     return """
     {"timestamp":"2026-08-14T13:30:03.316Z","type":"event_msg","payload":\
     {"type":"token_count","info":{"total_token_usage":\
@@ -47,8 +50,8 @@ func tokenCount(last: Int, total: Int,
     "reasoning_output_tokens":0,"total_tokens":\(total)},\
     "last_token_usage":{"input_tokens":\(i),"cached_input_tokens":0,\
     "cache_write_input_tokens":0,"output_tokens":\(o),\
-    "reasoning_output_tokens":0,"total_tokens":\(last)},\
-    "model_context_window":258400},"rate_limits":null}}
+    "reasoning_output_tokens":0,"total_tokens":\(last)}\(windowField)},\
+    "rate_limits":null}}
     """
 }
 
@@ -124,6 +127,55 @@ check("newest record beyond the 256 KB tail is still found",
                    "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"junk\":\"\(filler)\"}}"])),
       42_000)
 
+// MARK: - The window (model_context_window)
+
+// The occupancy tooltip divides the footprint by the model's real
+// window when the rollout records one — reading the constant instead
+// overstated every codex session (258,400 recorded vs the 200,000
+// claude constant).
+print("\nCodexSessionScanner.lastContextInfo — the window")
+
+check("window read off the same record as the footprint",
+      CodexSessionScanner.lastContextInfo(
+        of: write("window.jsonl",
+                  [meta, tokenCount(last: 101_466, total: 900_000)])).window,
+      258400)
+
+check("no field on any record → window 0 (fallback constant)",
+      CodexSessionScanner.lastContextInfo(
+        of: write("nowindow.jsonl",
+                  [meta, tokenCount(last: 20_000, total: 20_000,
+                                    window: nil)])).window,
+      0)
+
+// The window rides the WINNING record: a mid-session model switch
+// moves footprint and window together or not at all — a stale window
+// against a fresh footprint misstates occupancy exactly the way the
+// constant did.
+check("window rides the newest usable record (gains one)",
+      CodexSessionScanner.lastContextInfo(
+        of: write("gainwindow.jsonl",
+                  [meta,
+                   tokenCount(last: 10_000, total: 10_000, window: nil),
+                   tokenCount(last: 50_000, total: 60_000,
+                              window: 400_000)])).window,
+      400_000)
+
+check("window rides the newest usable record (loses one)",
+      CodexSessionScanner.lastContextInfo(
+        of: write("losewindow.jsonl",
+                  [meta,
+                   tokenCount(last: 10_000, total: 10_000, window: 258400),
+                   tokenCount(last: 50_000, total: 60_000,
+                              window: nil)])).window,
+      0)
+
+check("tokens unchanged by the window read",
+      CodexSessionScanner.lastContextInfo(
+        of: write("windowtokens.jsonl",
+                  [meta, tokenCount(last: 101_466, total: 900_000)])).tokens,
+      101_466)
+
 // MARK: - Real store
 
 // The synthetic cases pin the RULES; only the real store can say the
@@ -159,8 +211,10 @@ if let walker = FileManager.default.enumerator(
     }
     print("\nreal store: \(resolved)/\(rollouts.count) rollouts resolve to a footprint")
     for r in rollouts.prefix(5) {
-        let v = CodexSessionScanner.lastContextTokens(of: r.url)
-        print("  newest: \(v == 0 ? "—" : "\(v) tok")  \(r.url.lastPathComponent.prefix(44))")
+        let info = CodexSessionScanner.lastContextInfo(of: r.url)
+        let tok = info.tokens == 0 ? "—" : "\(info.tokens) tok"
+        let win = info.window == 0 ? "no window" : "of \(info.window)"
+        print("  newest: \(tok) \(win)  \(r.url.lastPathComponent.prefix(40))")
     }
     checks += 1
     if absurd.isEmpty {

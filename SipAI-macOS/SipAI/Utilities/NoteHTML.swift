@@ -38,17 +38,6 @@ enum NoteHTML {
         "\(sOpen)\(kind)\(index)\(sClose)"
     }
 
-    /// LaTeX environments that stand on their own as display math when
-    /// they appear at the top level, i.e. not already wrapped in `$$`.
-    /// Models emit these bare constantly.
-    private static let displayEnvironments: Set<String> = [
-        "equation", "equation*", "align", "align*", "aligned",
-        "gather", "gather*", "gathered", "alignat", "alignat*",
-        "multline", "multline*", "split", "array",
-        "matrix", "pmatrix", "bmatrix", "Bmatrix", "vmatrix", "Vmatrix",
-        "smallmatrix", "cases", "dcases", "subarray",
-    ]
-
     // MARK: - Entry point
 
     struct Metadata {
@@ -217,66 +206,12 @@ enum NoteHTML {
         return out.joined(separator: "\n")
     }
 
-    /// A display-math run starting at `index`, plus the line to resume
-    /// from. Handles `$$…$$`, `\[…\]` and a bare `\begin{env}…\end{env}`,
-    /// each of which may be one line or many.
+    /// Where a display equation starts and stops. The rule lives in
+    /// `MathDelimiters` because the chat renderer reads it too, and two
+    /// spellings of it would file one equation two ways.
     private static func displayMath(_ lines: [String],
                                     from index: Int) -> (String, Int)? {
-        let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
-
-        func gather(open: String, close: String) -> (String, Int)? {
-            guard trimmed.hasPrefix(open) else { return nil }
-            let afterOpen = String(trimmed.dropFirst(open.count))
-            // Opener and closer on the same line.
-            if let r = afterOpen.range(of: close, options: .backwards),
-               r.upperBound == afterOpen.endIndex, !afterOpen.isEmpty {
-                let inner = String(afterOpen[..<r.lowerBound])
-                return (inner.trimmingCharacters(in: .whitespacesAndNewlines), index + 1)
-            }
-            var body: [String] = afterOpen.isEmpty ? [] : [afterOpen]
-            var j = index + 1
-            while j < lines.count {
-                let t = lines[j].trimmingCharacters(in: .whitespaces)
-                if let r = t.range(of: close) {
-                    let head = String(t[..<r.lowerBound])
-                    if !head.isEmpty { body.append(head) }
-                    return (body.joined(separator: "\n")
-                        .trimmingCharacters(in: .whitespacesAndNewlines), j + 1)
-                }
-                body.append(lines[j])
-                j += 1
-            }
-            // Unterminated: not math. Leaving it as prose keeps a stray
-            // `$$` in someone's writing from swallowing the rest of the
-            // note.
-            return nil
-        }
-
-        if let hit = gather(open: "$$", close: "$$") { return hit }
-        if let hit = gather(open: "\\[", close: "\\]") { return hit }
-
-        // Bare \begin{env} … \end{env}
-        if trimmed.hasPrefix("\\begin{"),
-           let closeBrace = trimmed.firstIndex(of: "}") {
-            let start = trimmed.index(trimmed.startIndex, offsetBy: 7)
-            let env = String(trimmed[start..<closeBrace])
-            guard displayEnvironments.contains(env) else { return nil }
-            let terminator = "\\end{\(env)}"
-            if trimmed.contains(terminator) {
-                return (trimmed, index + 1)
-            }
-            var body: [String] = [lines[index]]
-            var j = index + 1
-            while j < lines.count {
-                body.append(lines[j])
-                if lines[j].contains(terminator) {
-                    return (body.joined(separator: "\n"), j + 1)
-                }
-                j += 1
-            }
-            return nil
-        }
-        return nil
+        MathDelimiters.displayMath(lines, from: index).map { ($0.latex, $0.next) }
     }
 
     // MARK: - Block rendering
@@ -385,6 +320,11 @@ enum NoteHTML {
 
             case .table(let header, let alignments, let rows):
                 out.append(tableHTML(header: header, alignments: alignments, rows: rows))
+
+            case .displayMath(let latex):
+                // Notes lift display math out before the parse, so this
+                // arrives only from a source that skipped the shielding.
+                out.append(displayHTML(latex))
             }
         }
         closeAllLists()

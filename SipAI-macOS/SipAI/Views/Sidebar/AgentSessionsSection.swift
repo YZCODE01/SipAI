@@ -85,6 +85,15 @@ struct AgentSessionsSection: View {
     @State private var renamingTaskId: String? = nil
     @State private var taskNameDraft: String = ""
     @FocusState private var renameFieldFocused: Bool
+    /// A rename that reached SipAI and not the agent. Carries the
+    /// agent's label because this view is one section of several and
+    /// the sentence has to name which CLI disagreed.
+    struct RenameFailure: Identifiable {
+        let id = UUID()
+        let agent: String
+        let reason: String
+    }
+    @State private var renameFailure: RenameFailure? = nil
     /// Session under the ⋮ Delete confirmation.
     @State private var deletingSession: AgentSession? = nil
     /// Scheduled task under the ⋮ Delete confirmation.
@@ -262,6 +271,22 @@ struct AgentSessionsSection: View {
         } message: { task in
             Text(String(localized: "“\(task.description)” stops running and its definition is removed. Past run sessions are kept.",
                         comment: "Body of the scheduled-task delete confirmation"))
+        }
+        .alert(
+            String(localized: "Renamed in SipAI only",
+                   comment: "Title of the alert shown when a rename could not be written into the agent's own store"),
+            isPresented: Binding(
+                get: { renameFailure != nil },
+                set: { if !$0 { renameFailure = nil } }
+            ),
+            presenting: renameFailure
+        ) { _ in
+            Button(role: .cancel) { } label: {
+                Text("OK", comment: "Dismiss the rename-failure alert")
+            }
+        } message: { failure in
+            Text(String(localized: "The new name is saved here, but writing it into \(failure.agent) failed: \(failure.reason)",
+                        comment: "Body of the rename-failure alert — agent label, then the underlying reason"))
         }
     }
 
@@ -1376,16 +1401,52 @@ struct AgentSessionsSection: View {
         }
     }
 
+    /// A rename is written TWICE: into `agent_session_names`, which is
+    /// what the sidebar draws and what the CLI reads, and — for an agent
+    /// that has a custom-title mechanism — into the agent's own store,
+    /// so its session picker agrees.
+    ///
+    /// The config write stays first and stays synchronous. It is what
+    /// makes the row change under the cursor; the agent-side write is
+    /// disk work on another actor and a rename must not wait on it.
+    /// An agent that cannot be written to (`writesThrough` false) keeps
+    /// the old behaviour exactly — the name is SipAI's and stays here.
     private func commitSessionRename(_ session: AgentSession) {
         guard renamingSessionId == session.id else { return }
         renamingSessionId = nil
-        let name = sessionNameDraft.trimmingCharacters(in: .whitespaces)
+        let typed = sessionNameDraft.trimmingCharacters(in: .whitespaces)
         // Empty (or reverting to the scanner's own title) clears the
         // custom label instead of freezing the automatic name.
-        if name.isEmpty || name == session.title {
-            config.setAgentSessionDisplayName(nil, for: session.id)
-        } else {
-            config.setAgentSessionDisplayName(name, for: session.id)
+        let name: String? =
+            (typed.isEmpty || typed == session.title) ? nil : typed
+        config.setAgentSessionDisplayName(name, for: session.id)
+
+        guard AgentSessionRename.writesThrough(session.agentKey) else { return }
+        let id = session.id
+        let fileURL = session.fileURL
+        let agentKey = session.agentKey
+        let label = agentName
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try AgentSessionRename.apply(name, sessionId: id,
+                                                 fileURL: fileURL,
+                                                 agentKey: agentKey)
+                }.value
+            } catch AgentSessionRename.Failure.storeMissing {
+                // Nothing on disk to write into — a session whose
+                // transcript has not landed yet. SipAI's own name is
+                // the whole outcome, which is not a failure to report.
+            } catch {
+                // The store is there and the write did not happen. Say
+                // so: the row already shows the new name, and staying
+                // quiet would leave the two sides disagreeing with
+                // nothing on screen admitting it. Same rule as
+                // `NotesManager.lastSaveFailure`.
+                let reason = (error as? AgentSessionRename.Failure)?.message
+                    ?? error.localizedDescription
+                renameFailure = RenameFailure(agent: label, reason: reason)
+            }
         }
     }
 

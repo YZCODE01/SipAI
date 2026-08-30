@@ -19,5 +19,6 @@ out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 swiftc -O -o "$out/latexharness" \
   "$src/SipAI/Utilities/LatexSymbols.swift" \
+  "$src/SipAI/Utilities/MathAlphabets.swift" \
   "$here/main.swift"
 "$out/latexharness"

@@ -408,7 +408,12 @@ enum AgentSessionScanner {
     /// multi-hundred-MB session files are normal for heavy use. A
     /// whole-file Data + String + per-line JSON pass on every open is
     /// a "Loading session history" freeze waiting to happen.
-    private static let historyByteBudget = 8 * 1024 * 1024
+    ///
+    /// Internal, not private: it is the FIRST rung of the view's
+    /// widen ladder (`AgentSessionView.historyWidenLadder`), and two
+    /// spellings of the same bound is how "Show earlier" comes to
+    /// disagree with what was actually read.
+    static let historyByteBudget = 8 * 1024 * 1024
 
     /// `byteBudget` overrides the tail size for callers that need the
     /// WHOLE conversation rather than the newest slice — global search

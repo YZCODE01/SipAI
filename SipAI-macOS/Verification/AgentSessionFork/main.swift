@@ -29,6 +29,13 @@ check("drops the parent's ai-title",
       AgentSessionFork.verdict(forLine: #"{"type":"ai-title","aiTitle":"Parent name","sessionId":"old"}"#,
                                cutAtRecordUuid: cut, newSessionId: newId) == .drop)
 
+// The name a rename writes, in either app. It OUTRANKS the generated
+// ai-title, so a branch that inherited one would sit under its parent's
+// name for good — past anything claude later generates for it.
+check("drops the parent's custom-title",
+      AgentSessionFork.verdict(forLine: #"{"type":"custom-title","customTitle":"Parent name","sessionId":"old"}"#,
+                               cutAtRecordUuid: cut, newSessionId: newId) == .drop)
+
 check("drops unparseable lines",
       AgentSessionFork.verdict(forLine: #"{"type":"user","sessionId":"#,
                                cutAtRecordUuid: cut, newSessionId: newId) == .drop)

@@ -787,11 +787,23 @@ final class ConfigManager: ObservableObject {
             let v = prefs[key]?.trimmingCharacters(in: .whitespaces)
             return (v?.isEmpty == false) ? v : nil
         }
+        let alias = field("model")
+        var fullId = field("model_full_id")
+        // Same contradiction rule as the observed-id map, applied to
+        // the pair stored per session: the chip PREFERS the full id
+        // (it carries the version), so a stale one beside a different
+        // alias makes the session name a model it is not set to run —
+        // and this pair is re-read on every open, so it would keep
+        // saying so.
+        if let alias, let full = fullId,
+           !ClaudeModelDisplay.canResolve(alias: alias, to: full) {
+            fullId = nil
+        }
         return AgentLaunchOptions(
             permissionMode: field("mode"),
-            model: field("model"),
+            model: alias,
             effort: field("effort"),
-            modelFullId: field("model_full_id")
+            modelFullId: fullId
         )
     }
 
@@ -951,7 +963,20 @@ final class ConfigManager: ObservableObject {
     /// Display-only: feeds the composer's versioned model names.
     func agentModelFullId(forAlias alias: String) -> String? {
         let map = (raw["agent_model_full_ids"] as? [String: String]) ?? [:]
-        return map[alias]
+        guard let full = map[alias], !full.isEmpty else { return nil }
+        // A stored pairing that contradicts its own alias is refused
+        // HERE as well as at the write, because a wrong one already on
+        // disk is exactly the state this has to recover from: nothing
+        // else corrects it. `learnAgentModelFullIds` only moves an
+        // alias FORWARD by version, and a cross-family mistake carries
+        // the same version as the truth it displaced
+        // ("sonnet" → claude-fable-5), so it compares equal and sticks
+        // for good — through relaunches, through the harvest, through
+        // everything short of running that alias again.
+        guard ClaudeModelDisplay.canResolve(alias: alias, to: full) else {
+            return nil
+        }
+        return full
     }
 
     /// Display name for a picker alias, carrying the version the alias
@@ -981,6 +1006,14 @@ final class ConfigManager: ObservableObject {
 
     func setAgentModelFullId(_ fullId: String, forAlias alias: String) {
         guard !fullId.isEmpty else { return }
+        // An observation is ground truth about the alias it RAN under
+        // and about no other. One that names a different family is a
+        // mis-attribution, and writing it would rename that alias
+        // permanently in every picker — see `ClaudeModelDisplay
+        // .canResolve`.
+        guard ClaudeModelDisplay.canResolve(alias: alias, to: fullId) else {
+            return
+        }
         var map = (raw["agent_model_full_ids"] as? [String: String]) ?? [:]
         guard map[alias] != fullId else { return }
         map[alias] = fullId
@@ -1001,7 +1034,19 @@ final class ConfigManager: ObservableObject {
     func learnAgentModelFullIds(_ harvested: [String: String]) {
         var map = (raw["agent_model_full_ids"] as? [String: String]) ?? [:]
         var changed = false
+        // Drop entries that contradict their own alias before merging.
+        // The reads already ignore them, so this only tidies the file —
+        // but it also means one launch is enough to clear a mistake a
+        // shipped build wrote, rather than carrying it forever in a
+        // config the user has no way to inspect.
+        for (alias, fullId) in Array(map)
+        where !ClaudeModelDisplay.canResolve(alias: alias, to: fullId) {
+            map.removeValue(forKey: alias)
+            changed = true
+        }
         for (alias, fullId) in harvested where !alias.isEmpty && !fullId.isEmpty {
+            guard ClaudeModelDisplay.canResolve(alias: alias, to: fullId)
+            else { continue }
             if let known = map[alias], !known.isEmpty,
                !Self.preferHarvested(fullId, over: known) { continue }
             guard map[alias] != fullId else { continue }

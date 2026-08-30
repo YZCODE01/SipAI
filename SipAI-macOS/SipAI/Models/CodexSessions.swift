@@ -271,6 +271,17 @@ enum CodexSessionScanner {
     /// cached prefix — unlike claude, where the cache fields must be
     /// added in.
     static func lastContextTokens(of url: URL) -> Int {
+        lastContextInfo(of: url).tokens
+    }
+
+    /// The footprint PLUS the window it sits in.
+    /// `info.model_context_window` rides the very record the footprint
+    /// is read from, so the occupancy tooltip can divide by the model's
+    /// real window instead of a constant — the recorded window on this
+    /// machine is 258,400 where the shared constant says 200,000, which
+    /// overstates every codex session's usage. `window` is 0 when the
+    /// record carries none (older rollouts), and the caller falls back.
+    static func lastContextInfo(of url: URL) -> (tokens: Int, window: Int) {
         // Escalating window for the same reason as `lastUserMessageDate`:
         // one oversized tool-output record can push the newest
         // token_count past a small tail. The second window is a safety
@@ -281,17 +292,24 @@ enum CodexSessionScanner {
         let size = (attributes?[.size] as? NSNumber)?.uint64Value
         for budget in [256 * 1024, 4 * 1024 * 1024] {
             let found = contextTokenScan(of: url, budget: budget)
-            if found > 0 { return found }
+            if found.tokens > 0 { return found }
             if let size, size <= UInt64(budget) { break }
         }
-        return 0
+        return (0, 0)
     }
 
-    private static func contextTokenScan(of url: URL, budget: Int) -> Int {
+    private static func contextTokenScan(of url: URL,
+                                         budget: Int) -> (tokens: Int, window: Int) {
         guard let text = AgentSessionScanner.boundedTail(of: url,
                                                          budget: budget)
-        else { return 0 }
+        else { return (0, 0) }
         var last = 0
+        var window = 0
+        func intField(_ value: Any?) -> Int {
+            if let i = value as? Int { return i }
+            if let d = value as? Double { return Int(d) }
+            return 0
+        }
         text.enumerateLines { line, _ in
             // Cheap pre-filter; correctness comes from the parse below.
             guard line.contains("\"token_count\"") else { return }
@@ -304,21 +322,20 @@ enum CodexSessionScanner {
                   let info = payload["info"] as? [String: Any],
                   let usage = info["last_token_usage"] as? [String: Any]
             else { return }
-            let total: Int
-            if let i = usage["total_tokens"] as? Int {
-                total = i
-            } else if let d = usage["total_tokens"] as? Double {
-                total = Int(d)
-            } else {
-                return
-            }
+            let total = intField(usage["total_tokens"])
             // Forward walk, so the NEWEST record wins. It may legitimately
             // be smaller than the one before it — a compaction drops the
             // footprint back down, and that lower number is the honest
-            // one to show.
-            if total > 0 { last = total }
+            // one to show. The window travels WITH the record that won:
+            // a mid-session model switch changes both together, and a
+            // stale window against a fresh footprint misstates the
+            // occupancy exactly the way the constant did.
+            if total > 0 {
+                last = total
+                window = intField(info["model_context_window"])
+            }
         }
-        return last
+        return (last, window)
     }
 
     /// Every rollout file belonging to one session id. A resume records

@@ -51,14 +51,28 @@ func run() -> Int32 {
     guard let bundle = Bundle(path: CommandLine.arguments[1]) else {
         return fail("cannot open app bundle at \(CommandLine.arguments[1])")
     }
-    guard let mark = bundle.image(forResource: "SipAI-Logo-54") else {
+    // The catalog is appearance-keyed, and this measures ink against a WHITE
+    // background — so the light rendition is the only one it can see. On a
+    // machine set to Dark Mode the lookup would otherwise hand back the
+    // near-white dark rendition and every row would read as blank ("found no
+    // mark"), which is a property of the tester's Appearance setting and not
+    // of the asset. Section 1 has already pinned the two renditions as
+    // pixel-registered, so measuring the light one measures both.
+    let aqua = NSAppearance(named: .aqua)!
+    var resolved: NSImage?
+    var rendered: CGImage?
+    let scale: CGFloat = 4
+    aqua.performAsCurrentDrawingAppearance {
+        guard let mark = bundle.image(forResource: "SipAI-Logo-54") else { return }
+        resolved = mark
+        let renderer = ImageRenderer(content: Lockup(mark: mark))
+        renderer.scale = scale
+        rendered = renderer.cgImage
+    }
+    guard let mark = resolved else {
         return fail("SipAI-Logo-54 missing from the bundle")
     }
-
-    let scale: CGFloat = 4
-    let renderer = ImageRenderer(content: Lockup(mark: mark))
-    renderer.scale = scale
-    guard let cg = renderer.cgImage else { return fail("ImageRenderer produced nothing") }
+    guard let cg = rendered else { return fail("ImageRenderer produced nothing") }
 
     // Read it back as 8-bit grey. Row 0 of the buffer is the TOP.
     let w = cg.width, h = cg.height

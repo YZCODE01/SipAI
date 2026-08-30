@@ -3,15 +3,15 @@
     <channel>
         <title>SipAI</title>
         <item>
-            <title>1.0.1</title>
-            <pubDate>Fri, 21 Aug 2026 20:45:08 -0700</pubDate>
+            <title>1.0.2</title>
+            <pubDate>Sun, 30 Aug 2026 01:28:06 -0700</pubDate>
             <link>https://github.com/YZCODE01/SipAI</link>
             <sparkle:fullReleaseNotesLink>https://github.com/YZCODE01/SipAI/blob/main/CHANGELOG.md</sparkle:fullReleaseNotesLink>
-            <sparkle:version>2</sparkle:version>
-            <sparkle:shortVersionString>1.0.1</sparkle:shortVersionString>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>1.0.2</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
-            <sparkle:releaseNotesLink>https://updates.sipai.dev/SipAI-1.0.1.html</sparkle:releaseNotesLink>
-            <enclosure url="https://github.com/YZCODE01/SipAI/releases/download/v1.0.1/SipAI-1.0.1.zip" length="5980030" type="application/octet-stream" sparkle:edSignature="jP3xLO8zSJB+PTexiAiNZyismCCgbIl2kkpaUOwAnZryhpCpBzXZ6qSvRCeg5D62Q5L7fHmfmQe/bWLuTS3qAA=="/>
+            <sparkle:releaseNotesLink>https://updates.sipai.dev/SipAI-1.0.2.html</sparkle:releaseNotesLink>
+            <enclosure url="https://github.com/YZCODE01/SipAI/releases/download/v1.0.2/SipAI-1.0.2.zip" length="6151300" type="application/octet-stream" sparkle:edSignature="IdFf+oLedcg72ULIp7rS9fHSyR1p0nAUOcQ0eYxrCMSziVptjahl/8C40N9U6K7iKfjHdAGko/Lfp0s3iKinAA=="/>
         </item>
     </channel>
 </rss>

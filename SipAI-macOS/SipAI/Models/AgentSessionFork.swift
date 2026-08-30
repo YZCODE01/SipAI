@@ -107,11 +107,18 @@ enum AgentSessionFork {
             return .stop
         }
         // The branch is a different conversation from here on; letting
-        // it inherit the parent's generated title would put two rows in
-        // the sidebar under one name. The branch is named from the
-        // edited message instead (see the caller), and claude is free to
-        // write its own ai-title later.
-        if (obj["type"] as? String) == "ai-title" {
+        // it inherit the parent's title would put two rows in the
+        // sidebar under one name. The branch is named from the edited
+        // message instead (see the caller), and claude is free to write
+        // its own ai-title later.
+        //
+        // BOTH title records go. `ai-title` is the generated one;
+        // `custom-title` is the one a rename writes, in either app, and
+        // it outranks the generated title — so carrying it forward
+        // would pin the branch to its parent's name for good, past
+        // anything claude later generates for it.
+        if let type = obj["type"] as? String,
+           type == "ai-title" || type == "custom-title" {
             return .drop
         }
         // A branch of a SCHEDULED run is not another run of that task —

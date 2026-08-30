@@ -52,4 +52,8 @@ enum ClaudeModelDisplay {
         (id, "")
     }
     static func isNewer(_ a: String, than b: String) -> Bool { false }
+    /// The real one refuses a pairing whose family contradicts its
+    /// alias — see Verification/ComposerModelChip, which exercises it.
+    /// Permissive here: this harness is about providers.
+    static func canResolve(alias: String, to fullId: String) -> Bool { true }
 }

@@ -133,6 +133,24 @@ enum TomlScalar {
             .map { String($0.dropFirst().dropLast()) }
             .filter { !$0.isEmpty }
     }
+
+    /// One `key = 262144` line — a bare TOML integer, which is how kimi
+    /// writes `max_context_size`. TOML allows `1_048_576`, so the
+    /// underscores are stripped before the digits are read; anything
+    /// else non-numeric (a float, a quoted string) answers nil and the
+    /// caller falls back rather than storing a mangled number.
+    static func integer(_ line: String, key: String) -> Int? {
+        guard line.hasPrefix(key) else { return nil }
+        let rest = line.dropFirst(key.count)
+            .trimmingCharacters(in: .whitespaces)
+        guard rest.hasPrefix("=") else { return nil }
+        let value = rest.dropFirst().trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "_", with: "")
+        guard !value.isEmpty, value.allSatisfy({ $0.isNumber }) else {
+            return nil
+        }
+        return Int(value)
+    }
 }
 
 /// Display casing for a reasoning-effort level, shared by every
@@ -287,6 +305,83 @@ enum CodexCapabilities {
     }
 }
 
+/// Facts about running `claude` HEADLESSLY (`claude -p`), as opposed to
+/// the choices a send makes. Nothing here is offered to the user: these
+/// are constraints of the harness, and the composer has no chip for a
+/// thing that cannot be decided.
+enum ClaudePrintMode {
+
+    /// Claude Code's own switch for its background-task feature. It is
+    /// read once, at startup, into a single predicate that gates every
+    /// surface of the feature at the SCHEMA level: `run_in_background`
+    /// is omitted from the Bash tool's input schema (and PowerShell's,
+    /// and the `Agent` tool's), the tool-description paragraph that
+    /// advertises the parameter returns nil, the matching system-prompt
+    /// guidance is dropped, MCP auto-backgrounding is switched off, and
+    /// the `Monitor` tool's description flips to recommending the
+    /// foreground.
+    static let disableBackgroundTasksEnvVar = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
+
+    /// Environment a claude child needs on top of the ordinary one.
+    ///
+    /// **Background tasks do not survive `claude -p`, and they fail
+    /// silently.** Print mode begins winding down the moment stdin is
+    /// at EOF — which for a SipAI child is the first instant, since it
+    /// is handed `/dev/null` — and a still-running background task is
+    /// TERMINATED five seconds after the turn's `result`. Measured
+    /// repeatedly at 5.05-5.10 s. What the app is told is three
+    /// `system` records (`background_tasks_changed` with an empty list,
+    /// `task_updated` with `status: "killed"`, `task_notification` with
+    /// `status: "stopped"`), none of which any reader renders; the
+    /// child then exits with code 0 and an empty stderr, and the
+    /// transcript on disk records nothing at all. So the user asks for
+    /// something long, is told it started, and is never told anything
+    /// again — on the live feed or on reopen.
+    ///
+    /// Disabling the feature is therefore strictly better than leaving
+    /// it: the agent works the constraint out from the schema and runs
+    /// the command in the foreground instead, where the turn clock
+    /// keeps counting and the result actually lands. Measured, with a
+    /// prompt explicitly demanding `run_in_background=true`: "This Bash
+    /// tool has no `run_in_background` parameter, so I ran it in the
+    /// foreground instead."
+    ///
+    /// **This must OVERRIDE rather than default.** Unlike
+    /// `AgentRunner.overlayProxyVars`, which only fills in names the
+    /// process environment lacks, a value inherited from the user's
+    /// shell has to lose: a `…=0` exported there would re-enable a
+    /// mechanism that cannot work here, and the failure leaves no
+    /// evidence anywhere.
+    ///
+    /// **Claude only, and the other two must be left alone** — not
+    /// merely because this is where the bug is:
+    ///
+    ///  * `codex exec` has no background-execution parameter to
+    ///    disable. Asked to background something it improvises
+    ///    `nohup … &`, which its own process reaping kills at turn end
+    ///    in every sandbox mode. There is nothing to switch.
+    ///  * Kimi already does the right thing. Its print mode defaults to
+    ///    `steer` — the run stays alive while tasks are pending and
+    ///    each completion drives a new main turn — and a 40 s
+    ///    backgrounded command was measured running to completion and
+    ///    being reported. Do NOT reach for
+    ///    `KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT` here: it reads like
+    ///    the same fix and is a downgrade, mapping to `drain`, which
+    ///    waits for the task and can no longer steer a turn to report
+    ///    it.
+    ///
+    /// The cost, accepted: background SUBAGENTS become synchronous, since
+    /// the same predicate omits the parameter from the `Agent` tool.
+    /// Under `-p` the wall clock is unchanged (a background subagent
+    /// already held the turn open for its whole life), and parallel
+    /// fan-out is untouched — several `Agent` blocks in one assistant
+    /// message still run at once, a path that never used the parameter.
+    static func environmentOverlay(agentKey: String) -> [String: String] {
+        guard agentKey == "claude_code" else { return [:] }
+        return [disableBackgroundTasksEnvVar: "1"]
+    }
+}
+
 /// Kimi Code's counterpart to the claude / codex capability tables.
 ///
 /// Of the composer's three per-send controls, kimi's headless mode
@@ -399,6 +494,11 @@ struct KimiModel: Identifiable, Equatable {
     /// value at all — the model chip's Default row already names what
     /// it resolves to.
     let defaultEffort: String?
+    /// `max_context_size` — the model's window, for the token chip's
+    /// occupancy tooltip. nil when the entry declares none (an
+    /// observed-only model), and the tooltip falls back to its
+    /// constant.
+    var maxContextSize: Int? = nil
 
     var id: String { slug }
 }
@@ -469,6 +569,21 @@ final class KimiCatalog: ObservableObject {
         }
         guard let fallback = defaultModel else { return nil }
         return models.first { $0.slug == fallback }?.defaultEffort
+    }
+
+    /// `max_context_size` for a model, for the token chip's occupancy
+    /// tooltip. The slug handed in is the `model` string off the wire's
+    /// newest `usage.record`, which IS the config alias (measured on a
+    /// real install: `"model":"moonshot-ai/kimi-k3"` against
+    /// `[models."moonshot-ai/kimi-k3"]`). Same resolution chain as
+    /// `defaultEffort(forModel:)`; nil means the tooltip keeps its
+    /// fallback constant rather than stating a guessed window.
+    func maxContextSize(forModel slug: String?) -> Int? {
+        if let slug, !slug.isEmpty {
+            return models.first { $0.slug == slug }?.maxContextSize
+        }
+        guard let fallback = defaultModel else { return nil }
+        return models.first { $0.slug == fallback }?.maxContextSize
     }
 
     /// (size, mtime) of the config the current lists were built from.
@@ -584,6 +699,7 @@ final class KimiCatalog: ObservableObject {
         var displayNames: [String: String] = [:]
         var efforts: [String: [String]] = [:]
         var defaultEfforts: [String: String] = [:]
+        var contextSizes: [String: Int] = [:]
         var beforeFirstHeader = true
         var currentModel: String? = nil
         for rawLine in text.components(separatedBy: .newlines) {
@@ -624,6 +740,9 @@ final class KimiCatalog: ObservableObject {
                     // from answering a request for `default_model` and
                     // vice versa.
                     defaultEfforts[model] = level
+                } else if let window = TomlScalar.integer(
+                    line, key: "max_context_size"), window > 0 {
+                    contextSizes[model] = window
                 }
                 continue
             }
@@ -645,7 +764,8 @@ final class KimiCatalog: ObservableObject {
             KimiModel(slug: $0,
                       displayName: displayNames[$0] ?? $0,
                       efforts: efforts[$0] ?? [],
-                      defaultEffort: defaultEfforts[$0])
+                      defaultEffort: defaultEfforts[$0],
+                      maxContextSize: contextSizes[$0])
         })
     }
 
@@ -782,6 +902,33 @@ enum ClaudeModelDisplay {
     static func familyAlias(of raw: String) -> String? {
         guard raw.lowercased().contains("claude") else { return nil }
         return parts(of: raw).family
+    }
+
+    /// Whether `fullId` can be what `alias` resolves to.
+    ///
+    /// An alias names a FAMILY ("sonnet" is the latest Sonnet), so an
+    /// id from a different family is not a version of it — it is a
+    /// contradiction, and the only way one is ever recorded is a
+    /// mis-attributed observation: an id read off a turn that ran
+    /// under some OTHER alias, filed under whatever the picker said by
+    /// the time it was read.
+    ///
+    /// This refuses only what it can PROVE wrong, and everything else
+    /// passes. The empty alias is claude's own default and may resolve
+    /// to any family; an alias with no family word in it ("opusplan")
+    /// cannot be judged from its spelling, and neither can an id with
+    /// no family word in it. Guessing in either of those directions
+    /// would refuse a pairing that is simply newer than this table.
+    ///
+    /// Costly to get wrong in one direction only, which is why it sits
+    /// on both sides of the store: a wrong pairing does not fail, it
+    /// RENAMES a model, and it renames it identically after a restart.
+    static func canResolve(alias: String, to fullId: String) -> Bool {
+        let aliasBase = splitVariant(alias).id.lowercased()
+        guard !aliasBase.isEmpty else { return true }
+        guard families[aliasBase] != nil else { return true }
+        guard let idFamily = parts(of: fullId).family else { return true }
+        return idFamily == aliasBase
     }
 
     /// True when `a` names a strictly newer version than `b`. This is
