@@ -696,7 +696,8 @@ final class ConfigManager: ObservableObject {
         return AgentLaunchOptions(
             permissionMode: field("mode"),
             model: field("model"),
-            effort: field("effort")
+            effort: field("effort"),
+            fastMode: prefs["fast_mode"] == "1"
         )
     }
 
@@ -709,6 +710,7 @@ final class ConfigManager: ObservableObject {
         if let mode = options.permissionMode, !mode.isEmpty { prefs["mode"] = mode }
         if let model = options.model, !model.isEmpty { prefs["model"] = model }
         if let effort = options.effort, !effort.isEmpty { prefs["effort"] = effort }
+        if options.fastMode { prefs["fast_mode"] = "1" }
         entry["launch_prefs"] = prefs
         agents[agentKey] = entry
         raw["agents"] = agents
@@ -803,7 +805,8 @@ final class ConfigManager: ObservableObject {
             permissionMode: field("mode"),
             model: alias,
             effort: field("effort"),
-            modelFullId: fullId
+            modelFullId: fullId,
+            fastMode: prefs["fast_mode"] == "1"
         )
     }
 
@@ -821,6 +824,7 @@ final class ConfigManager: ObservableObject {
         if let fullId = options.modelFullId, !fullId.isEmpty {
             prefs["model_full_id"] = fullId
         }
+        if options.fastMode { prefs["fast_mode"] = "1" }
         map[sessionId] = prefs
         raw["agent_session_launch_prefs"] = map
         saveRaw(); rebuildDerived()
@@ -1006,6 +1010,11 @@ final class ConfigManager: ObservableObject {
 
     func setAgentModelFullId(_ fullId: String, forAlias alias: String) {
         guard !fullId.isEmpty else { return }
+        // A full id is a pick from the "Other models" section, not an
+        // alias, and an observation made under it says nothing about
+        // any alias. Filing it would record "claude-fable-5 resolves
+        // to claude-fable-5" — true, useless, and never pruned.
+        guard !ClaudeModelDisplay.isFullId(alias) else { return }
         // An observation is ground truth about the alias it RAN under
         // and about no other. One that names a different family is a
         // mis-attribution, and writing it would rename that alias
@@ -1055,6 +1064,84 @@ final class ConfigManager: ObservableObject {
         }
         guard changed else { return }
         raw["agent_model_full_ids"] = map
+        saveRaw()
+    }
+
+    /// Every full model id this machine has been served — the pool the
+    /// composer's "Other models" section is drawn from
+    /// (`ClaudeModelCatalog.refreshOtherModels`). Kept in sighting
+    /// order, one spelling per (family, version), bounded, and never
+    /// pruned by version: an older model stays a candidate until the
+    /// installed claude stops naming it, which is a different question
+    /// from whether a newer one exists.
+    /// Context window a model was OBSERVED to have, keyed by exact full
+    /// model id.
+    ///
+    /// The confirmation channel behind `ClaudeModelCatalog
+    /// .contextWindow(forModelId:)`, which reads the table claude
+    /// ships. This covers what that table cannot name — a gateway id, a
+    /// custom `ANTHROPIC_MODEL`, a binary too old to carry the table —
+    /// and it is claude's own arithmetic: `result.modelUsage[<id>]
+    /// .contextWindow` is what the running CLI divided by.
+    ///
+    /// Keyed EXACTLY, `[1m]` included: the suffix names a different
+    /// window on the same model, so the two spellings must never
+    /// resolve to one another. Display-only — a window never reaches a
+    /// command line.
+    func agentModelContextWindow(forModelId id: String) -> Int? {
+        let map = (raw["agent_model_context_windows"] as? [String: Any]) ?? [:]
+        guard let value = (map[id] as? NSNumber)?.intValue, value > 0
+        else { return nil }
+        return value
+    }
+
+    /// Record what claude reported for a model.
+    ///
+    /// Overwrites unconditionally: the newest `result` describes the
+    /// call that just ran, and a window that moved (a model gaining a
+    /// long-context tier) must not be pinned by an older sighting —
+    /// unlike the alias→id map, where a version can only move forward.
+    /// A non-positive window is refused rather than stored as a
+    /// divisor. Unchanged values write nothing, so a turn a second
+    /// does not rewrite config.
+    func setAgentModelContextWindow(_ window: Int, forModelId id: String) {
+        guard window > 0, !id.isEmpty else { return }
+        var map = (raw["agent_model_context_windows"] as? [String: Any]) ?? [:]
+        if (map[id] as? NSNumber)?.intValue == window { return }
+        map[id] = window
+        raw["agent_model_context_windows"] = map
+        saveRaw()
+    }
+
+    func agentModelObservedIds() -> [String] {
+        (raw["agent_model_observed_ids"] as? [String]) ?? []
+    }
+
+    static let observedIdCap = 40
+
+    func learnAgentModelObservedIds(_ ids: [String]) {
+        var known = agentModelObservedIds()
+        var changed = false
+        func identity(_ id: String) -> String? {
+            let parts = ClaudeModelDisplay.parts(of: id)
+            guard let family = parts.family, !parts.digits.isEmpty else { return nil }
+            return family + ":" + parts.digits.map(String.init).joined(separator: ".")
+        }
+        var seen = Set(known.compactMap(identity))
+        for raw in ids {
+            let (id, _) = ClaudeModelDisplay.splitVariant(raw)
+            guard !id.isEmpty, ClaudeModelDisplay.familyAlias(of: id) != nil,
+                  let key = identity(id), !seen.contains(key) else { continue }
+            seen.insert(key)
+            known.append(id)
+            changed = true
+        }
+        if known.count > Self.observedIdCap {
+            known = Array(known.suffix(Self.observedIdCap))
+            changed = true
+        }
+        guard changed else { return }
+        raw["agent_model_observed_ids"] = known
         saveRaw()
     }
 

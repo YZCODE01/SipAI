@@ -41,8 +41,15 @@ struct SettingsView: View {
         }
     }
 
-    @State private var tab: Tab = .models
+    @State private var tab: Tab
     @State private var closeHovered = false
+
+    /// Opens on `initialTab`. The outdated-CLI banner is the only
+    /// caller that passes anything — reusing the sheet that already
+    /// exists rather than building routing for one deep link.
+    init(initialTab: Tab = .models) {
+        _tab = State(initialValue: initialTab)
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -560,9 +567,12 @@ struct DisplayPane: View {
                 .font(.system(size: 14, weight: .semibold))
 
             // One toggle, not a Chat/Agent pair: chat sessions carry no
-            // token counter at all, so a "Chat" sub-toggle would be a
-            // switch with nothing behind it.
-            toggle("Show token count", value: \.showTokenAgent)
+            // context chip at all, so a "Chat" sub-toggle would be a
+            // switch with nothing behind it. The config key stays
+            // `token_agent` — the CLI reads the same file, and renaming
+            // a shared key to match a label would switch the feature
+            // off on that side.
+            toggle("Show context usage", value: \.showTokenAgent)
 
             Text("Show note button", comment: "Settings: note button group label (no toggle of its own)")
                 .font(.system(size: 14))
@@ -866,7 +876,7 @@ Open Add Model and pick the provider again — Continue re-validates the stored 
                 question: String(localized: "How can I track my token usage and cost?",
                                  comment: "FAQ question"),
                 answer: String(localized: """
-Each provider has their dashboard to help users track their API credit usage. Please check your account dashboard for more information. SipAI also shows the total token consumption inside each agent session.
+Each provider has their dashboard to help users track their API credit usage. Please check your account dashboard for more information. SipAI also shows how full each agent session's context window is, in the chip under the composer.
 """, comment: "FAQ answer: tracking usage")),
             FAQ(id: 4,
                 question: String(localized: "Can SipAI show how much of my provider plan is used?",
@@ -1041,6 +1051,9 @@ struct SettingsTrashButton: View {
 /// the number a user quotes in a bug report.
 struct UpdatesPane: View {
     @EnvironmentObject var updates: UpdateController
+    @EnvironmentObject var config: ConfigManager
+    @EnvironmentObject var agents: AgentManager
+    @ObservedObject private var cliUpdates = AgentCLIUpdateMonitor.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1124,6 +1137,213 @@ struct UpdatesPane: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: 420, alignment: .leading)
             }
+
+            commandLineTools
+        }
+        // Re-reads the installed versions, and asks the release
+        // endpoints only if the last successful answer is stale.
+        .onAppear { cliUpdates.paneAppeared() }
+    }
+
+    /// One row per INSTALLED agent CLI. Nothing is listed for an agent
+    /// this machine does not have — a row about a tool that is not here
+    /// is an advertisement, not a status.
+    @ViewBuilder
+    private var commandLineTools: some View {
+        if !cliUpdates.installedAgents.isEmpty {
+            Divider().opacity(0.3).padding(.vertical, 2)
+
+            Text("Command-line tools", comment: "Updates pane: header for the agent CLI version rows")
+                .font(.system(size: 13, weight: .semibold))
+
+            // The same bargain as the app's own check above, asked the
+            // same way: the request is periodic and leaves the machine,
+            // so it has a switch of its own, and the sentence under it
+            // says where the request goes.
+            Toggle(isOn: Binding(
+                get: { cliUpdates.remoteChecksEnabled },
+                set: { cliUpdates.setRemoteChecksEnabled($0) }
+            )) {
+                Text("Check these tools for new versions automatically",
+                     comment: "Updates pane: toggle the periodic agent CLI release check")
+                    .font(.system(size: 13))
+            }
+            .toggleStyle(.checkbox)
+
+            Text("SipAI asks each tool's own release endpoint — the npm registry, or the vendor's version file — every few hours whether a newer version exists. Nothing about you or your machine is sent. A tool is updated only by running its own update command, or, where that command declines and names the vendor's installer instead, by running that installer pinned to the version shown.",
+                 comment: "Updates pane: what the CLI version check does")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: 420, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(cliUpdates.installedAgents) { agent in
+                    CLIUpdateRow(agent: agent)
+                        .environmentObject(config)
+                        .environmentObject(agents)
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+}
+
+/// One command-line tool: what is installed, what the last successful
+/// check found, and whatever can be done about the difference.
+private struct CLIUpdateRow: View {
+    let agent: AgentInfo
+    @EnvironmentObject var config: ConfigManager
+    @EnvironmentObject var agents: AgentManager
+    @ObservedObject private var cliUpdates = AgentCLIUpdateMonitor.shared
+    @State private var showingDetail = false
+
+    /// No user-visible sentence in this app names an agent outright.
+    private var label: String {
+        config.agentLabel(for: agent.key, defaultName: agent.name)
+    }
+
+    private var status: CLIUpdateStatus {
+        cliUpdates.statuses[agent.key] ?? .unknown
+    }
+
+    /// A turn in flight for this agent, ours or another terminal's.
+    /// Replacing the binary under a running child is not something to
+    /// do quietly, so the button is DISABLED with a hover hint rather
+    /// than hidden — a control that vanishes reads as a bug where a
+    /// disabled one reads as a reason.
+    ///
+    /// External turns count too, and are attributed through the session
+    /// they are writing to. The set is empty or tiny, and this is only
+    /// evaluated while the Settings sheet is open.
+    private var hasRunningTurn: Bool {
+        if agents.runners.values.contains(where: {
+            $0.agentKey == agent.key && $0.status.isRunning
+        }) { return true }
+        return agents.externalInFlightSessions.contains { id in
+            agents.sessions.first(where: { $0.id == id })?.agentKey == agent.key
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                Text(verbatim: label)
+                    .font(.system(size: 13))
+                    .frame(width: 130, alignment: .leading)
+
+                // Tool-derived text: never an interpolated Text
+                // literal, which markdown-parses its result.
+                Text(verbatim: cliUpdates.installed[agent.key]?.text ?? "")
+                    .font(.system(size: 13).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 78, alignment: .leading)
+
+                claim
+
+                Spacer(minLength: 8)
+
+                action
+            }
+
+            if showingDetail, case .updateFailed(let tail) = status, !tail.isEmpty {
+                Text(verbatim: tail)
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(8)
+                    .frame(maxWidth: 420, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(Color.secondary.opacity(0.10))
+                    )
+            }
+        }
+    }
+
+    /// What the row is entitled to say. `versionOnly` and `unknown`
+    /// say NOTHING — no check has succeeded, so there is no claim to
+    /// make, and "up to date" without evidence is the one thing this
+    /// feature exists to avoid.
+    @ViewBuilder
+    private var claim: some View {
+        switch status {
+        case .unknown, .versionOnly:
+            EmptyView()
+        case .upToDate(_, let checkedAt):
+            Text("Up to date", comment: "Updates pane: the installed CLI matches the latest release")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .help(String(localized: "Last checked \(checkedAt.formatted(date: .abbreviated, time: .shortened))",
+                             comment: "Updates pane: when the last update check ran; placeholder is a date and time"))
+        case .updateAvailable(_, let latest):
+            Text(String(localized: "New version \(latest.text)",
+                        comment: "Updates pane: a newer CLI release exists; placeholder is a version number"))
+                .font(.system(size: 12))
+                .foregroundStyle(.orange)
+        case .updating:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                // The status stays `.updating` until the child is
+                // confirmed gone, Cancel included; the label is what
+                // says which of the two is happening.
+                if cliUpdates.cancelling.contains(agent.key) {
+                    Text("Cancelling…", comment: "Updates pane: the CLI's updater has been asked to stop and is winding down")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Updating…", comment: "Updates pane: the CLI's own updater is running")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        case .updateFailed:
+            Text("Update did not complete", comment: "Updates pane: the updater ran and the installed version did not change")
+                .font(.system(size: 12))
+                .foregroundStyle(.orange)
+        }
+    }
+
+    @ViewBuilder
+    private var action: some View {
+        switch status {
+        case .updating:
+            Button {
+                cliUpdates.cancelUpdate(agentKey: agent.key)
+            } label: {
+                Text("Cancel", comment: "Updates pane: stop the running CLI updater")
+            }
+            .font(.system(size: 12))
+            .disabled(cliUpdates.cancelling.contains(agent.key))
+        case .updateAvailable, .updateFailed:
+            HStack(spacing: 8) {
+                if case .updateFailed(let tail) = status, !tail.isEmpty {
+                    Button {
+                        showingDetail.toggle()
+                    } label: {
+                        Text("Details", comment: "Updates pane: show the updater's own output")
+                    }
+                    .font(.system(size: 12))
+                }
+                Button {
+                    cliUpdates.update(agentKey: agent.key)
+                } label: {
+                    Text("Update", comment: "Updates pane: run the CLI's own update command")
+                }
+                .font(.system(size: 12))
+                // Also disabled while a previous press is still winding
+                // down (a Cancel, or an updater exiting): the monitor
+                // refuses a second updater on one tool, and a refusal
+                // with nothing on screen reads as a dead button.
+                .disabled(hasRunningTurn || cliUpdates.updateInFlight(agent.key))
+                .help(hasRunningTurn
+                      ? String(localized: "Finish the running turn before updating this tool.",
+                               comment: "Updates pane: why the Update button is disabled")
+                      : "")
+            }
+        case .unknown, .versionOnly, .upToDate:
+            EmptyView()
         }
     }
 }

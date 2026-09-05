@@ -12,6 +12,78 @@ GitHub release body, and — once that window exists — the "what's new"
 panel shown after updating. Write each entry for the person reading it
 inside the app, not for someone reading a diff.
 
+## [1.0.3] — 2026-09-04
+
+### Added
+
+- **Settings → Updates now covers the agent command-line tools.** Each
+  installed CLI — Claude Code, Codex, Kimi Code — is listed with its
+  version and, once a check has succeeded, whether a newer release
+  exists. A stale CLI used to fail silently: turns kept working against
+  whatever models the old binary knew, with nothing on screen saying so.
+  Now an **Update** button runs the tool's own updater — or, for a Kimi
+  Code the vendor's updater declines to update, Moonshot's own installer,
+  pinned to the version shown — and a small banner in the window says a
+  tool is behind until you close it for that version. A tool that
+  updates itself takes its own banner down. The check has a toggle of
+  its own and sends nothing about you.
+- **Fast mode.** The model menu gains a switch for the agents that have
+  one: Claude Code's fast mode on Opus models, and Codex's faster
+  service tier where the model offers one. A bolt on the chip shows it
+  is on, and the chip's hover reports what the agent said about it.
+- **Previous model versions stay reachable (Claude Code).** The model
+  menu lists the newest version of each family as before, and an
+  **Other models** section beneath with the previous version the
+  installed CLI still offers — pick one to pin a session to it, the way
+  Claude Code's own picker allows. The Default row now names what a send
+  with no model flag actually runs, read from claude's own settings.
+- **A + on custom groups.** Grouped by Custom, each group you named
+  carries the same **+** a folder header does: the session it starts
+  belongs to that group from its first message and opens in the folder
+  you last used there. A group stays visible while empty, so a new one
+  can be used straight away, and a task scheduled from that page is filed
+  in the group too.
+
+### Changed
+
+- **The context chip is a percentage.** It now reads like Claude Code's
+  own indicator — how full the context window is on the newest call, with
+  the exact numbers on hover — instead of a token count that looked like
+  a running total. It divides by the window each CLI states for the model
+  in force, so a Claude session at 20% of a 1M window no longer reads
+  "100%". When no window is known it shows the count and says so.
+
+### Fixed
+
+- **Compaction is visible.** When an agent summarises the conversation
+  to make room, the transcript now shows a **Conversation compacted** row
+  (with before-and-after sizes where the agent records them) and labels
+  the summary as the agent's, not as something you wrote; Claude Code's
+  half-minute of silence while it compacts shows as "Compacting
+  context…" rather than as a hang. All three agents, live and on reopen.
+- Kimi Code's context chip now moves during a turn instead of only when
+  the turn ends.
+- **Codex's model list keeps up with Codex.** A model that appears in
+  Codex's own picker after a Codex update — or that OpenAI switches on
+  server-side — now shows in SipAI's model menu without a relaunch: the
+  list is re-read whenever Codex rewrites its catalog, and after an
+  update (and once a day otherwise) SipAI asks Codex for its list
+  directly, the way Codex's own picker fills itself at startup. No model
+  is called and nothing is billed.
+- **Codex's context chip honours `model_context_window`.** A window
+  raised in `~/.codex/config.toml` is what the percentage divides by,
+  clamped to the model's maximum exactly as Codex clamps it, so the chip
+  agrees with Codex's own status bar on such a setup.
+
+### Security
+
+- The command-line-tool version check can be switched off, and its
+  requests are bounded in size. The one installer SipAI can run
+  (Moonshot's, for a Kimi Code the vendor's updater declines to update)
+  is fetched over HTTPS only, size-bounded, staged in a private temporary
+  folder, and pinned to the version named on the row; it never edits
+  your shell files.
+
 ## [1.0.2] — 2026-08-30
 
 ### Added
@@ -138,6 +210,7 @@ First public release.
   **Settings → Updates**.
 - **English and Simplified Chinese** throughout.
 
+[1.0.3]: https://github.com/YZCODE01/SipAI/releases/tag/v1.0.3
 [1.0.2]: https://github.com/YZCODE01/SipAI/releases/tag/v1.0.2
 [1.0.1]: https://github.com/YZCODE01/SipAI/releases/tag/v1.0.1
 [1.0.0]: https://github.com/YZCODE01/SipAI/releases/tag/v1.0.0

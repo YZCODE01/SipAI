@@ -249,27 +249,34 @@ enum CodexSessionScanner {
 
     // MARK: - Context footprint
 
-    /// Context-window footprint of this rollout's most recent API call —
-    /// the codex counterpart of `AgentSessionScanner.lastContextTokens`,
-    /// and what seeds the composer's token chip. 0 when the rollout
-    /// carries no usage record.
+    /// How full the context window is on this rollout's most recent API
+    /// call — the codex counterpart of
+    /// `AgentSessionScanner.lastContextTokens`, and what seeds the
+    /// composer's context chip. 0 when the rollout carries no usage
+    /// record.
     ///
     /// Read from `event_msg` → `token_count` →
-    /// `info.last_token_usage.total_tokens`. WHICH of the two usage
-    /// blocks is read is the whole correctness question here:
-    /// `total_token_usage` is summed across every API call of the
-    /// SESSION and overcounts the real context by orders of magnitude
-    /// on a long one; `last_token_usage` describes the newest call
+    /// `info.last_token_usage`. WHICH of the two usage blocks is read
+    /// is the whole correctness question here: `total_token_usage` is
+    /// summed across every API call of the SESSION and overcounts the
+    /// real context by orders of magnitude on a long one (it also
+    /// RESETS on a `thread_settings_applied` record, so it is not even
+    /// a session total); `last_token_usage` describes the newest call
     /// alone. The same hazard is why `CodexEventParser` stamps no
     /// context on `turn.completed`.
     ///
-    /// `total_tokens` is READ, never recomputed as
-    /// `input_tokens + output_tokens`: rollouts from an older codex
-    /// populate the total alone and leave both components 0, so the
-    /// sum would report those sessions as having no usage at all.
-    /// Note also that codex's `input_tokens` already INCLUDES the
-    /// cached prefix — unlike claude, where the cache fields must be
-    /// added in.
+    /// `input_tokens` is the value, not `total_tokens`: codex's input
+    /// already INCLUDES the cached prefix, so it IS the input side of
+    /// that call — the same quantity claude reaches by adding its
+    /// cache fields in, and the one claude's and kimi's own context
+    /// indicators divide by the window. `total_tokens` adds the
+    /// reply, which those indicators exclude.
+    ///
+    /// The total is the FALLBACK, and it is load-bearing: rollouts
+    /// from an older codex populate `total_tokens` alone and leave
+    /// every component 0, so reading
+    /// the input alone would report those sessions as having no usage
+    /// at all.
     static func lastContextTokens(of url: URL) -> Int {
         lastContextInfo(of: url).tokens
     }
@@ -322,14 +329,17 @@ enum CodexSessionScanner {
                   let info = payload["info"] as? [String: Any],
                   let usage = info["last_token_usage"] as? [String: Any]
             else { return }
-            let total = intField(usage["total_tokens"])
+            // Input side first; the old schema's total-only records
+            // fall back to the total rather than reading as empty.
+            let input = intField(usage["input_tokens"])
+            let total = input > 0 ? input : intField(usage["total_tokens"])
             // Forward walk, so the NEWEST record wins. It may legitimately
             // be smaller than the one before it — a compaction drops the
-            // footprint back down, and that lower number is the honest
+            // number back down, and that lower number is the honest
             // one to show. The window travels WITH the record that won:
             // a mid-session model switch changes both together, and a
-            // stale window against a fresh footprint misstates the
-            // occupancy exactly the way the constant did.
+            // stale window against a fresh number misstates the
+            // occupancy exactly the way a constant did.
             if total > 0 {
                 last = total
                 window = intField(info["model_context_window"])
@@ -570,6 +580,22 @@ enum CodexSessionScanner {
                     as? [String: Any],
                   let payload = obj["payload"] as? [String: Any]
             else { return }
+
+            // The agent summarised the conversation and carried on.
+            // Codex states no before/after figures, so the row says so
+            // without them — the same row every agent gets, minus what
+            // this one does not record.
+            //
+            // `replacement_history` is deliberately NOT rendered: it is
+            // the retained ORIGINAL user turns kept verbatim (codex
+            // writes no summary text), and the rollout still holds
+            // those turns above this record. Rendering it would replay
+            // the conversation a second time.
+            if (obj["type"] as? String) == "compacted" {
+                items.append(AgentSessionHistoryItem(
+                    kind: .compaction(preTokens: nil, postTokens: nil)))
+                return
+            }
 
             if let role = payload["role"] as? String,
                let content = payload["content"] as? [Any],

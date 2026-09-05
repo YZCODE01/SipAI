@@ -33,6 +33,16 @@ enum SipaiPaths {
     }
 }
 
+/// Only the defaults key is needed here: `FactoryReset` lists it among
+/// the settings a reset clears. The real monitor holds timers, network
+/// calls and subprocesses, none of which this harness wants.
+/// `Verification/CLIUpdates` is what pins the two spellings together.
+@MainActor
+enum AgentCLIUpdateMonitor {
+    static let dismissalsDefaultsKey = "cliUpdateDismissed"
+    static let remoteChecksDefaultsKey = "cliUpdateChecksEnabled"
+}
+
 // MARK: - Managers
 
 /// Whether config.json was still on disk when a reload came in. A

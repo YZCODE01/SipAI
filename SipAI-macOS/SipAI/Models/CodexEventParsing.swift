@@ -145,6 +145,10 @@ enum CodexEventParser {
     /// drops `thinking` blocks.
     private static let nonToolItemTypes: Set<String> = [
         "agent_message", "user_message", "reasoning",
+        // Codex compacting itself. It carries none of the fields a
+        // tool row reads, so pairing it as one draws an empty chip;
+        // `completedItemEvents` renders it as the compaction row.
+        "context_compaction",
     ]
 
     private static func toolUseEvents(from obj: [String: Any]) -> [StreamEvent] {
@@ -166,6 +170,12 @@ enum CodexEventParser {
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else { return [] }
             return [StreamEvent(kind: .assistantText(text: text))]
+        }
+        // The agent summarised the conversation to make room. No
+        // figures: codex records none, here or in the rollout.
+        if type == "context_compaction" {
+            return [StreamEvent(kind: .compaction(preTokens: nil,
+                                                  postTokens: nil))]
         }
         // A user_message echo would double the bubble `send()` already
         // drew; reasoning is private. Both are dropped.

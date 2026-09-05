@@ -35,12 +35,24 @@ struct AgentComposer: View {
     /// Mode / model / effort selections. Owned by AgentSessionView so
     /// they survive the draft→existing transition and persist to config.
     @Binding var options: AgentLaunchOptions
+    /// Claude's own report of whether its newest turn here ran fast
+    /// ("on" / "off" / "cooldown"); nil before any turn, and always nil
+    /// for the other agents. The switch below is an intent, this is
+    /// the outcome, and the chip's hover names both.
+    var fastModeState: String? = nil
 
     /// Working directory shown in the folder control.
     var folder: URL
     /// True only while the session is an unsent draft.
     var folderEditable: Bool
     var onFolderChange: (URL) -> Void
+
+    /// Custom group a draft started from a group header's + belongs to,
+    /// or nil. A task created here inherits it, the same way it already
+    /// inherits `folder`: both describe the draft the user is standing
+    /// in, and a task made from "Work"'s page landing under Ungrouped
+    /// reads as a bug rather than a rule.
+    var customGroup: String? = nil
 
     /// Whether the schedule control appears at all. True only for
     /// drafts — a session that already exists can't retroactively
@@ -74,15 +86,16 @@ struct AgentComposer: View {
     /// move under the pointer.
     var canFind: Bool = true
 
-    /// Context-window footprint (tokens) for the usage ring. 0 = fresh.
+    /// Tokens of context on the newest API call — the input side,
+    /// cached prefix included. 0 = nothing recorded yet (chip hidden).
     var contextTokens: Int
 
-    /// The window that footprint sits in, when the session's agent
-    /// RECORDS one — codex stamps `model_context_window` on the very
-    /// rollout record the footprint is read from, kimi's config
-    /// declares `max_context_size` per model. nil = not recorded
-    /// (claude among them), and the counter keeps its constant.
-    /// Display-only; nothing is ever launched with it.
+    /// The window that number sits in, resolved by the session view
+    /// from the model SELECTED in the chip beside this one
+    /// (`ContextWindowResolver`). nil = this machine cannot state a
+    /// window for that model, and the chip shows the count instead of a
+    /// percentage rather than dividing by a guess. Display-only;
+    /// nothing is ever launched with it.
     var contextWindowTokens: Int? = nil
 
     /// When the in-flight turn started, or nil if none is running.
@@ -128,6 +141,11 @@ struct AgentComposer: View {
     @State private var creatingTask = false
     /// Transient "✓ Scheduled task created" notice above the card.
     @State private var scheduleNotice: String? = nil
+    /// What a claude send with no `--model` runs as, read from claude's
+    /// own configuration for this folder (`ClaudeModelCatalog
+    /// .configuredDefaultModel`). Cached per appearance and per folder:
+    /// the chip's resting title reads it on every body pass.
+    @State private var configuredDefault: String? = nil
 
     private var hasText: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -177,7 +195,9 @@ struct AgentComposer: View {
             caps.ensureLoaded()
             codexCaps.ensureLoaded()
             kimiCaps.ensureLoaded()
+            refreshConfiguredDefault()
         }
+        .onChange(of: folder) { _, _ in refreshConfiguredDefault() }
         .onChange(of: scheduleAvailable) { _, available in
             // Disarm when the composer moves somewhere scheduling
             // doesn't exist (draft → existing migration, or switching
@@ -400,18 +420,31 @@ struct AgentComposer: View {
             // `highlight: false` — the chip is a readout, and a fill
             // would imply a button.
             if turnStartedAt != nil || (lastTurnDuration ?? 0) > 0 {
-                HoverHighlight(hint: turnClockHint, highlight: false) {
+                HoverHighlight(hint: turnClockHint, highlight: false,
+                               hintAlignment: .trailing) {
                     TurnClockChip(startedAt: turnStartedAt,
                                   finished: lastTurnDuration)
                 }
             }
             // Hidden until the first usage arrives (mid-first-turn,
-            // from the first assistant event) — "0 tokens" says
-            // nothing.
+            // from the first assistant event) — "0%" says nothing.
+            //
+            // The hint rides HoverHighlight like the clock chip beside
+            // it and every other control in this row, NOT `.help()`:
+            // the system tooltip is delayed, and next to neighbours
+            // that answer instantly a hover that produces nothing for a
+            // second reads as "no hint at all" — which is exactly how
+            // the previous counter's `.help()` read. `highlight:
+            // false` — a readout, and a fill would imply a button.
             if config.display.showTokenAgent && contextTokens > 0 {
-                ContextTokenCounter(contextTokens: contextTokens,
-                                    windowTokens: contextWindowTokens
-                                        ?? ContextTokenCounter.claudeWindow)
+                HoverHighlight(hint: ContextUsageChip.hoverText(
+                                    contextTokens: contextTokens,
+                                    windowTokens: contextWindowTokens),
+                               highlight: false,
+                               hintAlignment: .trailing) {
+                    ContextUsageChip(contextTokens: contextTokens,
+                                     windowTokens: contextWindowTokens)
+                }
             }
         }
         .padding(.horizontal, 4)
@@ -805,6 +838,20 @@ struct AgentComposer: View {
             creatingTask = false
             switch outcome {
             case .success(let success):
+                // `success.name` is the slugged DIRECTORY name, which
+                // is what the scanner reports as the task's name and
+                // what the sidebar files it under — so this key matches
+                // the row before that row exists. A group deleted while
+                // the popover was open fails the membership test and
+                // the task is simply unfiled, rather than config
+                // keeping a pointer to a group that is gone.
+                if let group = customGroup,
+                   config.agentCustomGroups(for: agentKey).contains(group) {
+                    config.setAgentSessionGroup(
+                        group,
+                        for: AgentListItem.groupItemKey(
+                            forScheduledTaskName: success.name))
+                }
                 draft = ""
                 scheduleDraft = ScheduleDraft()
                 showingSchedulePopover = false
@@ -961,18 +1008,157 @@ struct AgentComposer: View {
                                   subtitle: nil)
             }
         }
-        return [ComposerOptionRow(
+        var rows = [ComposerOptionRow(
             value: nil,
             title: String(localized: "Default",
                           comment: "Model menu row — claude's default model"),
-            // What the default last resolved to on this machine, when
-            // we've observed it ("Fable 5").
-            subtitle: config.agentModelFullId(forAlias: "")
-                .map { ClaudeModelDisplay.name(for: $0) })]
-        + caps.modelAliases.map { alias in
+            // What a send with no --model runs as: claude's own
+            // configured default first, else what such a send was last
+            // observed to resolve to ("Fable 5").
+            subtitle: claudeDefaultName)]
+        rows += caps.modelAliases.map { alias in
             ComposerOptionRow(value: alias,
                               title: rememberedName(forAlias: alias),
                               subtitle: nil)
+        }
+        // "Other models": per family, the previous version this Mac
+        // has run and the installed claude still names — offered under
+        // its FULL id, which `--model` takes verbatim. Ordered by the
+        // alias rows above so the section reads in the same sequence.
+        let others = caps.modelAliases.flatMap { alias in
+            caps.otherModels.filter {
+                $0.family == ClaudeModelDisplay.parts(of: alias).family
+            }
+        }
+        if !others.isEmpty {
+            rows.append(.header(String(localized: "Other models",
+                                       comment: "Model menu section header: previous model versions the CLI still offers")))
+            rows += others.map {
+                ComposerOptionRow(value: $0.fullId,
+                                  title: ClaudeModelDisplay.name(for: $0.fullId),
+                                  subtitle: nil)
+            }
+        }
+        return rows
+    }
+
+    /// The Default row's subtitle and the chip's resting title for
+    /// claude: the configured default, read the way the codex and kimi
+    /// rows read theirs, else the observed one.
+    private var claudeDefaultName: String? {
+        if let configured = configuredDefault, !configured.isEmpty {
+            return rememberedName(forAlias: configured)
+        }
+        return config.agentModelFullId(forAlias: "")
+            .map { ClaudeModelDisplay.name(for: $0) }
+    }
+
+    private func refreshConfiguredDefault() {
+        guard !isCodex, !isKimi else { return }
+        let found = ClaudeModelCatalog.configuredDefaultModel(cwd: folder)
+        if found != configuredDefault { configuredDefault = found }
+    }
+
+    // MARK: Fast mode
+
+    /// Whether the model in force can take the fast switch.
+    ///
+    /// Claude's fast mode is Opus-only — measured: another model
+    /// reports `model_not_allowed`, and claude's own toggle says
+    /// "Switching to other models turns off fast mode". A family this
+    /// cannot read (an alias with no family word, a Default whose
+    /// resolution has never been observed) is allowed, and claude then
+    /// reports the state itself. Codex offers it only where the model's
+    /// catalog entry advertises a service tier; kimi never.
+    private func fastModeSupported(forModel value: String?) -> Bool {
+        if isKimi { return false }
+        if isCodex { return codexCaps.fastTier(forModel: value) != nil }
+        let effective: String? = {
+            if let value, !value.isEmpty { return value }
+            if let configured = configuredDefault, !configured.isEmpty {
+                return configured
+            }
+            return config.agentModelFullId(forAlias: "")
+        }()
+        guard let effective,
+              let family = ClaudeModelDisplay.parts(of: effective).family
+        else { return true }
+        return family == "opus"
+    }
+
+    private var fastModeTitle: String {
+        String(localized: "Fast mode",
+               comment: "Model menu switch: the agent's faster inference mode")
+    }
+
+    private func fastModeSubtitle(supported: Bool) -> String? {
+        guard supported else {
+            return String(localized: "Not offered for this model",
+                          comment: "Model menu switch subtitle: the selected model has no fast mode")
+        }
+        if isCodex, let tier = codexCaps.fastTier(forModel: options.model) {
+            // Codex's own words for its tier ("Fast · 1.5x speed,
+            // increased usage") — tool-derived text, never a literal.
+            return tier.description.isEmpty
+                ? tier.name
+                : tier.name + " · " + tier.description
+        }
+        return String(localized: "Applies to Opus models",
+                      comment: "Model menu switch subtitle: claude's fast mode is Opus-only")
+    }
+
+    /// What the chip's hover says about fast mode: the outcome claude
+    /// reported when there is one, else the intent. Nothing for kimi,
+    /// and nothing at all while the switch is off and no turn has
+    /// reported a state.
+    private var fastModeHint: String? {
+        guard !isKimi, options.fastMode || fastModeState != nil else { return nil }
+        switch fastModeState {
+        case "on":
+            return String(localized: "Fast mode is on",
+                          comment: "Model chip hover: claude reported fast mode active")
+        case "cooldown":
+            return String(localized: "Fast mode is cooling down after a rate limit",
+                          comment: "Model chip hover: claude reported fast mode paused after a rate limit")
+        case "off":
+            return String(localized: "Fast mode is off",
+                          comment: "Model chip hover: claude reported fast mode inactive")
+        default:
+            return options.fastMode
+                ? String(localized: "Fast mode requested",
+                         comment: "Model chip hover: the switch is on and the agent has not yet reported a state")
+                : nil
+        }
+    }
+
+    /// The switch under the model rows. Claude and codex only; disabled
+    /// with the reason as its subtitle for a model that does not offer
+    /// it, and cleared when such a model is picked (see the picker).
+    @ViewBuilder
+    private var fastModeFooter: some View {
+        if !isKimi {
+            let supported = fastModeSupported(forModel: options.model)
+            Divider().padding(.vertical, 4)
+            Toggle(isOn: Binding(
+                get: { options.fastMode && supported },
+                set: { options.fastMode = $0 }
+            )) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(fastModeTitle)
+                        .font(.system(size: 13))
+                        .foregroundColor(SipDesign.textPrimary)
+                    if let subtitle = fastModeSubtitle(supported: supported) {
+                        Text(subtitle)
+                            .font(.system(size: 11))
+                            .foregroundColor(SipDesign.textSecondary)
+                    }
+                }
+            }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .disabled(!supported)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
         }
     }
 
@@ -1024,31 +1210,38 @@ struct AgentComposer: View {
         if let picked = options.model, !picked.isEmpty {
             return rememberedName(forAlias: picked)
         }
-        // No override on a fresh draft: show what claude's default
-        // last resolved to, if ever observed — corrected by the first
-        // send's system.init if the default has moved since.
-        if let def = config.agentModelFullId(forAlias: ""), !def.isEmpty {
-            return ClaudeModelDisplay.name(for: def)
+        // No override: name what a Default send runs as — claude's own
+        // configured default, else what such a send last resolved to.
+        if let name = claudeDefaultName, !name.isEmpty {
+            return name
         }
         return String(localized: "Model",
                       comment: "Model menu label when no override is set")
+    }
+
+    /// The exact recorded id on hover — the display name is derived,
+    /// the id is the ground truth — and, when the fast switch is in
+    /// play, what became of it.
+    private var modelHelp: String {
+        let base = options.modelFullId
+            ?? options.model
+            ?? String(localized: "Model",
+                      comment: "Model menu label when no override is set")
+        guard let fast = fastModeHint else { return base }
+        return base + " · " + fast
     }
 
     private var modelButton: some View {
         Button {
             showingModelPopover = true
         } label: {
-            trailingMenuLabel(modelChipTitle)
+            trailingMenuLabel(modelChipTitle,
+                              icon: options.fastMode ? "bolt.fill" : nil)
         }
         .buttonStyle(.plain)
-        // The exact recorded id ("claude-opus-5") on hover — the
-        // display name is derived, the id is the ground truth.
-        .help(options.modelFullId
-              ?? options.model
-              ?? String(localized: "Model",
-                        comment: "Model menu label when no override is set"))
+        .help(modelHelp)
         .popover(isPresented: $showingModelPopover, arrowEdge: .bottom) {
-            ComposerOptionList(rows: modelRows, selected: options.model) { value in
+            ComposerOptionList(rows: modelRows, selected: options.model, onPick: { value in
                 // One assignment → one onChange: the picked alias replaces
                 // both the flag value and the recorded-id display.
                 var updated = options
@@ -1073,9 +1266,16 @@ struct AgentComposer: View {
                    !effortLevels(forModel: value).contains(effort) {
                     updated.effort = nil
                 }
+                // Same rule for the fast switch: a model that does not
+                // offer it must not carry a request the picker no
+                // longer shows — claude's own toggle turns itself off
+                // on a model switch for the same reason.
+                if updated.fastMode, !fastModeSupported(forModel: value) {
+                    updated.fastMode = false
+                }
                 options = updated
                 showingModelPopover = false
-            }
+            }, footer: { fastModeFooter })
         }
     }
 
@@ -1172,13 +1372,21 @@ struct AgentComposer: View {
         .contentShape(Rectangle())
     }
 
-    private func trailingMenuLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 11, weight: .medium))
-            .foregroundColor(SipDesign.textSecondary)
-            .padding(.vertical, 3)
-            .padding(.horizontal, 5)
-            .contentShape(Rectangle())
+    private func trailingMenuLabel(_ text: String,
+                                   icon: String? = nil) -> some View {
+        HStack(spacing: 3) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(SipDesign.textSecondary)
+            }
+            Text(text)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(SipDesign.textSecondary)
+        }
+        .padding(.vertical, 3)
+        .padding(.horizontal, 5)
+        .contentShape(Rectangle())
     }
 
 }
@@ -1195,6 +1403,14 @@ private struct HoverHighlight<Content: View>: View {
     /// but no fill — a highlight on something that cannot be clicked
     /// reads as a button that does nothing.
     var highlight: Bool = true
+    /// Where the hint sits over its control. Centred by default; the
+    /// controls at the strip's RIGHT end pass `.trailing`, because a
+    /// hint wider than a small chip overhangs it on both sides, and on
+    /// that side there is only the window's 60 pt margin to overhang
+    /// into — the last letters of a centred hint land past the window
+    /// edge and are simply not drawn. Trailing keeps the hint's right
+    /// edge on the control's, so it grows leftward over the strip.
+    var hintAlignment: HorizontalAlignment = .center
     @ViewBuilder var content: Content
     @State private var hovered = false
 
@@ -1204,7 +1420,8 @@ private struct HoverHighlight<Content: View>: View {
                 RoundedRectangle(cornerRadius: 6)
                     .fill(hovered && highlight ? Color.gray.opacity(0.2) : Color.clear)
             )
-            .overlay(alignment: .top) {
+            .overlay(alignment: Alignment(horizontal: hintAlignment,
+                                          vertical: .top)) {
                 if hovered, let hint = hint {
                     Text(hint)
                         .font(.system(size: 10.5, weight: .medium))
@@ -1234,17 +1451,25 @@ private struct ComposerOptionRow: Identifiable {
     let value: String?
     let title: String
     let subtitle: String?
-    var id: String { value ?? "__default__" }
+    /// A section label ("Other models"): drawn, never picked.
+    var isHeader: Bool = false
+    var id: String { isHeader ? "__header__" + title : (value ?? "__default__") }
+
+    static func header(_ title: String) -> ComposerOptionRow {
+        ComposerOptionRow(value: nil, title: title, subtitle: nil, isHeader: true)
+    }
 }
 
 /// Custom dropdown body for the mode / model / effort pickers. A plain
 /// popover list instead of `Menu` so rows can highlight grey on hover
 /// (NSMenu rows always flash the blue accent) and carry a dimmer
-/// second line for behavior hints.
-private struct ComposerOptionList: View {
+/// second line for behavior hints. `footer` sits under the rows —
+/// the model menu's fast switch; the others pass nothing.
+private struct ComposerOptionList<Footer: View>: View {
     let rows: [ComposerOptionRow]
     let selected: String?
     let onPick: (String?) -> Void
+    @ViewBuilder let footer: () -> Footer
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1254,15 +1479,35 @@ private struct ComposerOptionList: View {
                 if index == 1 {
                     Divider().padding(.vertical, 4)
                 }
-                ComposerOptionRowButton(
-                    row: row,
-                    selected: row.value == selected,
-                    action: { onPick(row.value) }
-                )
+                if row.isHeader {
+                    Text(row.title)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(SipDesign.textSecondary)
+                        .padding(.horizontal, 10)
+                        .padding(.top, 8)
+                        .padding(.bottom, 3)
+                } else {
+                    ComposerOptionRowButton(
+                        row: row,
+                        selected: row.value == selected,
+                        action: { onPick(row.value) }
+                    )
+                }
             }
+            footer()
         }
         .padding(6)
         .frame(minWidth: 230, alignment: .leading)
+    }
+}
+
+extension ComposerOptionList where Footer == EmptyView {
+    init(rows: [ComposerOptionRow], selected: String?,
+         onPick: @escaping (String?) -> Void) {
+        self.rows = rows
+        self.selected = selected
+        self.onPick = onPick
+        self.footer = { EmptyView() }
     }
 }
 
@@ -1388,107 +1633,81 @@ struct TurnClockChip: View {
 
 // MARK: - Token counter
 
-/// Live token readout for the composer's control strip — "370k tokens".
-/// Whenever a finished turn lands a new total, the number COUNTS to it
-/// (fast ease-out ticker) instead of silently swapping, so the update
-/// reads as live movement.
+/// How full the session's context window is — "39%" in the composer's
+/// control strip, with the numbers behind it on hover.
 ///
-/// Agent sessions only — chats carry no counter at all (their turns
-/// often record no usage, and a number that appears for some chats and
-/// not others is worse than none).
-/// The call site gates visibility behind Settings → "Show token count".
-struct ContextTokenCounter: View {
-    /// The standard Claude window, the FALLBACK when the session's
-    /// agent records no window of its own. Codex and kimi both record
-    /// theirs and pass it in (`contextWindowTokens`): dividing a codex
-    /// footprint by this constant overstated occupancy on every codex
-    /// session — the recorded window on this machine is 258,400 — and
-    /// kimi's run to 1,048,576.
-    static let claudeWindow = 200_000
-
+/// A PERCENTAGE, not a token count, and the two are not
+/// interchangeable. The number this divides is the context footprint of
+/// the newest API call, which legitimately goes DOWN — at a compaction
+/// most visibly, and by a few percent at most turn boundaries. Shown as
+/// a count that reads as a running total, a drop reads as a bug; shown
+/// as a gauge, it reads as what it is. It is also the metric each
+/// agent's own terminal shows for the same session (claude's
+/// "N% context used", kimi's status bar), so the two agree.
+///
+/// Agent sessions only — chats carry no chip at all (their turns often
+/// record no usage, and a number that appears for some chats and not
+/// others is worse than none). The call site gates visibility behind
+/// Settings → "Show context usage".
+struct ContextUsageChip: View {
+    /// Tokens of context on the newest call: the INPUT side, cached
+    /// prefix included, without that call's own reply.
     var contextTokens: Int
-    /// Context-window size for the occupancy tooltip.
-    var windowTokens: Int = ContextTokenCounter.claudeWindow
-
-    /// The value currently rendered — ticked toward `contextTokens` by
-    /// `animate(to:)` on every change. Born AT the current value, not
-    /// at 0: the view is re-created on every session switch (it hides
-    /// while the reload zeroes the token state), and counting up from
-    /// zero each rebirth would read as the number jumping; only real
-    /// growth animates.
-    @State private var shown: Int
-    @State private var ticker: Task<Void, Never>? = nil
-
-    init(contextTokens: Int,
-         windowTokens: Int = ContextTokenCounter.claudeWindow) {
-        self.contextTokens = contextTokens
-        // A window is a divisor; a bogus 0 upstream must degrade to
-        // the constant, never to a division by zero.
-        self.windowTokens = windowTokens > 0
-            ? windowTokens : ContextTokenCounter.claudeWindow
-        self._shown = State(initialValue: contextTokens)
-    }
-
-    private static func compact(_ n: Int) -> String {
-        if n < 1000 { return "\(n)" }
-        let k = Double(n) / 1000.0
-        return k < 10 ? String(format: "%.1fk", k) : "\(Int(k.rounded()))k"
-    }
+    /// The window `contextTokens` sits in, or nil when this machine
+    /// cannot state one for the model in question. nil is not a
+    /// fallback to a constant — see `label`.
+    var windowTokens: Int?
 
     var body: some View {
-        Text("\(Self.compact(shown)) tokens",
-             comment: "Composer token counter, e.g. '370k tokens'")
+        // The visible hint comes from the enclosing HoverHighlight at
+        // the call site, so no `.help()` here — two tooltips for one
+        // readout is noise, and the system one arrives a second late.
+        Text(verbatim: label)
             .font(.system(size: 11))
-            // One constant colour regardless of usage — the count is
-            // information, not a warning.
+            // One constant colour regardless of occupancy — this
+            // states a fact, it does not warn.
             .foregroundColor(.orange)
             .monospacedDigit()
-            // Count up from 0 on first appearance too: the call sites
-            // hide the counter until usage exists, so the view is born
-            // exactly when the first total lands and should tick to it.
-            .onAppear { animate(to: contextTokens) }
-            .onChange(of: contextTokens) { _, new in
-                animate(to: new)
-            }
-            .onDisappear { ticker?.cancel() }
-            .help(helpText)
             .accessibilityLabel(accessibilityText)
     }
 
-    private var helpText: String {
-        let fraction = min(Double(contextTokens) / Double(windowTokens), 1.0)
-        return contextTokens > 0
-            ? String(localized: "Context used: \(contextTokens.formatted()) of \(windowTokens.formatted()) tokens (\(Int((fraction * 100).rounded()))%)",
-                     comment: "Tooltip for the context token counter")
-            : String(localized: "Context usage — grows as the session runs",
-                     comment: "Tooltip for the context token counter when empty")
+    /// The percentage when a window is known, else the raw count.
+    ///
+    /// Falling back to a COUNT rather than to a percentage over an
+    /// assumed window is the whole rule: a percentage is a claim about
+    /// how much room is left, and stating it over a guessed denominator
+    /// is a specific wrong claim, where a count is merely less
+    /// informative. (The constant this replaced assumed 200,000 for
+    /// every claude session, and every model in the picker has a 1M
+    /// window — it read 100% at 20% full.)
+    private var label: String {
+        guard let window = windowTokens, window > 0 else {
+            return String(localized: "\(ContextUsageFormat.compact(contextTokens)) tokens",
+                          comment: "Composer context chip when no window is known")
+        }
+        return "\(ContextUsageFormat.percent(contextTokens, of: window))%"
+    }
+
+    /// The one sentence behind the percentage. Static so the call site
+    /// can hand it to the strip's shared hover label without a second
+    /// copy of the rule.
+    static func hoverText(contextTokens: Int, windowTokens: Int?) -> String {
+        guard let window = windowTokens, window > 0 else {
+            return String(localized: "Context now \(ContextUsageFormat.compact(contextTokens)) tokens (window not yet known)",
+                          comment: "Hover on the composer context chip when no window is known")
+        }
+        return String(localized: "Context now \(ContextUsageFormat.compact(contextTokens)) of \(ContextUsageFormat.compact(window)) tokens",
+                      comment: "Hover on the composer context chip")
     }
 
     private var accessibilityText: String {
-        let fraction = min(Double(contextTokens) / Double(windowTokens), 1.0)
-        return String(
-            localized: "Context window \(Int((fraction * 100).rounded())) percent used",
-            comment: "Accessibility label for the context token counter")
-    }
-
-    /// Tick `shown` from its current value to `target` over ~0.6 s with
-    /// an ease-out curve — fast spin at first, settling on the exact
-    /// final number.
-    private func animate(to target: Int) {
-        ticker?.cancel()
-        let start = shown
-        guard target != start else { return }
-        ticker = Task { @MainActor in
-            let steps = 30
-            for i in 1...steps {
-                if Task.isCancelled { return }
-                let t = Double(i) / Double(steps)
-                let eased = 1 - pow(1 - t, 3)
-                shown = start + Int((Double(target - start) * eased).rounded())
-                try? await Task.sleep(nanoseconds: 20_000_000)
-            }
-            shown = target
+        guard let window = windowTokens, window > 0 else {
+            return Self.hoverText(contextTokens: contextTokens,
+                                  windowTokens: windowTokens)
         }
+        return String(
+            localized: "Context window \(ContextUsageFormat.percent(contextTokens, of: window)) percent used",
+            comment: "Accessibility label for the context usage chip")
     }
 }
 

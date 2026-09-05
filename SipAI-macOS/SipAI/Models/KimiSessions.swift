@@ -666,18 +666,21 @@ enum KimiSessionScanner {
             timestamp: timestamp)
     }
 
-    /// Context footprint of the newest turn, for the composer's token
-    /// chip — the kimi counterpart of
+    /// How full the context window is on the newest API call, for the
+    /// composer's context chip — the kimi counterpart of
     /// `CodexSessionScanner.lastContextTokens`.
     ///
-    /// The wire carries one `usage.record` per turn, whose `usage`
-    /// object holds `inputOther`, `inputCacheRead`,
-    /// `inputCacheCreation` and `output`, under a `usageScope` naming
-    /// what the record spans. The four fields SUM to that turn's
-    /// context, the same way claude's per-call `message.usage` does —
-    /// kimi splits the input into cached and uncached parts rather
-    /// than reporting a single total, so reading `inputOther` alone
-    /// would under-report by the whole cached prefix.
+    /// The wire carries one `usage.record` per STEP, i.e. per LLM call
+    /// (its `usageScope` says "turn", but a session's records match its
+    /// `step.end`s one for one). The `usage` object splits the input
+    /// into `inputOther`, `inputCacheRead` and `inputCacheCreation`,
+    /// which SUM to the input side of that call — reading `inputOther`
+    /// alone would under-report by the whole cached prefix.
+    ///
+    /// `output` is deliberately NOT added: kimi's own status bar
+    /// divides the input side by the model's window, as claude's
+    /// indicator does, and this chip must agree with the terminal the
+    /// user can put beside it.
     ///
     /// `usageScope` is REQUIRED to be `turn`. A block summed across a
     /// whole session or turn's worth of API calls overcounts the real
@@ -733,7 +736,7 @@ enum KimiSessionScanner {
                   let usage = obj["usage"] as? [String: Any]
             else { return }
             let total = ["inputOther", "inputCacheRead",
-                         "inputCacheCreation", "output"]
+                         "inputCacheCreation"]
                 .reduce(0) { $0 + ((usage[$1] as? NSNumber)?.intValue ?? 0) }
             // Model rides the winning record, like the codex window:
             // a mid-session model switch moves footprint and window
@@ -940,8 +943,38 @@ enum KimiSessionScanner {
             guard !trimmed.isEmpty,
                   let data = trimmed.data(using: .utf8),
                   let obj = (try? JSONSerialization.jsonObject(with: data))
-                    as? [String: Any],
-                  let msg = message(from: obj) else { return }
+                    as? [String: Any]
+            else { return }
+
+            // The agent summarised the conversation and carried on.
+            // Checked before `message(from:)`, which reports nil for
+            // this record — the row and its summary would otherwise be
+            // dropped, leaving the context chip's fall unexplained.
+            //
+            // Kimi keeps the summary INSIDE the record rather than
+            // writing it as a separate user turn, so nothing here can
+            // be mistaken for the user's own words; it is labelled a
+            // system notice for the same reason claude's flagged
+            // record is.
+            if (obj["type"] as? String) == "context.apply_compaction" {
+                func positive(_ v: Any?) -> Int? {
+                    guard let n = (v as? NSNumber)?.intValue, n > 0
+                    else { return nil }
+                    return n
+                }
+                items.append(AgentSessionHistoryItem(
+                    kind: .compaction(preTokens: positive(obj["tokensBefore"]),
+                                      postTokens: positive(obj["tokensAfter"]))))
+                if let summary = (obj["summary"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                   !summary.isEmpty {
+                    items.append(AgentSessionHistoryItem(
+                        kind: .userText(summary), isSystemNotice: true))
+                }
+                return
+            }
+
+            guard let msg = message(from: obj) else { return }
 
             switch msg.role {
             case "user":

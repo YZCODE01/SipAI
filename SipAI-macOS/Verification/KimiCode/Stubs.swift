@@ -21,10 +21,19 @@ struct StreamEvent: Identifiable {
     let kind: StreamEventKind
     let contextTokens: Int?
     var isSystemNotice: Bool = false
+    /// The real one carries claude's `fast_mode_state`; the parser
+    /// passes it on every init/result event, so the stub must take it.
+    var fastModeState: String? = nil
+    /// Likewise claude's own per-model context windows, which its
+    /// `result` event carries.
+    var modelContextWindows: [String: Int]? = nil
 
     init(kind: StreamEventKind, contextTokens: Int? = nil,
-         isSystemNotice: Bool = false) {
+         isSystemNotice: Bool = false, fastModeState: String? = nil,
+         modelContextWindows: [String: Int]? = nil) {
         self.isSystemNotice = isSystemNotice
+        self.fastModeState = fastModeState
+        self.modelContextWindows = modelContextWindows
         self.id = UUID()
         self.timestamp = Date()
         self.kind = kind
@@ -42,6 +51,7 @@ enum StreamEventKind {
                 inputTokens: Int, outputTokens: Int)
     case error(message: String)
     case interrupted(message: String)
+    case compaction(preTokens: Int?, postTokens: Int?)
 }
 
 // MARK: - From ScheduledTaskDefinition.swift
@@ -81,6 +91,7 @@ enum AgentManager {
 @MainActor
 final class ConfigManager {
     private var fullIds: [String: String] = [:]
+    private var observed: [String] = []
     func learnAgentModelFullIds(_ found: [String: String]) {
         for (k, v) in found { fullIds[k] = v }
     }
@@ -88,4 +99,22 @@ final class ConfigManager {
     func setAgentModelFullId(_ id: String, forAlias alias: String) {
         fullIds[alias] = id
     }
+    func agentModelObservedIds() -> [String] { observed }
+    func learnAgentModelObservedIds(_ ids: [String]) {
+        for id in ids where !observed.contains(id) { observed.append(id) }
+    }
+}
+
+/// `ClaudeModelCatalog.configuredDefaultModel` asks the login shell's
+/// capture for `ANTHROPIC_MODEL` through this. No shell here.
+enum ShellEnvironment {
+    static func resolveIfCaptured(_ name: String) -> String? { nil }
+}
+
+
+/// The app-server refresh `CodexCatalog.refreshFromCodex` runs — a
+/// process spawn, which no harness performs. `binaryPath` answers nil
+/// here anyway, so the catalog never reaches it.
+enum CodexModelListRefresh {
+    static func run(binary: String) async -> Bool { false }
 }

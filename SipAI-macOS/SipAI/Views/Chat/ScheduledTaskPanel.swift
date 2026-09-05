@@ -752,6 +752,18 @@ struct ScheduledTaskPanel: View {
                                 Text(verbatim: config.rememberedModelName(forAlias: alias))
                                     .tag(alias)
                             }
+                            // The composer's "Other models" section,
+                            // so a task can pin the previous version
+                            // of a family the same way a session can.
+                            if !capabilities.otherModels.isEmpty {
+                                Section(header: Text("Other models",
+                                                     comment: "Model menu section header: previous model versions the CLI still offers")) {
+                                    ForEach(capabilities.otherModels) { model in
+                                        Text(verbatim: config.rememberedModelName(forAlias: model.fullId))
+                                            .tag(model.fullId)
+                                    }
+                                }
+                            }
                         }
                     }
                     .labelsHidden()

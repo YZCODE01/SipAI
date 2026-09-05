@@ -370,11 +370,12 @@ struct AgentSessionsSection: View {
     /// Every ready agent opens as an in-app draft — the composer drives
     /// the whole flow, and the runner picks the CLI off the draft's
     /// `agentKey`.
-    private func startNewSession(cwd cwdURL: URL) {
+    private func startNewSession(cwd cwdURL: URL, inGroup group: String? = nil) {
         appState.pendingClaudeSessionDraft = ClaudeSessionDraft(
             cwd: cwdURL,
             name: nil,
-            agentKey: agentKey
+            agentKey: agentKey,
+            customGroup: group
         )
     }
 
@@ -396,18 +397,29 @@ struct AgentSessionsSection: View {
     /// The app always knows better than `$HOME`: the newest session on
     /// record names a folder the user demonstrably works in.
     private func startNewSession() {
-        let fm = FileManager.default
+        startNewSession(cwd: defaultNewSessionCwd())
+    }
+
+    /// The chain above, as a value — the group + falls back to it when
+    /// the group it was clicked on has no folder of its own to offer.
+    private func defaultNewSessionCwd() -> URL {
         func usable(_ path: String?) -> String? {
             guard let path = path, !path.isEmpty else { return nil }
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: path, isDirectory: &isDir),
-                  isDir.boolValue else { return nil }
-            return path
+            return Self.isOpenableDirectory(path) ? path : nil
         }
         let cwd = usable(config.agentLastCwd(for: agentKey))
             ?? usable(sectionRegularSessions.first?.projectPath?.path)
             ?? NSHomeDirectory()
-        startNewSession(cwd: URL(fileURLWithPath: cwd, isDirectory: true))
+        return URL(fileURLWithPath: cwd, isDirectory: true)
+    }
+
+    /// Whether a path names a directory that can be opened right now.
+    /// One spelling, because both + routes ask it and a group's folder
+    /// is chosen by it.
+    private static func isOpenableDirectory(_ path: String) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
+            && isDir.boolValue
     }
 
     /// The folder-header +. In folder mode the group key IS the
@@ -429,9 +441,7 @@ struct AgentSessionsSection: View {
     /// never existed. Such a group renders, and its + points at
     /// nothing.
     private func startNewSession(inFolder path: String) {
-        var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
-           isDir.boolValue {
+        if Self.isOpenableDirectory(path) {
             startNewSession(cwd: URL(fileURLWithPath: path, isDirectory: true))
             return
         }
@@ -451,6 +461,30 @@ struct AgentSessionsSection: View {
         // this whole branch exists to prevent.
         guard panel.runModal() == .OK, let url = panel.url else { return }
         startNewSession(cwd: url)
+    }
+
+    /// The custom-group header's +. The group's own most recently used
+    /// folder, else the folder any other new session would open in.
+    ///
+    /// Unlike the folder + this does NOT ask when it cannot resolve a
+    /// folder, and the difference is what the user clicked. A folder
+    /// header names one directory and nothing else, so answering with a
+    /// different one silently is the whole of that button's failure
+    /// mode. A group is not a place — its folder is a convenience read
+    /// off its rows — so falling back costs nothing that isn't shown:
+    /// the draft page prints the folder, the composer chip prints it
+    /// again, and it stays editable until the first send.
+    ///
+    /// A brand-new group has no rows and therefore no folder, and that
+    /// is the ordinary case, not an error.
+    private func startNewSession(inGroup group: String) {
+        let folder = AgentSessionGrouping.latestFolder(
+            inGroup: group,
+            sortedItems: sortedListItems,
+            assignments: config.agentSessionGroupAssignments,
+            usable: { Self.isOpenableDirectory($0.path) }
+        )
+        startNewSession(cwd: folder ?? defaultNewSessionCwd(), inGroup: group)
     }
 
     /// Closest existing ancestor directory of `path`, or home.
@@ -530,6 +564,29 @@ struct AgentSessionsSection: View {
         }
     }
 
+    /// This section's rows as ONE stream, newest first.
+    ///
+    /// The order is `AgentListItem.activityDate` — the last user
+    /// message for a session, the newest run's prompt for a task —
+    /// which is also the value each row prints, so the list cannot sort
+    /// on one clock and show another.
+    ///
+    /// Read by `listLayout`, which buckets it, and by the custom
+    /// group +, which asks it where that group was last worked in. One
+    /// property so those two can never disagree about which row is the
+    /// newest.
+    private var sortedListItems: [AgentListItem] {
+        var items = sectionScheduledTasks.map(AgentListItem.scheduled)
+        items.append(contentsOf: sectionRegularSessions.map(AgentListItem.regular))
+        items.sort {
+            if $0.sortDate != $1.sortDate {
+                return $0.sortDate > $1.sortDate
+            }
+            return $0.id.localizedCaseInsensitiveCompare($1.id) == .orderedAscending
+        }
+        return items
+    }
+
     /// One chronological stream, then bucketed. Every row sorts on
     /// `AgentListItem.activityDate` — the last user message for a
     /// session, the latest run's prompt for a scheduled task — which is
@@ -584,14 +641,7 @@ struct AgentSessionsSection: View {
         let perGroup = Self.revealsPerGroup(mode)
         let sectionRevealed = revealedKeys.contains(
             revealKey(mode, Self.sectionRevealKey))
-        var items = sectionScheduledTasks.map(AgentListItem.scheduled)
-        items.append(contentsOf: sectionRegularSessions.map(AgentListItem.regular))
-        items.sort {
-            if $0.sortDate != $1.sortDate {
-                return $0.sortDate > $1.sortDate
-            }
-            return $0.id.localizedCaseInsensitiveCompare($1.id) == .orderedAscending
-        }
+        let items = sortedListItems
 
         // Read off the raw list, so it stands whatever is revealed or
         // folded. Only regular sessions are ever capped (below).
@@ -689,7 +739,22 @@ struct AgentSessionsSection: View {
 
     @ViewBuilder
     private var sessionList: some View {
-        if !hasAnyRows {
+        // A named group renders while empty, so under Custom the list
+        // has something to draw even before the first session exists —
+        // otherwise "New Group…" on a fresh agent produces a group the
+        // empty-state row hides, which is the bug the header + is here
+        // to end. `hasAnyRows` itself is left alone: it feeds
+        // `AgentSectionTier`, where a row means something to READ, and
+        // a group the user named is not that.
+        //
+        // The scan still wins while it runs. `sessions` is empty until
+        // the FIRST scan lands, so without that clause a user grouped
+        // by Custom watches every group sit at 0 for the length of the
+        // launch scan instead of reading "Scanning…". Later rescans
+        // keep the old list, so this only ever costs a machine with no
+        // sessions at all a brief "Scanning…" on activation.
+        let namedGroupsToDraw = groupMode == .custom && !customGroups.isEmpty
+        if !hasAnyRows && (agents.isScanning || !namedGroupsToDraw) {
             emptyRow
         } else {
             let mode = groupMode
@@ -788,11 +853,19 @@ struct AgentSessionsSection: View {
     /// exact look they have when grouping is off, so switching modes
     /// rearranges without restyling.
     ///
-    /// Folder headers of a ready agent carry a trailing + — sharing the
-    /// 18-pt column the session rows' ⋮ sits in — that starts a new
-    /// session in that folder; the count sits directly left of it. The +
-    /// is OUTSIDE the fold button (nested SwiftUI buttons both fire), so
-    /// everything on the row except the + itself folds the group.
+    /// A ready agent's folder and custom-group headers carry a trailing
+    /// + — sharing the 18-pt column the session rows' ⋮ sits in — that
+    /// starts a new session already belonging to that group; the count
+    /// sits directly left of it. The + is OUTSIDE the fold button
+    /// (nested SwiftUI buttons both fire), so everything on the row
+    /// except the + itself folds the group.
+    ///
+    /// Both are places a session can be PUT: a folder is where it runs,
+    /// a custom group is where the user filed it. Ungrouped is neither
+    /// — it is the absence of a filing, and the section's own
+    /// "+ New session" row already makes an unfiled session — so it
+    /// carries none, and neither do the buckets that merely describe
+    /// rows (date, state, "No directory").
     ///
     /// `count` is the group's size BEFORE the cap, never `group.items
     /// .count`: a trimmed group renders fewer rows than it holds, and a
@@ -803,9 +876,20 @@ struct AgentSessionsSection: View {
                                 count: Int,
                                 folded: Bool,
                                 mode: AgentGroupMode) -> some View {
-        let showsFolderPlus = mode == .folder
-            && isReady
-            && group.key != AgentSessionGrouping.noDirectoryKey
+        let showsPlus = isReady && {
+            switch mode {
+            case .folder:
+                return group.key != AgentSessionGrouping.noDirectoryKey
+            case .custom:
+                // Named groups only. `customGroups` is also what tells
+                // Ungrouped apart from a group a user happens to have
+                // called "Ungrouped", and it is the same test the
+                // header's Rename / Delete menu already makes.
+                return customGroups.contains(group.key)
+            case .none, .date, .state:
+                return false
+            }
+        }()
         let header = HStack(spacing: 0) {
             Button {
                 withAnimation(.easeInOut(duration: 0.16)) {
@@ -840,7 +924,7 @@ struct AgentSessionsSection: View {
                         .monospacedDigit()
                 }
                 .padding(.leading, 8)
-                .padding(.trailing, showsFolderPlus ? 2 : 8)
+                .padding(.trailing, showsPlus ? 2 : 8)
                 .padding(.top, 4)
                 .padding(.bottom, 2)
                 .contentShape(Rectangle())
@@ -853,11 +937,19 @@ struct AgentSessionsSection: View {
                 : String(localized: "Collapse group",
                          comment: "Accessibility hint for an expanded session group"))
 
-            if showsFolderPlus {
+            if showsPlus {
                 RowPlusButton(
                     label: String(localized: "New session in \(group.label)",
-                                  comment: "Tooltip and accessibility label for the + on a folder group header"),
-                    action: { startNewSession(inFolder: group.key) }
+                                  comment: "Tooltip and accessibility label for the + on a folder or custom group header"),
+                    action: {
+                        // In folder mode the group key IS the directory
+                        // path; in custom mode it is the group's name.
+                        if mode == .custom {
+                            startNewSession(inGroup: group.key)
+                        } else {
+                            startNewSession(inFolder: group.key)
+                        }
+                    }
                 )
                 .padding(.trailing, 4)
             }
@@ -1634,7 +1726,18 @@ struct AgentSessionsSection: View {
                 }
             }
         case .rename(let old):
-            config.renameAgentCustomGroup(old, to: name, for: agentKey)
+            guard config.renameAgentCustomGroup(old, to: name, for: agentKey)
+            else { return }
+            // A draft started from this group's + and not yet sent
+            // carries the OLD name, and the first send hands that draft
+            // to the runner — so left alone, the rename would unfile
+            // the very session the group's page is promising to hold.
+            // Groups are keyed by name; following the rename here is
+            // the only way to keep that promise.
+            if appState.pendingClaudeSessionDraft?.customGroup == old,
+               appState.pendingClaudeSessionDraft?.agentKey == agentKey {
+                appState.pendingClaudeSessionDraft?.customGroup = name
+            }
         }
     }
 

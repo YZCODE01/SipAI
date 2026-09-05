@@ -125,9 +125,16 @@ struct SipAIApp: App {
                     configManager.reload()
                     chatManager.reload()
                     projectManager.reload()
-                    agentManager.configure(bridge: mcpBridge)
+                    agentManager.configure(bridge: mcpBridge, config: configManager)
                     agentManager.reload(config: configManager)
                     agentManager.startDetectionRechecks(config: configManager)
+                    // After detection, because its first pass reads the
+                    // versions of whatever CLIs were just found. Asks
+                    // each vendor's release endpoint at launch and then
+                    // every 8 hours; re-stats the binaries every 10
+                    // minutes, which is what notices a CLI that updated
+                    // itself.
+                    AgentCLIUpdateMonitor.shared.start(config: configManager)
                     agentManager.reloadSessions()
                     // Learn what each model alias resolves to on this
                     // machine, from what Claude Code has already

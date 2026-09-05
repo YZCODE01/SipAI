@@ -162,6 +162,13 @@ enum SearchTextExtractor {
                 parts.append(String(content.prefix(perRecordCap)))
             case .interrupted(let message):
                 parts.append(message)
+            case .compaction:
+                // The row's text is composed at RENDER time from
+                // localized strings, so there is nothing here that a
+                // query could match against what is on screen. Matching
+                // is defined on DISPLAYED text; the alternative is a
+                // result that highlights nothing.
+                break
             }
         }
         return parts.joined(separator: "\n")

@@ -66,6 +66,13 @@ enum FactoryReset {
         "leftSidebarWidth",
         "rightSidebarWidth",
         "scheduledTaskPanelExpanded",
+        // Which outdated-CLI banners the user has closed, keyed by the
+        // version they closed. Mac-only UI state, so it lives here
+        // rather than in the config file the CLI shares.
+        AgentCLIUpdateMonitor.dismissalsDefaultsKey,
+        // Whether the CLI release checks run at all — the switch in
+        // Settings → Updates. Same home, same reason.
+        AgentCLIUpdateMonitor.remoteChecksDefaultsKey,
         // Sparkle's own preferences. They are settings the user can
         // change (the automatic-check toggle) or decisions they made
         // (a skipped version), so "every setting goes" covers them —

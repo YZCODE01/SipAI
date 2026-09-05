@@ -222,9 +222,21 @@ enum AgentListItem: Identifiable, Hashable {
     /// spaces apart.
     var groupItemKey: String {
         switch self {
-        case .scheduled(let task): return "sched:\(task.name)"
-        case .regular(let session): return session.id
+        case .scheduled(let task):
+            return AgentListItem.groupItemKey(forScheduledTaskName: task.name)
+        case .regular(let session):
+            return session.id
         }
+    }
+
+    /// The same key for a task there is no row for yet — a task the
+    /// composer has just created, whose directory the scanner has not
+    /// walked. The prefix is spelled ONCE, here: a caller that builds
+    /// the key itself is a second spelling to keep in step, and a
+    /// filing written under the wrong one is silent (the row simply
+    /// reads as unfiled).
+    static func groupItemKey(forScheduledTaskName name: String) -> String {
+        "sched:" + name
     }
 }
 
@@ -264,10 +276,17 @@ enum AgentSessionGrouping {
     ///
     /// Folder and date groups are ordered by their most recent row;
     /// custom groups follow the order the user created them in with
-    /// Ungrouped last; state groups use `AgentGroupState.order`. Empty
-    /// groups are dropped in every mode — deleting a group's last
-    /// session removes its header too. (Custom groups stay in config;
-    /// they just don't render while empty.)
+    /// Ungrouped last; state groups use `AgentGroupState.order`.
+    ///
+    /// An empty bucket is dropped — deleting a group's last session
+    /// removes its header too — with ONE exception: a group the user
+    /// NAMED renders while empty. A folder or a date bucket describes
+    /// rows and means nothing without them, but a named group is a
+    /// thing the user made, and its header is the only route to its +,
+    /// its Rename and its Delete. Dropping it made "New Group…" look
+    /// like it had done nothing, and left the group unreachable until
+    /// something was filed into it by hand. Ungrouped is not in the
+    /// exception: nobody made it, and an empty one says nothing.
     static func buckets(_ items: [AgentListItem],
                         mode: AgentGroupMode,
                         state: (AgentListItem) -> AgentGroupState = { _ in .idle },
@@ -371,7 +390,9 @@ enum AgentSessionGrouping {
         }
 
         return ordered.compactMap { key in
-            guard let found = buckets[key], !found.items.isEmpty else { return nil }
+            guard let found = buckets[key] else { return nil }
+            let userNamed = mode == .custom && customGroups.contains(key)
+            guard !found.items.isEmpty || userNamed else { return nil }
             let ranked = found.items.filter { !$0.isSpawnedSubagent }
                 + found.items.filter(\.isSpawnedSubagent)
             return AgentSessionGroup(key: key,
@@ -380,6 +401,38 @@ enum AgentSessionGrouping {
                                      tooltip: found.tooltip,
                                      items: ranked)
         }
+    }
+
+    // MARK: - A group's folder
+
+    /// Where a session started from `name`'s header should open: the
+    /// newest row filed in that group whose folder still exists.
+    ///
+    /// `sortedItems` must be the sidebar's own stream — newest-first on
+    /// `AgentListItem.activityDate`, the last USER message and never a
+    /// file's mtime, or a session left working answers for the group
+    /// for the length of its turn. Walking that order and taking the
+    /// first row that qualifies makes the answer "where you last worked
+    /// in this group" rather than "where most of its rows are".
+    ///
+    /// A row whose folder cannot be opened is SKIPPED, not returned. A
+    /// session with no recorded cwd falls back to decoding its
+    /// `~/.claude/projects` dirname, and that encoding is lossy, so it
+    /// can name a plausible path that never existed. `usable` is passed
+    /// in, which keeps this a pure function of its inputs and testable
+    /// with no filesystem.
+    ///
+    /// Nil when nothing qualifies — the caller falls back to its own
+    /// default rather than this inventing a folder.
+    static func latestFolder(inGroup name: String,
+                             sortedItems: [AgentListItem],
+                             assignments: [String: String],
+                             usable: (URL) -> Bool) -> URL? {
+        for item in sortedItems where assignments[item.groupItemKey] == name {
+            guard let url = item.folderURL?.standardizedFileURL else { continue }
+            if usable(url) { return url }
+        }
+        return nil
     }
 
     // MARK: - Labels

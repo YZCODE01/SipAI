@@ -44,6 +44,7 @@ struct AgentLaunchOptions: Equatable {
     var model: String? = nil
     var effort: String? = nil
     var modelFullId: String? = nil
+    var fastMode: Bool = false
 }
 
 enum ClaudeModelDisplay {
@@ -52,6 +53,12 @@ enum ClaudeModelDisplay {
         (id, "")
     }
     static func isNewer(_ a: String, than b: String) -> Bool { false }
+    /// The observed-id pool needs a family and a version to file an
+    /// id; answering "none" keeps the pool empty here, which is fine —
+    /// this harness is about providers.
+    static func parts(of id: String) -> (family: String?, digits: [Int]) { (nil, []) }
+    static func familyAlias(of id: String) -> String? { nil }
+    static func isFullId(_ value: String) -> Bool { false }
     /// The real one refuses a pairing whose family contradicts its
     /// alias — see Verification/ComposerModelChip, which exercises it.
     /// Permissive here: this harness is about providers.

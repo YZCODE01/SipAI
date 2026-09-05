@@ -30,12 +30,17 @@ final class AgentHistoryCache {
     struct Entry {
         let items: [AgentSessionHistoryItem]
         let contextTokens: Int
-        /// Window the footprint sits in, when the agent records one
-        /// (codex rollout, kimi config); 0 = unknown. Cached because a
-        /// cache hit on an unchanged file returns before any re-read —
-        /// without it the tooltip falls back to its constant until the
-        /// next turn.
+        /// Window the number sits in, when the agent records one
+        /// beside it (codex rollout, kimi config joined by model);
+        /// 0 = unknown. Cached because a cache hit on an unchanged file
+        /// returns before any re-read — without it the chip would lose
+        /// its window until the next turn.
         let contextWindow: Int
+        /// The model that produced `contextTokens`. Cached for the same
+        /// reason as the window, and needed even when the window is
+        /// known: claude records no window anywhere, so its window is
+        /// resolved from this model.
+        let contextModel: String?
         /// Seconds the transcript's newest finished turn took — the
         /// cold seed for the composer's turn clock, 0 when unknown.
         let turnDuration: Double
@@ -81,6 +86,7 @@ final class AgentHistoryCache {
             items: cleaned,
             contextTokens: existing.contextTokens,
             contextWindow: existing.contextWindow,
+            contextModel: existing.contextModel,
             turnDuration: existing.turnDuration,
             commands: existing.commands,
             fileSize: existing.fileSize,
@@ -268,14 +274,21 @@ final class AgentManager: ObservableObject {
     let historyCache = AgentHistoryCache()
 
     /// Weak reference to the process-wide MCP bridge. Set once from
-    /// `SipAIApp.onAppear` via `configure(bridge:)` before any runner
-    /// is created. `AgentRunner` reads this on first send to obtain
+    /// `SipAIApp.onAppear` via `configure(bridge:config:)` before any
+    /// runner is created. `AgentRunner` reads this on first send to obtain
     /// its MCP args + env overlay. Weak to avoid retain cycles — the
     /// bridge is owned by `SipAIApp`'s `@StateObject`.
     private weak var mcpBridge: MCPBridge?
 
-    func configure(bridge: MCPBridge) {
+    /// Weak reference to the app's config, for the one thing this
+    /// manager writes: a draft's custom-group filing, at the moment the
+    /// session id arrives (`migrateRunner`). Weak for the same reason
+    /// as the bridge — both are `@StateObject`s owned by `SipAIApp`.
+    private weak var config: ConfigManager?
+
+    func configure(bridge: MCPBridge, config: ConfigManager) {
         mcpBridge = bridge
+        self.config = config
     }
 
     /// Stop every turn THIS app is running, the way the Stop button and
@@ -447,6 +460,30 @@ final class AgentManager: ObservableObject {
         // Migrate inFlightSends if we had a token under the old key.
         if let token = inFlightSends.removeValue(forKey: oldKey) {
             inFlightSends[newSessionId] = token
+        }
+
+        // A draft started from a custom group's + is filed the instant
+        // it HAS a key to file under — a draft has no session id, and
+        // the send happens under one no session will ever have.
+        //
+        // Here rather than in the view's own discovery handler, for two
+        // reasons. The centre pane is torn down by any detour to a chat
+        // or a note, so a filing addressed to the view is lost exactly
+        // when the user starts a turn and looks at something else; this
+        // runs from the runner's callback with the draft captured,
+        // whether or not a view is alive. And it must land BEFORE the
+        // placeholder below, which re-renders the sidebar at once —
+        // written after, the row appears under Ungrouped and jumps.
+        //
+        // A group deleted (or renamed, which is the same thing: groups
+        // are keyed by name) between the click and the first event
+        // fails the membership test, and the session is simply
+        // unfiled. Writing the assignment anyway would leave config
+        // pointing at a group that no longer exists.
+        if let group = draft?.customGroup,
+           let config = self.config,
+           config.agentCustomGroups(for: runner.agentKey).contains(group) {
+            config.setAgentSessionGroup(group, for: newSessionId)
         }
 
         // Inject a placeholder session so the view can resolve it

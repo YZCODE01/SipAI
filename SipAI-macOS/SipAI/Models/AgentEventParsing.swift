@@ -51,9 +51,17 @@ enum AgentEventParser {
                 fromContent: ((obj["message"] as? [String: Any]) ?? [:])["content"] ?? "")
             let text = AgentSessionScanner.cleanUserText(rawText)
             guard !text.isEmpty else { return [] }
+            // A compaction summary is written as a USER record, and it
+            // is not the user's words — the same rule, and the same
+            // reason, as a harness notice. (Only the tailer sees this:
+            // our own subprocess reports the summary on stdout without
+            // the flag, and that copy is dropped with the other
+            // replayed user records.)
+            let isSummary = (obj["isCompactSummary"] as? Bool) == true
             return [StreamEvent(
                 kind: .userMessage(text: text),
-                isSystemNotice: AgentSessionScanner.isHarnessNotice(rawText))]
+                isSystemNotice: AgentSessionScanner.isHarnessNotice(rawText)
+                    || isSummary)]
         case "result":
             return parseResult(obj)
         default:
@@ -77,27 +85,42 @@ enum AgentEventParser {
             return [StreamEvent(kind: .userMessage(text: output),
                                 isSystemNotice: true)]
         }
+        // The agent summarised the conversation and carried on. The
+        // context number is about to fall by most of its value, so the
+        // transcript says why — on this feed and on the reload alike.
+        if (obj["subtype"] as? String) == "compact_boundary" {
+            let meta = (obj["compact_metadata"] as? [String: Any]) ?? [:]
+            return [StreamEvent(kind: .compaction(
+                preTokens: positiveInt(meta["pre_tokens"]),
+                postTokens: positiveInt(meta["post_tokens"])))]
+        }
         guard (obj["subtype"] as? String) == "init" else { return [] }
         let sid = (obj["session_id"] as? String) ?? ""
         let model = (obj["model"] as? String) ?? ""
         let cwdStr = (obj["cwd"] as? String) ?? fallbackCwd.path
         return [StreamEvent(kind: .systemInit(
             sessionId: sid, model: model, cwd: cwdStr
-        ))]
+        ), fastModeState: obj["fast_mode_state"] as? String)]
     }
 
-    /// Context-window footprint of ONE API call: what that call sent
-    /// (fresh + cached input) plus the reply that joins the next call's
-    /// context. Assistant records carry this per call in
-    /// `message.usage` — the ONLY place the real context size lives;
-    /// the `result` event's usage is summed across every call of the
-    /// turn and overcounts by the number of tool round-trips.
+    /// How full the context window is right now: the INPUT side of ONE
+    /// API call — fresh input plus the cached prefix, which together are
+    /// the whole conversation as the model just saw it. Assistant
+    /// records carry this per call in `message.usage`, the only place
+    /// the real context size lives; the `result` event's usage is
+    /// summed across every call of the turn and overcounts by the
+    /// number of tool round-trips.
+    ///
+    /// The call's OWN output is deliberately excluded. Claude Code's
+    /// context indicator is `input + cache_creation + cache_read` over
+    /// the window, and kimi's status bar computes the same quantity —
+    /// adding the reply here would put this chip a few percent above
+    /// what the agent's own terminal says about the same session.
     private static func contextFootprint(ofUsage usage: [String: Any]?) -> Int? {
         guard let usage = usage else { return nil }
         let total = intField(usage["input_tokens"])
             + intField(usage["cache_creation_input_tokens"])
             + intField(usage["cache_read_input_tokens"])
-            + intField(usage["output_tokens"])
         return total > 0 ? total : nil
     }
 
@@ -202,13 +225,57 @@ enum AgentEventParser {
         // usage instead (`contextFootprint`).
         let inTok = intField(usage["input_tokens"])
         let outTok = intField(usage["output_tokens"])
+        // Claude's own window arithmetic, per model that ran this turn.
+        // The transcript records this nowhere, and `system.init` does
+        // not carry it either — this event is the only channel, which
+        // is why it is read here rather than inferred.
+        var windows: [String: Int] = [:]
+        for (model, entry) in (obj["modelUsage"] as? [String: Any]) ?? [:] {
+            guard let fields = entry as? [String: Any],
+                  let window = (fields["contextWindow"] as? NSNumber)?.intValue,
+                  window > 0, !model.isEmpty
+            else { continue }
+            windows[model] = window
+        }
         return [StreamEvent(kind: .result(
             durationMs: durationMs,
             totalCostUSD: cost,
             numTurns: numTurns,
             inputTokens: inTok,
             outputTokens: outTok
-        ))]
+        ), fastModeState: obj["fast_mode_state"] as? String,
+           modelContextWindows: windows.isEmpty ? nil : windows)]
+    }
+
+    /// Whether the child is summarising the conversation right now:
+    /// true when it says so, false when it reports the outcome, nil for
+    /// every other line.
+    ///
+    /// A separate read rather than an event, because this is STATE — it
+    /// is true for the half-minute a compaction runs and false after,
+    /// and an event would be written into the transcript's history and
+    /// replayed on every reopen.
+    static func compactingSignal(line: String) -> Bool? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty,
+              trimmed.contains("\"status\""),
+              let data = trimmed.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data))
+                as? [String: Any],
+              (obj["type"] as? String) == "system",
+              (obj["subtype"] as? String) == "status"
+        else { return nil }
+        if obj["compact_result"] != nil,
+           !(obj["compact_result"] is NSNull) { return false }
+        if (obj["status"] as? String) == "compacting" { return true }
+        return nil
+    }
+
+    /// A positive integer field, or nil — an absent figure and a zero
+    /// are the same thing here, and a row must not state "0 tokens".
+    private static func positiveInt(_ value: Any?) -> Int? {
+        let n = intField(value)
+        return n > 0 ? n : nil
     }
 
     private static func intField(_ value: Any?) -> Int {

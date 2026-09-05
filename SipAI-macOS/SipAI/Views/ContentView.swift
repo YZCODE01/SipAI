@@ -15,6 +15,11 @@ struct ContentView: View {
     @EnvironmentObject var scheduler: ScheduledTaskScheduler
 
     @State private var showingSettings: Bool = false
+    /// Which pane the settings sheet opens on. Only the outdated-CLI
+    /// banner moves it; reset on dismiss so the gear button keeps
+    /// landing where it always did.
+    @State private var settingsTab: SettingsView.Tab = .models
+    @ObservedObject private var cliUpdates = AgentCLIUpdateMonitor.shared
     @State private var showingModelSetup: Bool = false
     @State private var leftToggleHovered: Bool = false
     @State private var searchHovered: Bool = false
@@ -138,6 +143,44 @@ struct ContentView: View {
             .padding(.top, 8)
             .ignoresSafeArea(edges: .top)
         }
+        // A stale agent CLI is the one failure in this app with no
+        // voice of its own: turns keep working, against whatever models
+        // the old binary happens to know. So it is announced here
+        // rather than only in Settings, where nobody looks until
+        // something is already wrong.
+        //
+        // Deliberately STATIC — no clock, no countdown, no progress.
+        // The transcript's no-time-in-rows rule applies with more force
+        // to an overlay that is visible on every screen of the app.
+        //
+        // The overlay's own container draws nothing and takes no hits;
+        // only the rows below do, so this cannot swallow a click
+        // anywhere else in the window.
+        .overlay(alignment: .topTrailing) {
+            if !cliUpdates.bannerItems.isEmpty {
+                VStack(alignment: .trailing, spacing: 6) {
+                    ForEach(cliUpdates.bannerItems) { item in
+                        CLIUpdateBanner(item: item) {
+                            settingsTab = .updates
+                            showingSettings = true
+                        } onClose: {
+                            cliUpdates.dismissBanner(agentKey: item.agentKey)
+                        }
+                        .environmentObject(config)
+                    }
+                }
+                .padding(.top, 8)
+                .padding(.trailing, 14)
+                // The same strip the toolbar controls on the left draw
+                // in. Every centre view reserves that band at its top
+                // (`Spacer().frame(height: 44)` in the session and note
+                // views), so a banner drawn INTO it covers nothing —
+                // where one laid out under the safe area lands on the
+                // first rows of whatever the pane is showing.
+                .ignoresSafeArea(edges: .top)
+                .onAppear { cliUpdates.bannerAppeared() }
+            }
+        }
         // Anchored under its own button rather than presented as a
         // sheet: the conversation the reader came from stays visible
         // behind it, which is usually the thing they are searching
@@ -177,7 +220,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showingSettings) {
-            SettingsView()
+            SettingsView(initialTab: settingsTab)
                 .environmentObject(appState)
                 .environmentObject(config)
                 .environmentObject(projects)
@@ -195,6 +238,9 @@ struct ContentView: View {
                 .environmentObject(appState)
                 .environmentObject(config)
                 .preferredColorScheme(appState.theme.colorScheme)
+        }
+        .onChange(of: showingSettings) { _, showing in
+            if !showing { settingsTab = .models }
         }
         .onReceive(NotificationCenter.default.publisher(for: .openModelSetup)) { _ in
             showingModelSetup = true
@@ -311,5 +357,68 @@ private struct SidebarResizeHandle: View {
             NSCursor.pop()
             cursorPushed = false
         }
+    }
+}
+
+/// One "your agent CLI is behind" row, top-trailing over the layout.
+///
+/// Closable, and the close is keyed on the VERSION rather than the
+/// agent: suppressing this release does not suppress the next one. It
+/// carries no dismissal of its own when the tool becomes current — the
+/// row simply stops being owed, which is how a CLI that updated itself
+/// takes its own notice down.
+private struct CLIUpdateBanner: View {
+    let item: CLIUpdateBannerItem
+    let onOpenSettings: () -> Void
+    let onClose: () -> Void
+
+    @EnvironmentObject var config: ConfigManager
+    @State private var closeHovered = false
+    @State private var textHovered = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.down.circle")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.orange)
+
+            Button(action: onOpenSettings) {
+                // Two tool-derived values in one sentence, so it goes
+                // through String(localized:) rather than the
+                // interpolating Text overload — that one runs a
+                // markdown pass over its result.
+                Text(String(localized: "\(config.agentLabel(for: item.agentKey, defaultName: item.defaultName)) has a new version available (\(item.latest.text)). Update it in Settings → Updates.",
+                            comment: "Banner: an agent's command-line tool is out of date; placeholders are the agent's label and a version number"))
+                    .font(.system(size: 12))
+                    .underline(textHovered)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
+            }
+            .buttonStyle(.plain)
+            .onHover { textHovered = $0 }
+
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(closeHovered ? .primary : .secondary)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { closeHovered = $0 }
+            .help(String(localized: "Dismiss", comment: "Tooltip"))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(maxWidth: 360, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(.regularMaterial)
+                .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(Color.orange.opacity(0.35), lineWidth: 1)
+        )
     }
 }

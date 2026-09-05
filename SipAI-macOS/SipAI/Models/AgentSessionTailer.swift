@@ -569,6 +569,11 @@ final class AgentSessionTailer: @unchecked Sendable {
             // AgentEventParsing.
             if obj["toolUseResult"] != nil,
                !(obj["toolUseResult"] is NSNull) { return true }
+            // A compaction summary is a user-role record the agent
+            // wrote mid-turn. It is not the user starting one, and
+            // reading it as such flips this session to "live" whenever
+            // a summary lands.
+            if (obj["isCompactSummary"] as? Bool) == true { return nil }
             let msg = (obj["message"] as? [String: Any]) ?? [:]
             if let arr = msg["content"] as? [Any], !arr.isEmpty {
                 let allToolResults = arr.allSatisfy { block in

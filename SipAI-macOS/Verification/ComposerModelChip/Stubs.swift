@@ -34,6 +34,7 @@ enum SipaiPaths {
 enum ShellEnvironment {
     /// The harness never wants a real shell export to decide a test.
     static func resolve(_ name: String) -> String? { nil }
+    static func resolveIfCaptured(_ name: String) -> String? { nil }
 }
 
 enum AppTheme: String { case system, light, dark }
@@ -56,8 +57,8 @@ enum AgentManager {
 /// in directly, so no file is ever opened.
 enum AgentSessionScanner {
     nonisolated static func lastLaunchOptions(of url: URL)
-    -> (permissionMode: String?, model: String?, effort: String?) {
-        (nil, nil, nil)
+    -> (permissionMode: String?, model: String?, effort: String?, fastMode: Bool?) {
+        (nil, nil, nil, nil)
     }
 }
 
@@ -80,4 +81,12 @@ enum CodexSessionScanner {
     static var sessionRoot: URL {
         SipaiPaths.dataDir.appendingPathComponent("no-codex-store", isDirectory: true)
     }
+}
+
+
+/// The app-server refresh `CodexCatalog.refreshFromCodex` runs — a
+/// process spawn, which no harness performs. `binaryPath` answers nil
+/// here anyway, so the catalog never reaches it.
+enum CodexModelListRefresh {
+    static func run(binary: String) async -> Bool { false }
 }

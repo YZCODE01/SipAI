@@ -82,19 +82,25 @@ struct AgentSessionView: View {
     /// would clobber them.
     @State private var seedingOptions: Bool = false
 
-    /// Context-window footprint parsed from the session JSONL when an
-    /// existing session opens. Live `.result` events take precedence
-    /// (see `displayContextTokens`).
+    /// How full the context window was, parsed from the session's own
+    /// store when an existing session opens. Live events take
+    /// precedence (see `displayContextTokens`).
     @State private var seededContextTokens: Int = 0
 
-    /// The WINDOW that footprint sits in, when the agent records one
-    /// (codex stamps `model_context_window` on the rollout record the
-    /// footprint is read from; kimi's config declares
-    /// `max_context_size` per model). 0 = not recorded — claude among
-    /// them — and the tooltip falls back to its constant. Two feeds
-    /// with one authority each, exactly like the tokens they ride
-    /// with.
+    /// The WINDOW that number sits in, when the agent RECORDS one
+    /// beside it (codex stamps `model_context_window` on the rollout
+    /// record; kimi's window is joined from its config by the model on
+    /// the usage record). 0 = not recorded — claude among them, whose
+    /// window is resolved from the MODEL instead
+    /// (`ContextWindowResolver`). Two feeds with one authority each,
+    /// exactly like the numbers they ride with.
     @State private var seededContextWindow: Int = 0
+
+    /// The model that produced the seeded number. A window belongs to a
+    /// model, so the number and the model that made it must travel
+    /// together — a window resolved from some other model would state
+    /// the wrong occupancy with no way to tell.
+    @State private var seededContextModel: String? = nil
 
     /// Newest context-token total delivered by the runner's
     /// `$lastContextTokens` publisher. Mirrored into local @State (which
@@ -109,6 +115,16 @@ struct AgentSessionView: View {
     /// Live mirror of the runner's `$lastContextWindow`, guarded and
     /// reset exactly like `liveContextTokens`.
     @State private var liveContextWindow: Int = 0
+
+    /// Live mirror of the model behind `liveContextTokens` — same
+    /// pairing rule as `seededContextModel`, and guarded on its OWN
+    /// mirror like every other live feed here.
+    @State private var liveContextModel: String = ""
+
+    /// What the runner last published about claude's own context
+    /// windows. Held only to guard the write into config against
+    /// `@Published`'s replay; nothing renders it.
+    @State private var observedWindowsMirror: [String: Int] = [:]
 
     /// Latest finished turn's duration — two feeds, mirroring the token
     /// counter.
@@ -132,6 +148,9 @@ struct AgentSessionView: View {
     /// the handler has to be able to tell a REPLAY from a new
     /// observation. Nothing renders this — it is the guard's memory.
     @State private var liveResolvedModel: AgentRunner.ResolvedModel? = nil
+    /// Mirror of the runner's `fastModeState`, guarded like the other
+    /// three live feeds.
+    @State private var liveFastModeState: String? = nil
 
     /// Mirrors of the runner's external-turn state (this view
     /// deliberately does not observe the runner — see the token
@@ -244,6 +263,25 @@ struct AgentSessionView: View {
     private var draftCwdForEmptyState: URL? {
         if case .draft(let d) = mode { return d.cwd }
         return nil
+    }
+
+    /// Custom group a draft started from a group header's + will be
+    /// filed into, named on the empty state so the filing is visible
+    /// before the first send rather than only afterwards, in the
+    /// sidebar. Nil for every other route into this view.
+    ///
+    /// Membership is re-read on every pass, under the same test the
+    /// filing itself makes in `AgentManager.migrateRunner`: a group
+    /// deleted while its draft sits open is no group, and a page that
+    /// kept saying "It will appear in the “Work” group" over a filing
+    /// that cannot happen would be the one thing on screen that is
+    /// wrong. (A rename is followed by the sidebar into the draft
+    /// itself; only a group that is GONE reads as nil here.)
+    private var draftCustomGroup: String? {
+        guard case .draft(let d) = mode, let group = d.customGroup,
+              config.agentCustomGroups(for: d.agentKey).contains(group)
+        else { return nil }
+        return group
     }
 
     /// Stable identity of the transcript currently on screen — the key
@@ -515,7 +553,9 @@ struct AgentSessionView: View {
             // either way.
             if case .draft = mode {
                 seededContextTokens = 0
+                seededContextModel = nil
                 liveContextTokens = 0
+                liveContextModel = ""
                 seededTurnDuration = 0
                 liveTurnDuration = nil
             }
@@ -579,6 +619,32 @@ struct AgentSessionView: View {
         .onReceive(liveModelIdPublisher) { (resolved: AgentRunner.ResolvedModel?) in
             adoptResolvedModel(resolved)
         }
+        .onReceive(fastModePublisher) { (state: String?) in
+            adoptFastModeState(state)
+        }
+        .onReceive(observedWindowsPublisher) { (windows: [String: Int]) in
+            adoptObservedWindows(windows)
+        }
+    }
+
+    /// File what claude reported about its own context windows.
+    ///
+    /// Guarded on its OWN mirror, like every live feed here: `@Published`
+    /// replays to each resubscription and `onReceive` resubscribes per
+    /// render, so an unguarded handler would rewrite config on every
+    /// pass. Claude-only by construction — the other two publish an
+    /// empty map, and `windows` is empty on every event but `result`.
+    private func adoptObservedWindows(_ windows: [String: Int]) {
+        guard !windows.isEmpty, windows != observedWindowsMirror else { return }
+        observedWindowsMirror = windows
+        for (model, window) in windows {
+            config.setAgentModelContextWindow(window, forModelId: model)
+        }
+    }
+
+    private func adoptFastModeState(_ state: String?) {
+        guard state != liveFastModeState else { return }
+        liveFastModeState = state
     }
 
     /// The subprocess's system.init names the model that will actually
@@ -681,9 +747,26 @@ struct AgentSessionView: View {
             let info = CodexSessionScanner.lastContextInfo(of: url)
             if info.tokens > 0 { liveContextTokens = info.tokens }
             if info.window > 0 { liveContextWindow = info.window }
+        } else if sessionAgentKey == "kimi" {
+            // Kimi's own reader, joined to its config window — the
+            // claude scanner answers 0 on a kimi wire, which would
+            // read as "no usage yet" rather than as the wrong reader.
+            let usage = KimiSessionScanner.lastContextUsage(of: url)
+            if usage.tokens > 0 { liveContextTokens = usage.tokens }
+            if let model = usage.model, !model.isEmpty {
+                liveContextModel = model
+                KimiCatalog.shared.ensureLoaded()
+                if let w = KimiCatalog.shared.maxContextSize(forModel: model),
+                   w > 0 {
+                    liveContextWindow = w
+                }
+            }
         } else {
-            let scanned = AgentSessionScanner.lastContextTokens(of: url)
-            if scanned > 0 { liveContextTokens = scanned }
+            let usage = AgentSessionScanner.lastContextTokens(of: url)
+            if usage.tokens > 0 { liveContextTokens = usage.tokens }
+            if let model = usage.model, !model.isEmpty {
+                liveContextModel = model
+            }
         }
         // Refresh the clock's resting value from the turn the other
         // terminal just finished — we have no live clock for it, so
@@ -766,6 +849,20 @@ struct AgentSessionView: View {
         return runner.$resolvedModel.eraseToAnyPublisher()
     }
 
+    private var fastModePublisher: AnyPublisher<String?, Never> {
+        guard let runner = currentRunner else {
+            return Empty().eraseToAnyPublisher()
+        }
+        return runner.$fastModeState.eraseToAnyPublisher()
+    }
+
+    private var observedWindowsPublisher: AnyPublisher<[String: Int], Never> {
+        guard let runner = currentRunner else {
+            return Empty().eraseToAnyPublisher()
+        }
+        return runner.$observedContextWindows.eraseToAnyPublisher()
+    }
+
     // MARK: - Empty (.empty-mode fallback)
 
     @ViewBuilder
@@ -826,12 +923,46 @@ struct AgentSessionView: View {
         liveContextTokens > 0 ? liveContextTokens : seededContextTokens
     }
 
-    /// Window for the counter's occupancy tooltip, same precedence as
-    /// the footprint it divides. nil = the agent records none, and the
-    /// counter keeps its claude-window constant.
+    /// The window an agent RECORDED beside the number, same precedence
+    /// as the number it divides. 0/nil for claude, which records none;
+    /// `resolvedContextWindow` is what the chip actually reads.
     private var displayContextWindow: Int? {
         if liveContextWindow > 0 { return liveContextWindow }
         return seededContextWindow > 0 ? seededContextWindow : nil
+    }
+
+    /// The window the composer's percentage is drawn over — the
+    /// SELECTED model's, falling back to the model that produced the
+    /// number, and nil when neither is known (the chip then states the
+    /// count and says the window is unknown).
+    ///
+    /// The rule itself lives in `ContextWindowResolver` so all three
+    /// agents share one; this only supplies the lookups, which are
+    /// MainActor state it cannot hold.
+    private var resolvedContextWindow: Int? {
+        let numeratorModel = liveContextModel.isEmpty
+            ? seededContextModel : liveContextModel
+        return ContextWindowResolver.resolve(
+            agentKey: sessionAgentKey,
+            selectedAlias: launchOptions.model,
+            selectedFullId: launchOptions.modelFullId,
+            numeratorModel: numeratorModel,
+            recordedWindow: displayContextWindow ?? 0,
+            aliasToId: { config.agentModelFullId(forAlias: $0) },
+            binaryWindow: { id in
+                guard let binary = AgentManager.binaryPath(for: "claude_code")
+                else { return nil }
+                return ClaudeModelCatalog.contextWindow(forModelId: id,
+                                                        binary: binary)
+            },
+            learnedWindow: { config.agentModelContextWindow(forModelId: $0) },
+            catalogWindow: { selection in
+                sessionAgentKey == "codex"
+                    ? CodexCatalog.shared.contextWindow(forModel: selection)
+                    : sessionAgentKey == "kimi"
+                        ? KimiCatalog.shared.maxContextSize(forModel: selection)
+                        : nil
+            })
     }
 
     /// Same shape for the turn clock's resting value: a turn this app
@@ -964,11 +1095,13 @@ struct AgentSessionView: View {
             externalStoppable: externalStoppable,
             placeholder: inputPlaceholder,
             options: $launchOptions,
+            fastModeState: liveFastModeState,
             folder: composerFolder,
             folderEditable: isDraftBeforeFirstSend,
             onFolderChange: { url in
                 appState.pendingClaudeSessionDraft?.cwd = url
             },
+            customGroup: draftCustomGroup,
             scheduleAvailable: isScheduleAvailable,
             scheduledRunInfo: scheduledRunInfo,
             onGenerateNote: { generateSessionNote(extraPrompt: $0) },
@@ -977,7 +1110,7 @@ struct AgentSessionView: View {
             find: find,
             canFind: hasSearchableTranscript,
             contextTokens: displayContextTokens,
-            contextWindowTokens: displayContextWindow,
+            contextWindowTokens: resolvedContextWindow,
             turnStartedAt: turnStartedAt,
             lastTurnDuration: displayTurnDuration,
             onSend: handleSend,
@@ -1071,6 +1204,7 @@ struct AgentSessionView: View {
             onLoadEarlier: loadEarlierHistory,
             expandedToolResults: $expandedToolResults,
             draftCwd: draftCwdForEmptyState,
+            draftCustomGroup: draftCustomGroup,
             emptySessionCommands: emptySessionCommands,
             assistantLabel: sessionAgentName,
             repositionNonce: repositionNonce,
@@ -1638,6 +1772,7 @@ struct AgentSessionView: View {
             let scanned = AgentSessionScanner.lastLaunchOptions(of: url)
             if let mode = scanned.permissionMode { seeded.permissionMode = mode }
             if let effort = scanned.effort { seeded.effort = effort }
+            if let fast = scanned.fastMode { seeded.fastMode = fast }
             if let fullId = scanned.model {
                 // Keep the full id alongside the alias: the chip shows
                 // the versioned name ("Opus 5"), the picker matches on
@@ -1733,11 +1868,14 @@ struct AgentSessionView: View {
             expandedToolResults = []
             seededContextTokens = 0
             seededContextWindow = 0
+            seededContextModel = nil
             liveContextTokens = 0
             liveContextWindow = 0
+            liveContextModel = ""
             seededTurnDuration = 0
             liveTurnDuration = nil
             liveResolvedModel = nil
+            liveFastModeState = nil
             externalTurnStart = nil
             externalStoppable = false
             emptySessionCommands = []
@@ -1761,12 +1899,14 @@ struct AgentSessionView: View {
         // for the duration chip and the external-turn mirrors.
         liveContextTokens = 0
         liveContextWindow = 0
+        liveContextModel = ""
         liveTurnDuration = nil
         // Cleared with them: the incoming runner replays its own value
         // within a frame, and a mirror still holding the OUTGOING
         // session's pair would suppress an identical observation here
         // as though it had already been seen.
         liveResolvedModel = nil
+        liveFastModeState = nil
         externalTurnStart = nil
         externalStoppable = false
 
@@ -1785,6 +1925,7 @@ struct AgentSessionView: View {
             historicalItems = trimmedForInFlight(cached.items)
             seededContextTokens = cached.contextTokens
             seededContextWindow = cached.contextWindow
+            seededContextModel = cached.contextModel
             seededTurnDuration = cached.turnDuration
             emptySessionCommands = cached.commands
             isLoading = false
@@ -1814,6 +1955,7 @@ struct AgentSessionView: View {
         isLoading = true
         seededContextTokens = 0
         seededContextWindow = 0
+        seededContextModel = nil
         seededTurnDuration = 0
         emptySessionCommands = []
         startHistoryLoad(url: url, viaSpinner: true)
@@ -1832,14 +1974,14 @@ struct AgentSessionView: View {
         Task {
             let loaded = await Task.detached(priority: .userInitiated)
             { () -> (items: [AgentSessionHistoryItem], contextTokens: Int,
-                     contextWindow: Int, kimiModel: String?,
+                     contextWindow: Int, contextModel: String?,
                      turnDuration: Double, commands: [String]) in
                 if agentKey == "codex" {
                     // No turn duration: codex reports no wall-clock time
                     // anywhere, in the stream or the rollout. The context
                     // footprint IS on record though — one `token_count`
                     // per API call — and a hardcoded 0 here would keep
-                    // the composer's token chip from ever appearing on
+                    // the composer's context chip from ever appearing on
                     // a codex session (the chip hides itself at 0).
                     let items = CodexSessionScanner.readHistory(of: url)
                     Self.prewarmMarkdown(items)
@@ -1906,11 +2048,14 @@ struct AgentSessionView: View {
                 let commands = items.isEmpty
                     ? AgentSessionScanner.localCommandNames(of: url)
                     : []
+                let usage = AgentSessionScanner.lastContextTokens(of: url)
                 return (items,
-                        AgentSessionScanner.lastContextTokens(of: url),
-                        // Claude records no window anywhere in the
-                        // transcript; the counter keeps its constant.
-                        0, nil,
+                        usage.tokens,
+                        // Claude records no window in the transcript —
+                        // it is resolved from the model instead
+                        // (`ContextWindowResolver`), which is why the
+                        // model rides out of the read.
+                        0, usage.model,
                         // Off-main by construction — this is the only
                         // place the transcript is read for the clock.
                         AgentSessionScanner.lastTurnDurationSeconds(of: url),
@@ -1926,7 +2071,7 @@ struct AgentSessionView: View {
             // detached read could not touch. `ensureLoaded()` is one
             // stat when nothing changed.
             var window = loaded.contextWindow
-            if window == 0, let model = loaded.kimiModel {
+            if window == 0, let model = loaded.contextModel {
                 KimiCatalog.shared.ensureLoaded()
                 if let w = KimiCatalog.shared.maxContextSize(forModel: model),
                    w > 0 {
@@ -1938,6 +2083,7 @@ struct AgentSessionView: View {
                     items: loaded.items,
                     contextTokens: loaded.contextTokens,
                     contextWindow: window,
+                    contextModel: loaded.contextModel,
                     turnDuration: loaded.turnDuration,
                     commands: loaded.commands,
                     fileSize: stat?.size ?? 0,
@@ -1956,6 +2102,7 @@ struct AgentSessionView: View {
                                fileSize: stat?.size ?? 0)
             seededContextTokens = loaded.contextTokens
             seededContextWindow = window
+            seededContextModel = loaded.contextModel
             // Into the runner as well, for the same reason
             // `noteExternalTurnDuration` exists: `reload()` cleared the
             // live mirror a moment ago and the runner's replay is about
@@ -2121,6 +2268,12 @@ private struct RunnerStreamView: View {
     /// explain the target cwd.
     let draftCwd: URL?
 
+    /// Custom group the draft will be filed into, or nil. Shown beside
+    /// the cwd for the same reason: both are decisions the + made on
+    /// the user's behalf, and neither is visible anywhere else until
+    /// the session exists.
+    let draftCustomGroup: String?
+
     /// Local slash-commands found in a zero-turn transcript ("/clear",
     /// "/exit"). Rendered under the empty state so the file's origin
     /// isn't a mystery.
@@ -2168,6 +2321,7 @@ private struct RunnerStreamView: View {
          onLoadEarlier: @escaping () -> Void,
          expandedToolResults: Binding<Set<UUID>>,
          draftCwd: URL?,
+         draftCustomGroup: String?,
          emptySessionCommands: [String],
          assistantLabel: String,
          repositionNonce: Int,
@@ -2188,6 +2342,7 @@ private struct RunnerStreamView: View {
         self.onLoadEarlier = onLoadEarlier
         self._expandedToolResults = expandedToolResults
         self.draftCwd = draftCwd
+        self.draftCustomGroup = draftCustomGroup
         self.emptySessionCommands = emptySessionCommands
         self.assistantLabel = assistantLabel
         self.repositionNonce = repositionNonce
@@ -2296,8 +2451,10 @@ private struct RunnerStreamView: View {
             case .toolUse: advance(isUser: false, isTool: true, id: item.id)
             // Folded into its own chip, or a rare orphan — neither opens
             // a block, and neither should end one. Same for the
-            // interrupted marker: a terminal note, not a block.
-            case .toolResult, .interrupted: break
+            // interrupted and compaction markers: standalone notes, not
+            // blocks, and a compaction mid-turn must not make the next
+            // tool row look like the start of a new answer.
+            case .toolResult, .interrupted, .compaction: break
             }
         }
         for event in runner.events {
@@ -2417,6 +2574,11 @@ private struct RunnerStreamView: View {
                 }
             case .interrupted(let message):
                 add(item.id) { message }
+            // Composed at render time from localized strings, so there
+            // is nothing here to match a query against — see
+            // `GlobalSearch.flatten`.
+            case .compaction:
+                continue
             }
         }
 
@@ -2438,8 +2600,9 @@ private struct RunnerStreamView: View {
             case .error(let message), .interrupted(let message):
                 add(event.id) { message }
             // systemInit / result draw nothing (`EmptyView`), so they
-            // are not rows.
-            case .systemInit, .result:
+            // are not rows; a compaction row's text is composed at
+            // render time and so has nothing to match.
+            case .systemInit, .result, .compaction:
                 continue
             }
         }
@@ -2859,6 +3022,16 @@ private struct RunnerStreamView: View {
                                    !runner.retryNotice.isEmpty {
                                     retryNoticeRow
                                 }
+                                // Same shape and the same reason as the
+                                // retry notice: the child goes quiet
+                                // for half a minute while it summarises
+                                // the conversation, and silence there
+                                // reads as a hang. Outside the waiting
+                                // row because a compaction happens
+                                // mid-turn, after plenty of output.
+                                if runner.status.isRunning, runner.compacting {
+                                    compactingRow
+                                }
                             }
                         }
                     }
@@ -2893,6 +3066,18 @@ private struct RunnerStreamView: View {
                 Text(cwd.path)
                     .font(.system(size: 13 * fontScale, design: .monospaced))
                     .foregroundColor(ChatDesign.textSecondary)
+                if let group = draftCustomGroup {
+                    // String(localized:) then the verbatim Text
+                    // overload: the interpolated-literal form
+                    // markdown-parses, and a group name is the user's
+                    // own text — an _underscored_ one would render
+                    // italicised, with the underscores eaten.
+                    Text(String(localized: "It will appear in the “\(group)” group.",
+                                comment: "Draft empty-state line naming the custom group the new session will be filed into; placeholder is the group name"))
+                        .font(.system(size: 13 * fontScale))
+                        .foregroundColor(ChatDesign.textSecondary)
+                        .padding(.top, 6)
+                }
                 Text("Type your first message below.",
                      comment: "Empty-state hint for a draft session")
                     .font(.system(size: 13 * fontScale))
@@ -2955,6 +3140,9 @@ private struct RunnerStreamView: View {
             }
         case .interrupted(let message):
             interruptedRow(message: message, slot: find.slot(forRow: item.id))
+        case .compaction(let pre, let post):
+            compactionRow(preTokens: pre, postTokens: post,
+                          slot: find.slot(forRow: item.id))
         }
     }
 
@@ -3047,6 +3235,9 @@ private struct RunnerStreamView: View {
             errorRow(message: message, slot: find.slot(forRow: event.id))
         case .interrupted(let message):
             interruptedRow(message: message, slot: find.slot(forRow: event.id))
+        case .compaction(let pre, let post):
+            compactionRow(preTokens: pre, postTokens: post,
+                          slot: find.slot(forRow: event.id))
         }
     }
 
@@ -3057,6 +3248,43 @@ private struct RunnerStreamView: View {
                                 slot: SearchHighlightSlot = .inactive) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "stop.circle")
+                .font(.system(size: 12))
+                .foregroundColor(ChatDesign.textSecondary)
+            Text(AttributedString.highlighting(message, slot: slot).0)
+                .font(.system(size: 12))
+                .foregroundColor(ChatDesign.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
+    /// The agent summarised the conversation to make room and carried
+    /// on.
+    ///
+    /// Quiet, like `interruptedRow` and for the same reason: compacting
+    /// is a normal thing for an agent to do, not a failure. It earns a
+    /// row because the composer's context chip is about to fall by most
+    /// of its value, and a gauge that drops with nothing on screen
+    /// explaining it reads as a bug.
+    ///
+    /// Static — no clock, no progress. Figures only when the agent
+    /// recorded them; codex records none and the row simply says less.
+    private func compactionRow(preTokens: Int?, postTokens: Int?,
+                               slot: SearchHighlightSlot = .inactive) -> some View {
+        let message: String
+        if let pre = preTokens, let post = postTokens {
+            message = String(
+                localized: "Conversation compacted (\(ContextUsageFormat.compact(pre)) → \(ContextUsageFormat.compact(post)) tokens)",
+                comment: "Transcript row after the agent summarised the conversation, with before and after sizes")
+        } else {
+            message = String(
+                localized: "Conversation compacted",
+                comment: "Transcript row after the agent summarised the conversation")
+        }
+        return HStack(spacing: 6) {
+            Image(systemName: "arrow.down.right.and.arrow.up.left")
                 .font(.system(size: 12))
                 .foregroundColor(ChatDesign.textSecondary)
             Text(AttributedString.highlighting(message, slot: slot).0)
@@ -3422,7 +3650,9 @@ private struct RunnerStreamView: View {
         for event in runner.events.reversed() {
             switch event.kind {
             case .userMessage: return true
-            case .systemInit: continue
+            // Neither of these is the agent answering: the spinner
+            // stays until real output arrives.
+            case .systemInit, .compaction: continue
             default: return false
             }
         }
@@ -3453,6 +3683,26 @@ private struct RunnerStreamView: View {
                 Spacer()
             }
             if runner.turnProducedNothing { stalledNoticeRow }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
+    /// The child is summarising the conversation right now — half a
+    /// minute during which it says nothing else, which without this
+    /// reads as a hang.
+    ///
+    /// Static, like every other in-progress row here: a time in the
+    /// transcript re-renders the whole thing once a second for as long
+    /// as it shows. The clock lives in the composer's chip.
+    private var compactingRow: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.small)
+            Text("Compacting context…",
+                 comment: "Shown while the agent summarises the conversation to free context")
+                .font(.system(size: 13))
+                .foregroundColor(ChatDesign.textSecondary)
+            Spacer()
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)

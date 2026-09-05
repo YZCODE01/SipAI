@@ -43,6 +43,10 @@ func check(_ label: String, _ condition: @autoclosure () -> Bool,
 
 func section(_ title: String) { print("\n\(title)") }
 
+extension String {
+    func repeated(_ n: Int) -> String { String(repeating: self, count: n) }
+}
+
 /// Source root, so the structural pass can be pointed at another
 /// checkout (`./run.sh <source-root>`) to confirm it fails there.
 let sourceRoot = CommandLine.arguments.count > 1
@@ -273,7 +277,120 @@ check("the chip is refined only while it shows that alias",
 
 // ──────────────────────────────────────────────────────── real config
 
-section("5. This machine's own config (read-only)")
+section("5. Other models — the observed pool, the full-id guard, the fast switch")
+
+MainActor.assumeIsolated {
+    let config = plant([:])
+
+    // The pool keeps every version, one spelling each, and never lets
+    // a newer sighting push an older one out — that is the alias map's
+    // job, not this one's.
+    config.learnAgentModelObservedIds([
+        "claude-fable-5-1", "claude-fable-5", "claude-fable-5[1m]",
+        "claude-opus-4-8", "claude-haiku-4-5-20251001", "claude-haiku-4-5",
+        "opus", "claude-mystery",
+    ])
+    let pool = config.agentModelObservedIds()
+    check("every versioned family id is kept",
+          pool.contains("claude-fable-5-1") && pool.contains("claude-fable-5")
+          && pool.contains("claude-opus-4-8"), "\(pool)")
+    check("a variant spelling does not add a second entry",
+          !pool.contains("claude-fable-5[1m]") && pool.filter { $0.hasPrefix("claude-fable-5") }.count == 2,
+          "\(pool)")
+    check("a dated and an undated spelling of one version are one entry",
+          pool.filter { $0.contains("haiku") }.count == 1, "\(pool)")
+    check("an alias and an id with no version are not observations",
+          !pool.contains("opus") && !pool.contains("claude-mystery"), "\(pool)")
+    let before = pool.count
+    config.learnAgentModelObservedIds(["claude-fable-5"])
+    check("re-learning an id changes nothing", config.agentModelObservedIds().count == before)
+
+    // A pick from the "Other models" section runs under its full id.
+    // Filing the observation under that "alias" would record that an
+    // id resolves to itself, forever.
+    config.setAgentModelFullId("claude-fable-5", forAlias: "claude-fable-5")
+    check("an observation under a full-id alias is not filed",
+          config.agentModelFullId(forAlias: "claude-fable-5") == nil)
+    check("a full id is recognised as one",
+          ClaudeModelDisplay.isFullId("claude-fable-5") && !ClaudeModelDisplay.isFullId("fable"))
+
+    // The fast switch, spelled per agent. Claude's is the flag-layer
+    // opt-in; codex's is the model's advertised tier; kimi has none.
+    let fast = AgentLaunchOptions(model: "opus", fastMode: true)
+    let claudeArgv = fast.flags(for: "claude_code")
+    check("claude: the switch is the --settings opt-in",
+          claudeArgv.contains("--settings")
+          && claudeArgv.contains(AgentLaunchOptions.claudeFastModeSettings), "\(claudeArgv)")
+    check("claude: the opt-in JSON is compact and says exactly one thing",
+          AgentLaunchOptions.claudeFastModeSettings == "{\"fastMode\":true}")
+    check("claude: off means no --settings at all",
+          !AgentLaunchOptions(model: "opus").flags(for: "claude_code").contains("--settings"))
+    let codexOn = AgentLaunchOptions(model: "gpt-5.6-sol", fastMode: true)
+    check("codex: the switch is the advertised service tier",
+          codexOn.flags(for: "codex", codexFastTier: "priority")
+            .contains("service_tier=priority"))
+    check("codex: no advertised tier, no flag",
+          !codexOn.flags(for: "codex", codexFastTier: nil)
+            .joined(separator: " ").contains("service_tier"))
+    check("kimi: nothing, ever",
+          !AgentLaunchOptions(model: "k3", fastMode: true).flags(for: "kimi")
+            .joined(separator: " ").contains("fast"))
+}
+
+// "Still offered by the CLI" is answered by the binary naming the id.
+// A throwaway file standing in for claude's executable: the table
+// spells ids with a closing quote, and `claude-fable-5` alone would
+// match inside `claude-fable-5-1`.
+let fakeBinary = harnessDir.appendingPathComponent("claude-fake-binary")
+let tableJSON = #"{"claude-fable-5-1":"fable51","claude-opus-5":"opus5","claude-haiku-4-5":"haiku45"}"#
+try? Data(("x".repeated(70_000) + tableJSON + "y".repeated(70_000)).utf8).write(to: fakeBinary)
+let named = ClaudeModelCatalog.idsNamedByBinary(
+    at: fakeBinary.path,
+    candidates: ["claude-fable-5-1", "claude-fable-5", "claude-haiku-4-5-20251001", "claude-opus-4-8"])
+check("an id the binary names is found", named.contains("claude-fable-5-1"))
+check("an id that is only a PREFIX of a named one is not", !named.contains("claude-fable-5"))
+check("a dated id is matched by its undated spelling", named.contains("claude-haiku-4-5-20251001"))
+check("an id the binary does not name is not", !named.contains("claude-opus-4-8"))
+
+// The Default row reads claude's own configuration for the folder.
+let projectDir = harnessDir.appendingPathComponent("project")
+try? FileManager.default.createDirectory(
+    at: projectDir.appendingPathComponent(".claude"), withIntermediateDirectories: true)
+try? Data(#"{"model":"claude-fable-5"}"#.utf8)
+    .write(to: projectDir.appendingPathComponent(".claude/settings.json"))
+check("a project settings.json model is the configured default",
+      ClaudeModelCatalog.configuredDefaultModel(cwd: projectDir) == "claude-fable-5")
+try? Data(#"{"model":"opus[1m]"}"#.utf8)
+    .write(to: projectDir.appendingPathComponent(".claude/settings.local.json"))
+check("settings.local.json outranks settings.json — claude's own precedence",
+      ClaudeModelCatalog.configuredDefaultModel(cwd: projectDir) == "opus[1m]")
+
+// Structural — the wiring lives in views and the runner.
+let composer = read("SipAI/Views/Chat/AgentComposer.swift")
+let parser = read("SipAI/Models/AgentEventParsing.swift")
+let panel = read("SipAI/Views/Chat/ScheduledTaskPanel.swift")
+check("the composer draws an \"Other models\" section",
+      composer.contains(".header(String(localized: \"Other models\""))
+check("the composer's Default row reads the configured default first",
+      composer.contains("configuredDefaultModel(cwd: folder)"))
+check("the composer offers the fast switch under the model rows",
+      composer.contains("footer: { fastModeFooter }"))
+check("picking a model without fast mode clears the switch",
+      composer.contains("if updated.fastMode, !fastModeSupported(forModel: value)"))
+check("claude's fast switch is gated on the Opus family",
+      composer.contains("return family == \"opus\""))
+check("codex's fast switch is gated on the catalog's tier",
+      composer.contains("codexCaps.fastTier(forModel: value) != nil"))
+check("the runner resolves codex's tier from the catalog at argv time",
+      runner.contains("codexFastTier: CodexCatalog.shared.fastTier(forModel: options.model)?.id"))
+check("the parser reads fast_mode_state off init and result",
+      parser.components(separatedBy: "fast_mode_state").count >= 3)
+check("the view mirrors the fast state behind its own guard",
+      view.contains("guard state != liveFastModeState else { return }"))
+check("the scheduled-task picker carries the same section",
+      panel.contains("capabilities.otherModels"))
+
+section("6. This machine's own config (read-only)")
 
 let realConfig = URL(fileURLWithPath: NSHomeDirectory())
     .appendingPathComponent("Library/Application Support/SipAI/config.json")

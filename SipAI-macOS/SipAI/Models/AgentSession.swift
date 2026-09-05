@@ -176,6 +176,9 @@ struct AgentSessionHistoryItem: Identifiable, Hashable {
         /// derived at load time (`AgentSessionScanner.endsMidTurn` +
         /// no live writer), never stored in the JSONL itself.
         case interrupted(message: String)
+        /// The agent summarised the conversation to make room. Figures
+        /// are nil for an agent that records none.
+        case compaction(preTokens: Int?, postTokens: Int?)
     }
 
     static func == (lhs: AgentSessionHistoryItem, rhs: AgentSessionHistoryItem) -> Bool {
@@ -204,12 +207,21 @@ struct ClaudeSessionDraft: Identifiable, Hashable {
     /// key. The name is legacy — a draft is just as legitimately a
     /// codex thread waiting for its first send.
     var agentKey: String
+    /// Custom group the resulting session is filed into, for a draft
+    /// started from a group header's +. Nil for every other route.
+    ///
+    /// The filing itself happens in `AgentManager.migrateRunner`, when
+    /// the session id arrives — the only moment a real key exists to
+    /// file under, and one the view being torn down cannot cost.
+    var customGroup: String?
 
-    init(cwd: URL, name: String? = nil, agentKey: String = "claude_code") {
+    init(cwd: URL, name: String? = nil, agentKey: String = "claude_code",
+         customGroup: String? = nil) {
         self.id = UUID()
         self.cwd = cwd
         self.name = name
         self.agentKey = agentKey
+        self.customGroup = customGroup
     }
 }
 
@@ -467,9 +479,13 @@ enum AgentSessionScanner {
                 let rawText = extractText(fromContent: raw)
                 let cleaned = cleanUserText(rawText)
                 if !cleaned.isEmpty {
+                    // A compaction summary is a user-role record that
+                    // the user never wrote — labelled like a harness
+                    // notice, and for the same reason.
+                    let isSummary = (obj["isCompactSummary"] as? Bool) == true
                     items.append(AgentSessionHistoryItem(
                         kind: .userText(cleaned), recordUuid: recordUuid,
-                        isSystemNotice: isHarnessNotice(rawText)))
+                        isSystemNotice: isHarnessNotice(rawText) || isSummary))
                 }
 
             case "assistant":
@@ -499,6 +515,27 @@ enum AgentSessionScanner {
                     items.append(AgentSessionHistoryItem(
                         kind: .userText(output), recordUuid: recordUuid,
                         isSystemNotice: true))
+                    return
+                }
+                // The other system record that renders: the agent
+                // summarised the conversation and carried on. Without
+                // it the summary appears mid-turn with nothing saying
+                // where it came from, and the context chip's drop has
+                // no explanation. Note the camelCase spelling — the
+                // stream writes the same metadata snake_cased.
+                if (obj["subtype"] as? String) == "compact_boundary" {
+                    let meta = (obj["compactMetadata"] as? [String: Any]) ?? [:]
+                    // Absent and zero are the same thing here: a row
+                    // must not state "0 tokens".
+                    func positive(_ v: Any?) -> Int? {
+                        guard let n = (v as? NSNumber)?.intValue, n > 0
+                        else { return nil }
+                        return n
+                    }
+                    items.append(AgentSessionHistoryItem(
+                        kind: .compaction(preTokens: positive(meta["preTokens"]),
+                                          postTokens: positive(meta["postTokens"])),
+                        recordUuid: recordUuid))
                 }
 
             default:
@@ -550,7 +587,7 @@ enum AgentSessionScanner {
     /// current value alone", never as a value to apply. See
     /// `AgentSessionView.seedLaunchOptions`.
     static func lastLaunchOptions(of url: URL)
-    -> (permissionMode: String?, model: String?, effort: String?) {
+    -> (permissionMode: String?, model: String?, effort: String?, fastMode: Bool?) {
         // Escalating windows, for `permissionMode` specifically.
         // `model` and `effort` ride ASSISTANT records, of which a turn
         // writes many, so they always sit near the tail. But
@@ -565,8 +602,8 @@ enum AgentSessionScanner {
         // second pass.
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         let size = (attributes?[.size] as? NSNumber)?.uint64Value
-        var found: (permissionMode: String?, model: String?, effort: String?)
-            = (nil, nil, nil)
+        var found: (permissionMode: String?, model: String?, effort: String?,
+                    fastMode: Bool?) = (nil, nil, nil, nil)
         for budget in [256 * 1024, 4 * 1024 * 1024] {
             found = launchOptionsScan(of: url, budget: budget)
             if found.permissionMode != nil { break }
@@ -576,13 +613,19 @@ enum AgentSessionScanner {
     }
 
     private static func launchOptionsScan(of url: URL, budget: Int)
-    -> (permissionMode: String?, model: String?, effort: String?) {
+    -> (permissionMode: String?, model: String?, effort: String?, fastMode: Bool?) {
         guard let text = boundedTail(of: url, budget: budget) else {
-            return (nil, nil, nil)
+            return (nil, nil, nil, nil)
         }
         var mode: String? = nil
         var model: String? = nil
         var effort: String? = nil
+        // Whether the newest API call ran in fast mode: assistant
+        // records carry `usage.speed` ("fast" / "standard") on claude
+        // builds that know the mode, and nothing at all on older ones
+        // — nil then, never false, so a seed cannot switch a session
+        // off on the strength of a record that said nothing.
+        var fast: Bool? = nil
         for line in text.split(separator: "\n").reversed() {
             if mode != nil && model != nil && effort != nil { break }
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -607,22 +650,36 @@ enum AgentSessionScanner {
                let mdl = msg["model"] as? String,
                !mdl.isEmpty, mdl != "<synthetic>" {
                 model = mdl
+                if fast == nil,
+                   let usage = msg["usage"] as? [String: Any],
+                   let speed = usage["speed"] as? String, !speed.isEmpty {
+                    fast = (speed == "fast")
+                }
             }
         }
-        return (mode, model, effort)
+        return (mode, model, effort, fast)
     }
 
-    /// Context-window footprint of a session's most recent assistant
-    /// record: `usage.input_tokens + cache_creation + cache_read +
-    /// output_tokens`.
-    /// Seeds the composer's usage ring when opening an existing session
-    /// (live assistant events take over once a turn streams). Returns 0
-    /// if the file is unreadable or no assistant record carries usage.
-    static func lastContextTokens(of url: URL) -> Int {
+    /// How full the context window is, read off a session's most recent
+    /// main-loop assistant record: `usage.input_tokens +
+    /// cache_creation + cache_read` — the INPUT side of that call, which
+    /// is the whole conversation as the model last saw it. The call's
+    /// own output is excluded for the reason given on
+    /// `AgentEventParser.contextFootprint`: it is what claude's and
+    /// kimi's own context indicators count, and counting the reply too
+    /// would disagree with them.
+    ///
+    /// Seeds the composer's context chip when opening an existing
+    /// session (live assistant events take over once a turn streams),
+    /// and rides out with the model that produced it — the chip divides
+    /// by a WINDOW, and a window belongs to a model. Returns 0 / nil if
+    /// the file is unreadable or no assistant record carries usage.
+    static func lastContextTokens(of url: URL) -> (tokens: Int, model: String?) {
         guard let text = boundedTail(of: url) else {
-            return 0
+            return (0, nil)
         }
         var last = 0
+        var lastModel: String? = nil
         text.enumerateLines { line, _ in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty,
@@ -642,15 +699,24 @@ enum AgentSessionScanner {
                 if let d = value as? Double { return Int(d) }
                 return 0
             }
-            // Mirror AgentEventParser.contextFootprint: the reply's own
-            // output joins the next request's context, so it counts.
+            // Mirrors AgentEventParser.contextFootprint — input side
+            // only, and the two must never drift: they feed the same
+            // chip, one from disk and one from the stream.
             let total = intField(usage["input_tokens"])
                 + intField(usage["cache_creation_input_tokens"])
                 + intField(usage["cache_read_input_tokens"])
-                + intField(usage["output_tokens"])
-            if total > 0 { last = total }
+            // The model rides the record that WON, the same rule as the
+            // codex window and the kimi model: a mid-session model
+            // switch moves the number and its window together or not at
+            // all. Kept verbatim, `[1m]` included — that suffix names a
+            // different window.
+            if total > 0 {
+                last = total
+                lastModel = (msg["model"] as? String)
+                    .flatMap { $0.isEmpty ? nil : $0 }
+            }
         }
-        return last
+        return (last, lastModel)
     }
 
     /// Seconds the NEWEST finished turn in this transcript took — the
@@ -760,7 +826,13 @@ enum AgentSessionScanner {
     private static func isTurnStartUser(_ obj: [String: Any]) -> Bool {
         guard obj["type"] as? String == "user",
               (obj["isSidechain"] as? Bool) != true,
-              (obj["isMeta"] as? Bool) != true else { return false }
+              (obj["isMeta"] as? Bool) != true,
+              // A compaction summary is written as a user record in the
+              // middle of a turn. Counted as a turn start it re-times
+              // the sidebar row (`activityAt`) and the composer's clock
+              // for an external turn to the moment the agent summarised
+              // itself.
+              (obj["isCompactSummary"] as? Bool) != true else { return false }
         if let blocks = (obj["message"] as? [String: Any])?["content"] as? [[String: Any]],
            blocks.contains(where: { $0["type"] as? String == "tool_result" }) {
             return false

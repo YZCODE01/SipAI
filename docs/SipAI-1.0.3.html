@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 13px/1.55 -apple-system, BlinkMacSystemFont, sans-serif;
+    margin: 0; padding: 4px 2px;
+  }
+  h3 { font-size: 13px; margin: 14px 0 6px; }
+  h3:first-child { margin-top: 0; }
+  ul { margin: 0; padding-left: 20px; }
+  li { margin-bottom: 6px; }
+  code {
+    font: 11.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: color-mix(in srgb, currentColor 10%, transparent);
+    padding: 1px 4px; border-radius: 3px;
+  }
+</style></head>
+<body>
+  <h3>Added</h3>
+  <ul>
+    <li><strong>Settings → Updates now covers the agent command-line tools.</strong> Each installed CLI — Claude Code, Codex, Kimi Code — is listed with its version and, once a check has succeeded, whether a newer release exists. A stale CLI used to fail silently: turns kept working against whatever models the old binary knew, with nothing on screen saying so. Now an <strong>Update</strong> button runs the tool's own updater — or, for a Kimi Code the vendor's updater declines to update, Moonshot's own installer, pinned to the version shown — and a small banner in the window says a tool is behind until you close it for that version. A tool that updates itself takes its own banner down. The check has a toggle of its own and sends nothing about you.</li>
+    <li><strong>Fast mode.</strong> The model menu gains a switch for the agents that have one: Claude Code's fast mode on Opus models, and Codex's faster service tier where the model offers one. A bolt on the chip shows it is on, and the chip's hover reports what the agent said about it.</li>
+    <li><strong>Previous model versions stay reachable (Claude Code).</strong> The model menu lists the newest version of each family as before, and an <strong>Other models</strong> section beneath with the previous version the installed CLI still offers — pick one to pin a session to it, the way Claude Code's own picker allows. The Default row now names what a send with no model flag actually runs, read from claude's own settings.</li>
+    <li><strong>A + on custom groups.</strong> Grouped by Custom, each group you named carries the same <strong>+</strong> a folder header does: the session it starts belongs to that group from its first message and opens in the folder you last used there. A group stays visible while empty, so a new one can be used straight away, and a task scheduled from that page is filed in the group too.</li>
+  </ul>
+  <h3>Changed</h3>
+  <ul>
+    <li><strong>The context chip is a percentage.</strong> It now reads like Claude Code's own indicator — how full the context window is on the newest call, with the exact numbers on hover — instead of a token count that looked like a running total. It divides by the window each CLI states for the model in force, so a Claude session at 20% of a 1M window no longer reads "100%". When no window is known it shows the count and says so.</li>
+  </ul>
+  <h3>Fixed</h3>
+  <ul>
+    <li><strong>Compaction is visible.</strong> When an agent summarises the conversation to make room, the transcript now shows a <strong>Conversation compacted</strong> row (with before-and-after sizes where the agent records them) and labels the summary as the agent's, not as something you wrote; Claude Code's half-minute of silence while it compacts shows as "Compacting context…" rather than as a hang. All three agents, live and on reopen.</li>
+    <li>Kimi Code's context chip now moves during a turn instead of only when the turn ends.</li>
+    <li><strong>Codex's model list keeps up with Codex.</strong> A model that appears in Codex's own picker after a Codex update — or that OpenAI switches on server-side — now shows in SipAI's model menu without a relaunch: the list is re-read whenever Codex rewrites its catalog, and after an update (and once a day otherwise) SipAI asks Codex for its list directly, the way Codex's own picker fills itself at startup. No model is called and nothing is billed.</li>
+    <li><strong>Codex's context chip honours <code>model_context_window</code>.</strong> A window raised in <code>~/.codex/config.toml</code> is what the percentage divides by, clamped to the model's maximum exactly as Codex clamps it, so the chip agrees with Codex's own status bar on such a setup.</li>
+  </ul>
+  <h3>Security</h3>
+  <ul>
+    <li>The command-line-tool version check can be switched off, and its requests are bounded in size. The one installer SipAI can run (Moonshot's, for a Kimi Code the vendor's updater declines to update) is fetched over HTTPS only, size-bounded, staged in a private temporary folder, and pinned to the version named on the row; it never edits your shell files.</li>
+  </ul>
+</body></html>

@@ -39,13 +39,34 @@ struct StreamEvent: Identifiable, Hashable {
     /// see `AgentSessionScanner.isHarnessNotice`.
     let isSystemNotice: Bool
 
+    /// Claude's `fast_mode_state` as reported on the `system.init` and
+    /// `result` events — "on", "off" or "cooldown" (paused after a
+    /// rate limit). Nil on every other event and on agents that report
+    /// no such thing. What the composer's fast switch is checked
+    /// against: the switch states an intent, this states what served.
+    let fastModeState: String?
+
+    /// Context window per full model id, as CLAUDE reported it on the
+    /// `result` event (`modelUsage[<id>].contextWindow`) — the window
+    /// the CLI itself divided by for that turn. Nil on every other
+    /// event and on the two agents that report no such thing.
+    ///
+    /// Confirms and extends the table read out of claude's binary; see
+    /// `ConfigManager.setAgentModelContextWindow`. Carried as a FIELD
+    /// rather than in the `.result` case, which is pattern-matched in
+    /// several places that have no use for it.
+    let modelContextWindows: [String: Int]?
+
     init(kind: StreamEventKind, contextTokens: Int? = nil,
-         isSystemNotice: Bool = false) {
+         isSystemNotice: Bool = false, fastModeState: String? = nil,
+         modelContextWindows: [String: Int]? = nil) {
         self.id = UUID()
         self.timestamp = Date()
         self.kind = kind
         self.contextTokens = contextTokens
         self.isSystemNotice = isSystemNotice
+        self.fastModeState = fastModeState
+        self.modelContextWindows = modelContextWindows
     }
 
     // Identity-only equality keeps SwiftUI diffs cheap; the kind
@@ -82,6 +103,12 @@ enum StreamEventKind {
                 numTurns: Int,
                 inputTokens: Int,
                 outputTokens: Int)
+    /// The agent summarised the conversation to make room and carried
+    /// on. Rendered as a quiet system row: the context number is about
+    /// to drop by most of its value, and without this the drop has no
+    /// explanation on screen. Figures are nil for an agent that records
+    /// none (codex).
+    case compaction(preTokens: Int?, postTokens: Int?)
     /// Parser or runtime error surfaced to the UI.
     case error(message: String)
     /// The turn was stopped before it finished — the user's Stop
@@ -188,6 +215,13 @@ final class AgentRunner: ObservableObject {
     /// launched with it.
     @Published private(set) var lastContextWindow: Int = 0
 
+    /// Context windows claude reported on the newest `result` event,
+    /// per full model id. REPLACED, never merged: `@Published` replays
+    /// to every resubscription, so the value has to be idempotent, and
+    /// one turn's report is complete for the models that turn ran.
+    /// Empty on codex and kimi, which report no such thing.
+    @Published private(set) var observedContextWindows: [String: Int] = [:]
+
     /// What our own subprocess's newest system.init resolved to, PAIRED
     /// with the picker alias that turn was LAUNCHED with. Feeds the
     /// composer's model chip the resolved model the moment a send
@@ -213,6 +247,12 @@ final class AgentRunner: ObservableObject {
         let fullId: String
     }
     @Published private(set) var resolvedModel: ResolvedModel? = nil
+
+    /// The newest `fast_mode_state` claude reported for this session's
+    /// own turns ("on" / "off" / "cooldown"), or nil before any did.
+    /// Same delivery shape as `resolvedModel`, and read the same way:
+    /// the view mirrors it behind an equality guard.
+    @Published private(set) var fastModeState: String? = nil
 
     /// The alias the in-flight turn was launched with, captured at
     /// `send` — the only moment it is knowable, since the chips are
@@ -275,6 +315,15 @@ final class AgentRunner: ObservableObject {
     /// is replaced by the next notice, cleared by any real output, and
     /// never enters `events`. See `CodexEventParser.Parsed`.
     @Published private(set) var retryNotice: String = ""
+
+    /// The child is summarising the conversation right now.
+    ///
+    /// STATE, never an event: it is true for the 30-ish seconds a
+    /// compaction takes and false afterwards, so writing it into
+    /// `events` would put it in the history cache and in every later
+    /// reopen. Same lifetime and the same reasoning as `retryNotice`.
+    /// Claude only — the other two announce nothing while they compact.
+    @Published private(set) var compacting: Bool = false
 
     /// The single pending finalize bound on the turn — armed by Stop
     /// (`armTurnFinalize`), and by the child's exit when a reader
@@ -398,7 +447,7 @@ final class AgentRunner: ObservableObject {
         guard agentKey == "codex", let url = sessionFileURL else { return }
         let now = Date()
         if throttled,
-           now.timeIntervalSince(lastCodexTokenRead) < Self.codexTokenReadInterval {
+           now.timeIntervalSince(lastCodexTokenRead) < Self.storeTokenReadInterval {
             return
         }
         lastCodexTokenRead = now
@@ -419,11 +468,12 @@ final class AgentRunner: ObservableObject {
         }
     }
 
-    /// Floor on how often a streaming turn may re-read the rollout.
-    /// The read is a bounded tail, but a busy turn emits items faster
-    /// than the chip can meaningfully change.
-    private static let codexTokenReadInterval: TimeInterval = 1
+    /// Floor on how often a streaming turn may re-read an agent's
+    /// store for usage. The read is a bounded tail, but a busy turn
+    /// emits lines faster than the chip can meaningfully change.
+    private static let storeTokenReadInterval: TimeInterval = 1
     private var lastCodexTokenRead: Date = .distantPast
+    private var lastKimiTokenRead: Date = .distantPast
 
     /// The same refresh for kimi, and for the same reason: its stdout
     /// carries no usage at all, so the chip is fed from the wire file
@@ -435,8 +485,14 @@ final class AgentRunner: ObservableObject {
     /// call is what covers it: by then `adoptDiscoveredSession` has
     /// landed, so a first turn's chip appears without waiting for the
     /// session to be reopened.
-    private func refreshKimiContextTokens() {
+    private func refreshKimiContextTokens(throttled: Bool = false) {
         guard agentKey == "kimi", let url = sessionFileURL else { return }
+        let now = Date()
+        if throttled,
+           now.timeIntervalSince(lastKimiTokenRead) < Self.storeTokenReadInterval {
+            return
+        }
+        lastKimiTokenRead = now
         Task.detached(priority: .utility) { [weak self] in
             let usage = KimiSessionScanner.lastContextUsage(of: url)
             guard usage.tokens > 0 else { return }
@@ -551,6 +607,7 @@ final class AgentRunner: ObservableObject {
         stderrTail = ""
         stderrBuffer = ""
         retryNotice = ""
+        compacting = false
         disarmTurnEndWatchdog()
         runToken &+= 1
         stopRequested = false
@@ -695,6 +752,7 @@ final class AgentRunner: ObservableObject {
         guard status.isRunning else { return }
         disarmStallNotice()
         retryNotice = ""
+        compacting = false
         setStatus(.done(exitCode: 0, errorMessage: nil))
     }
 
@@ -870,6 +928,7 @@ final class AgentRunner: ObservableObject {
             // row, the answer, or the interrupted row.
             disarmStallNotice()
             retryNotice = ""
+            compacting = false
             // Last chance to freeze the composer's clock. A no-op for a
             // turn that emitted `result` or was stopped; the only stamp
             // a kimi turn ever gets, since its stdout has no turn-end
@@ -903,7 +962,7 @@ final class AgentRunner: ObservableObject {
         if let url = sessionFileURL {
             tailer?.resume(atOffset: Self.currentSize(of: url))
         }
-        // Backstop for the codex and kimi token chips, after the
+        // Backstop for the codex and kimi context chips, after the
         // late-discovery block above has had its chance to name the
         // store file. A turn that was stopped or that died never
         // emitted the `result` that normally carries this — same
@@ -1067,7 +1126,13 @@ final class AgentRunner: ObservableObject {
         // every follow-up turn while the first one worked. It is not
         // needed anyway: `--json` output arrives clean under our PTY,
         // no colour codes.
-        args.append(contentsOf: options.flags(for: agentKey))
+        //
+        // The fast switch travels as the service tier the model's own
+        // catalog entry advertises; resolved here because the catalog
+        // is MainActor state and the flag list is a pure value.
+        args.append(contentsOf: options.flags(
+            for: agentKey,
+            codexFastTier: CodexCatalog.shared.fastTier(forModel: options.model)?.id))
         if resuming, let id = sessionId { args.append(id) }
         args.append(text)
         return args
@@ -1540,9 +1605,22 @@ final class AgentRunner: ObservableObject {
                             .sessionDirectory(forId: announced) ?? cwd))
             }
             parsed = KimiEventParser.parse(line: line, fallbackCwd: cwd)
-        default:      parsed = AgentEventParser.parse(line: line, fallbackCwd: cwd)
+        default:
+            // Claude announces a compaction starting and finishing on
+            // `system`/`status` records. Consulted BEFORE the parse,
+            // which deliberately turns those into nothing: a
+            // compaction takes half a minute during which the child
+            // says nothing else, and an unexplained silence there is
+            // the shape of a hang.
+            if let flag = AgentEventParser.compactingSignal(line: line) {
+                compacting = flag
+            }
+            parsed = AgentEventParser.parse(line: line, fallbackCwd: cwd)
         }
         for event in parsed {
+            // Any real output means the summarising is over, whether or
+            // not the finishing record was seen.
+            if compacting { compacting = false }
             // A renderable event after this turn's own segment ended
             // means the child began a NEW segment (a background task
             // completed and re-invoked the model) — the turn is live
@@ -1555,6 +1633,13 @@ final class AgentRunner: ObservableObject {
             events.append(event)
             if let ctx = event.contextTokens, ctx > 0 {
                 lastContextTokens = ctx
+            }
+            if let state = event.fastModeState, state != fastModeState {
+                fastModeState = state
+            }
+            if let windows = event.modelContextWindows, !windows.isEmpty,
+               windows != observedContextWindows {
+                observedContextWindows = windows
             }
             if case .systemInit(_, let model, _) = event.kind,
                !model.isEmpty, model != "<synthetic>",
@@ -1575,7 +1660,7 @@ final class AgentRunner: ObservableObject {
                 // visible turn — the process is not touched.
                 stampTurnDuration()
                 // Codex and kimi: neither stream carries per-call
-                // usage, so the token chip is refreshed from the store
+                // usage, so the context chip is refreshed from the store
                 // file instead. No-op for claude, whose events carry it
                 // themselves.
                 refreshCodexContextTokens()
@@ -1585,9 +1670,15 @@ final class AgentRunner: ObservableObject {
             applySubprocessSideEffects(for: event)
         }
         // Mid-turn: codex has just written another `token_count` to its
-        // rollout, one per API call. Throttled, and a no-op for the two
-        // agents whose chips ride their own event stream.
-        if !parsed.isEmpty { refreshCodexContextTokens(throttled: true) }
+        // rollout and kimi another `usage.record` to its wire, one per
+        // API call in both cases. Throttled, and a no-op for claude,
+        // whose chip rides its own event stream. Without the kimi call
+        // its chip would sit frozen for the whole run and only land at
+        // finalize, where the other two move per call.
+        if !parsed.isEmpty {
+            refreshCodexContextTokens(throttled: true)
+            refreshKimiContextTokens(throttled: true)
+        }
         trimLiveEventsIfNeeded()
     }
 
@@ -1873,7 +1964,13 @@ final class AgentRunner: ObservableObject {
 
     /// Build a PATH-rich environment mirroring AgentManager's detection
     /// logic so helper tools (node, npm, git) are findable from the GUI.
-    private static func buildEnvironment() -> [String: String] {
+    ///
+    /// Not private, because `AgentCLIProbe` spawns the same CLIs to ask
+    /// their version and to run their own updaters, and those children
+    /// need exactly this environment for exactly the reasons below.
+    /// A second spelling of it there is the drift this app has already
+    /// paid for once — see the search-path list.
+    nonisolated static func buildEnvironment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         // The SAME directories detection looks in — one list, not a
         // hand-copied second spelling that can drift — so an agent we
@@ -1935,7 +2032,7 @@ final class AgentRunner: ObservableObject {
     /// Those are inert in a child, and a blanket "scrub anything that
     /// looks like Xcode" would be guesswork where this is a
     /// reproduction.
-    private static func stripDynamicLinkerVars(from env: inout [String: String]) {
+    nonisolated private static func stripDynamicLinkerVars(from env: inout [String: String]) {
         for key in env.keys
         where key.hasPrefix("DYLD_") || key.hasPrefix("__XPC_DYLD_") {
             env.removeValue(forKey: key)
@@ -1969,7 +2066,7 @@ final class AgentRunner: ObservableObject {
     /// Do NOT let this call `ShellEnvironment.resolve` on an uncaptured
     /// snapshot from the MainActor — `runOnce` awaits
     /// `ShellEnvironment.prepare()` first for that reason.
-    private static func overlayProxyVars(into env: inout [String: String]) {
+    nonisolated private static func overlayProxyVars(into env: inout [String: String]) {
         for name in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
                      "http_proxy", "https_proxy", "all_proxy", "no_proxy"] {
             guard env[name]?.isEmpty ?? true,

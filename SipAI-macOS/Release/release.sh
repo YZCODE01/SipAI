@@ -165,6 +165,15 @@ xcodebuild -exportArchive -archivePath "$ARCHIVE" \
 ok "exported $APP"
 
 step "Verifying the signature before notarizing"
+# The export lands inside the repo tree, and the repo lives where a
+# cloud file provider may be syncing: such a provider re-stamps
+# com.apple.FinderInfo onto files there within about a minute, and a
+# strict verify refuses an app carrying it ("detritus not allowed") —
+# on a signature that is otherwise perfectly valid. The stamp is not
+# part of the signature, so stripping it here changes nothing that was
+# signed; everything that SHIPS is packaged from a stripped copy in
+# /tmp further down, for the same reason.
+xattr -cr "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 | sed 's/^/        /'
 ok "signature valid"
 

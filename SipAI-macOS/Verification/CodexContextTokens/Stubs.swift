@@ -39,6 +39,7 @@ struct AgentSessionHistoryItem: Identifiable, Hashable {
         case toolUse(id: String, name: String, input: [String: Any])
         case toolResult(toolUseId: String, content: String, isError: Bool)
         case interrupted(message: String)
+        case compaction(preTokens: Int?, postTokens: Int?)
     }
 
     static func == (lhs: AgentSessionHistoryItem,

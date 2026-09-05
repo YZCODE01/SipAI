@@ -8,9 +8,10 @@ happen, inline permission approvals, and scheduled agent tasks the app
 fires itself.
 
 Everything is local: your keys, your chats, your notes. Requests go
-straight from your Mac to the provider you picked. The only other call is
-a once-daily update check, which sends nothing about you and can be
-turned off in Settings.
+straight from your Mac to the provider you picked. The only other calls
+are update checks — once a day for SipAI itself, and every few hours for
+the agent command-line tools it finds installed — which send nothing
+about you and can each be turned off in Settings.
 
 Created by Yizhan Huang (黄一展). MIT licensed.
 
@@ -251,10 +252,14 @@ A chat talks directly to a model over your API key.
   role chips (each appears once enabled in Settings → Display), the
   **model picker**, and a send button that becomes a stop button while a
   reply is in flight.
-- **Attachments** are read as text and inlined into your message; a
-  banner names what's staged for the next send. Anything unreadable as
-  text, or over 100,000 characters, stops the send with an explanation
-  rather than being dropped silently.
+- **Attachments** travel one of two ways. Text files — source, Markdown,
+  CSV — are inlined into your message and stay in the chat, so a later
+  question about the file still has the file; a long one is cut at
+  200,000 characters and says so. Images and PDFs go as content blocks
+  on the one request that carries them, to models that can read them,
+  and are never stored. A banner names what's staged for the next send,
+  and a file that can't be used is refused with an explanation when you
+  attach it, not when you send.
 - **Replies arrive complete**, not streamed — the app shows a "Sipping…"
   indicator with a running clock while it waits, and Stop cancels. A
   reply cut short by the model's output limit is flagged ("Response may
@@ -395,12 +400,24 @@ this send will run*, then reports on it:
 
 | Left | Right |
 |---|---|
-| working folder · schedule · add files · note · find | model · effort · permission mode · turn clock · token count |
+| working folder · schedule · add files · note · find | model · effort · permission mode · turn clock · context usage |
 
 - **Permission mode, model and effort** apply per send, and each agent
   gets its own vocabulary in those chips — see [the table
   below](#how-the-three-agents-differ). Leave model or effort at
-  *default* and no flag is sent at all.
+  *default* and no flag is sent at all. For Claude Code, the model menu
+  lists one row per family under the name of the newest version this
+  Mac has run, and an **Other models** section beneath them with the
+  previous version of each family the installed CLI still offers — pick
+  one to pin a session to it. The Default row names what a send with no
+  model flag actually runs: claude's own configuration (`ANTHROPIC_MODEL`
+  or the `model` key in its settings files) when that sets one.
+- **Fast mode** is a switch at the bottom of the model menu, for the
+  agents that have one: Claude Code's, which applies to Opus models, and
+  Codex's faster service tier, offered where the model advertises one.
+  Kimi Code has none. A bolt on the chip shows it is on, and the chip's
+  hover reports what the agent said about it — on, off, or cooling down
+  after a rate limit.
 - **The folder** is editable while a session is still a draft, and fixed
   afterwards. A new session resolves its folder from the best evidence
   available — the last folder used, then the newest session on record;
@@ -414,9 +431,14 @@ this send will run*, then reports on it:
 - **The turn clock** counts up while a turn runs and freezes on that
   turn's total when it lands, so the composer always answers "how long?"
   without a ticking row in the transcript.
-- **The token count** ("47k tokens") is the session's context footprint,
-  and every agent has one. The tooltip spells out the fraction of the
-  window in use. Hide it in Settings → Display.
+- **Context usage** ("39%") is how full the session's context window is
+  on the newest call — the same figure the agent's own terminal shows —
+  with the exact numbers on hover. It is a gauge, not a running total:
+  it falls when the agent compacts the conversation to make room, and
+  the transcript shows a **Conversation compacted** row when that
+  happens (with the before-and-after sizes where the agent records
+  them). When the model's window isn't known the chip shows the token
+  count instead. Every agent has one; hide it in Settings → Display.
 - **A scheduled run's** transcript carries a read-only tag with the time
   the run finished.
 - **The send button becomes Stop** whenever a turn is in flight — for
@@ -433,9 +455,10 @@ Everything above is common to all three. These are the differences:
 |---|---|---|---|
 | Permission chip | permission modes (`bypassPermissions` … `plan`) | sandbox modes: Workspace Write, Read Only, Full Access | none — a fixed **Auto-approve** readout |
 | Mid-turn approvals | inline Allow / Deny cards | none — the sandbox decides up front | none — headless runs approve their own tool calls |
-| Model chip | aliases, with versions learned on this machine | literal Codex model ids, from its models cache, your config and recent sessions | aliases from kimi's `config.toml` |
+| Model chip | aliases named by the versions seen on this machine, plus **Other models** for the previous version of each family; the Default row reads claude's own settings | literal Codex model ids, from its catalog (refreshed through Codex itself), your config and recent sessions | aliases from kimi's `config.toml` |
 | Effort chip | `low` … `max`, scraped from `claude --help` | per model, from the same sources as the model list | per model, when the model declares any; delivered as an environment variable |
-| Token counter | live, from each assistant message | the context snapshot the rollout records, refreshed as the turn runs | summed from the session's usage records at turn end |
+| Fast mode | a switch in the model menu, for Opus models | the model's advertised service tier, where it has one | none |
+| Context usage | live, from each assistant message, over the window claude's own binary states for the model | the rollout's newest usage record, refreshed as the turn runs, over the window Codex enforces (`model_context_window` honoured) | the wire's newest usage record, refreshed as the turn runs, over the model's `max_context_size` |
 | Watching a turn started elsewhere | live | after it finishes | after it finishes |
 | Slash commands | resolved by the CLI itself (`/mcp`, `/model`, `/context`), and the answer is kept with the session | none — the text is sent to the model as an ordinary message, and the composer says so before you do | none — same, and the composer says so |
 | Branching a session | yes | no | no |
@@ -508,15 +531,23 @@ The section header carries a **Group by** menu:
 
 The button tints while a grouping is on, and the choice persists. Group
 headers show their row count and fold away when clicked; folded state is
-remembered per mode, and headers drag into your own order. A folder
-group's header carries a **+** that starts a new session already pointed
-at that folder. Rows keep exactly the look they have with grouping off.
+remembered per mode, and headers drag into your own order. Rows keep
+exactly the look they have with grouping off.
+
+A **folder** group's header carries a **+** that starts a new session
+already pointed at that folder, and a **custom** group's header carries
+the same **+**: the session it starts belongs to that group from its
+first message, and opens in the folder you last worked in there — or in
+the usual new-session folder if the group is new. Scheduling a task from
+that page files the task in the group too. Ungrouped has no **+**; the
+section's own **+ New session** row already makes an unfiled session.
 
 **Custom groups:** right-click a session or task → **Add to Group** →
-pick one or create it. Unfiled rows collect under **Ungrouped**.
-Right-click a custom group's header to rename or delete it; deleting
-keeps every session and simply unfiles them. Group names live in this
-app's `config.json`, never in the agent's session files.
+pick one or create it. Unfiled rows collect under **Ungrouped**. A group
+you have named stays visible while it is empty, so a new one can be used
+straight away; right-click its header to rename or delete it, and
+deleting keeps every session and simply unfiles them. Group names live
+in this app's `config.json`, never in the agent's session files.
 
 Long lists are capped at 10 rows with a **Show all (N more)** row that
 counts only what a *visible* group actually hid, and toggles back to
@@ -541,7 +572,7 @@ sends resume the same thread (`codex exec resume`), so a conversation
 started here continues here — and one started in a terminal continues
 here too.
 
-Beyond [the differences table](#how-the-three-agents-differ), three
+Beyond [the differences table](#how-the-three-agents-differ), four
 things are worth knowing:
 
 - **The sandbox is a real boundary**, not a label. The chip travels as
@@ -556,6 +587,14 @@ things are worth knowing:
   check, is what bounds what a run can touch.
 - **Subagent sessions appear too.** Runs Codex spawned as subagents get
   their own titles and a distinct glyph, sorted after your own sessions.
+- **The model list follows Codex's own.** It is read from Codex's
+  catalog cache, your `config.toml` and recent sessions, re-read
+  whenever any of them changes, and — after a Codex update, and once a
+  day otherwise — refreshed through `codex app-server`'s `model/list`,
+  which is how Codex's own picker fills itself at startup. No model is
+  called for that. The context chip divides by the window Codex
+  enforces: the model's default, or your `model_context_window` clamped
+  to the model's maximum, times Codex's effective percentage.
 
 A session whose CLI is missing — or installed but not signed in — still
 lists and still reads, with a read-only bar in place of the composer
@@ -679,10 +718,10 @@ Reached from the bottom of the sidebar.
 | **Chat models** | Every configured model, which one is the default, add / remove, and the provider each belongs to |
 | **Prompt and Roles** | The general system prompt, plus named roles — reusable prompts you switch between per chat. One starter role (Code Reviewer) ships as a worked example; add your own with **Add Role** |
 | **Files & Notes** | The dedicated folder the sidebar's local-files section browses, and which model writes notes |
-| **Display** | Appearance (System / Light / Dark); four font-size tiers — Small, Default, Larger, Large text mode — that scale the sidebar and the chat/agent content together and widen line spacing as they grow; a toggle for the sidebar's logo and wordmark; the chatbox toggles (token count, note button, note prompt, chat-group chip, role chip); and spell-checking in the text boxes |
+| **Display** | Appearance (System / Light / Dark); four font-size tiers — Small, Default, Larger, Large text mode — that scale the sidebar and the chat/agent content together and widen line spacing as they grow; a toggle for the sidebar's logo and wordmark; the chatbox toggles (context usage, note button, note prompt, chat-group chip, role chip); and spell-checking in the text boxes |
 | **Labels** | Rename "You", "AI", and each agent's label as they appear above messages |
 | **Language** | English and 中文 ship; switching asks for a restart, and warns that any agent turn in progress will be stopped |
-| **Updates** | The running version, **Check Now**, a *Last checked* readout, and a toggle for the once-daily automatic check |
+| **Updates** | The running version, **Check Now**, a *Last checked* readout, and a toggle for the once-daily automatic check; then **Command-line tools** — each installed agent CLI with its version, whether a newer release exists, and an **Update** button, with a toggle of its own for that check |
 | **Help** | Ten expandable answers to the questions that come up most — getting a key, requests that fail, token usage and cost, provider plan limits, chats versus agent sessions, agent CLI setup, where data lives, prompts and roles, organising and exporting, and macOS folder permissions |
 
 **Updates apply to distribution builds only.** The test is a Developer ID
@@ -696,6 +735,25 @@ choose to install it, no usage data, account or system profile is ever
 sent, and every update must carry a valid EdDSA signature before Sparkle
 will install it. If an update is accepted while an agent turn is running,
 the install waits for the turn to finish.
+
+**The agent command-line tools are checked too.** A stale CLI fails
+silently — turns keep working against whatever models the old binary
+knows, and Claude Code bakes its model aliases into its binary, so one
+release behind can mean one model behind. The pane therefore lists each
+installed CLI with its version and, once a check has succeeded, whether
+a newer release exists; a small banner in the window says the same
+until you close it for that version, and a tool that updates itself
+takes its own banner down. The check asks the npm registry (Claude Code,
+Codex) and `code.kimi.com` (Kimi Code) every eight hours, sends nothing
+about you, is silent when it fails, and has its own toggle — off, the
+rows still state the installed versions and nothing leaves the machine.
+**Update** runs the tool's own command — `claude update`, `codex update`,
+`kimi upgrade` — and judges success by the version moving, never by the
+exit code, with one exception: a Kimi Code installed by Moonshot's
+installer declines `kimi upgrade` and names that installer instead, so
+SipAI downloads the script over HTTPS and runs it pinned to the version
+shown, into the folder the binary already lives in, without touching
+your shell files. Nothing runs while a turn of that agent is in flight.
 
 **Factory reset** sits at the bottom of the Settings sidebar. It wipes
 chats, chat groups, notes, models, API keys, scheduled-task definitions
@@ -789,6 +847,7 @@ SipAI-macOS/
     ├── SipAIApp.swift                @main — wires the managers together
     ├── Models/
     │   ├── APIClient.swift               OpenAI / Responses / Anthropic transports
+    │   ├── AgentCLIUpdates.swift         agent CLI versions, release checks, updaters
     │   ├── AgentEventParsing.swift       claude stream-json → StreamEvent
     │   ├── AgentLaunchOptions.swift      mode / model / effort + scraped catalogs
     │   ├── AgentManager.swift            CLI detection, session list, history cache
@@ -853,7 +912,9 @@ catalog, note editing, session forking, the runner's stdout drain, Codex
 context tokens, scheduled-run visibility, the Kimi Code assumptions,
 transcript search and the renderer's link gate, a slash command's answer
 surviving a reload, the composer's Enter key, the sidebar lockup's
-alignment, factory reset, and an end-to-end Sparkle update. Run the
+alignment, factory reset, the composer's model and context chips, the
+custom group's **+**, the CLI update rules, and an end-to-end Sparkle
+update. Run the
 relevant one after touching the code it covers; run `KimiCode` and
 `CodexContextTokens` after upgrading those CLIs, since they are what
 detect a changed file format.
@@ -964,6 +1025,13 @@ The app has to be open at the scheduled moment. A slot missed by less
 than a day fires once when you reopen it — the task's editor can turn
 that catch-up off — and an older miss is recorded as skipped. Check the
 task's panel: it names the next run and how the last one went.
+
+**The model picker still names last month's model**
+The agent CLI is behind, not SipAI: Claude Code resolves `fable`,
+`opus` and the rest inside its own binary, so a stale install keeps
+running the models it shipped with. **Settings → Updates** lists each
+installed CLI's version and offers **Update** when a newer release
+exists; the same notice appears as a banner in the window.
 
 **Start completely fresh**
 Delete `~/Library/Application Support/SipAI/`, or use Settings → Factory

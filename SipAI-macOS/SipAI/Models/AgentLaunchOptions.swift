@@ -21,12 +21,31 @@ struct AgentLaunchOptions: Equatable, Hashable {
     /// as a flag, never persisted; cleared when the user picks a model
     /// so a stale id can't shadow their choice.
     var modelFullId: String? = nil
+    /// The agent's "fast mode" — faster inference at a higher plan
+    /// cost. Each CLI spells it differently, and two of them can say
+    /// no: claude's is Opus-only and print mode refuses it without an
+    /// explicit opt-in on the FLAG layer (measured: `--settings
+    /// {"fastMode":true}` makes `system.init` report `fast_mode_state:
+    /// on` and the call's usage record `speed: fast`); codex's is a
+    /// per-model SERVICE TIER whose id its own catalog advertises
+    /// (measured: `-c service_tier=priority` is taken silently, an
+    /// unadvertised value is refused per model). Kimi has no such
+    /// mode. Off by default; a model that does not offer it clears the
+    /// switch — see the composer's model picker.
+    var fastMode: Bool = false
 
     /// Flag list for an agent invocation. Blank values are skipped.
     /// Branches per agent: the three CLIs spell all three options
     /// differently.
-    func flags(for agentKey: String = "claude_code") -> [String] {
-        if agentKey == "codex" { return codexFlags() }
+    ///
+    /// `codexFastTier` is the service-tier id codex's catalog advertises
+    /// for the model in force, resolved by the caller — the catalog is
+    /// MainActor state and this is a pure value. nil means no tier is
+    /// offered, and the switch then emits nothing rather than a value
+    /// codex would refuse.
+    func flags(for agentKey: String = "claude_code",
+               codexFastTier: String? = nil) -> [String] {
+        if agentKey == "codex" { return codexFlags(fastTier: codexFastTier) }
         if agentKey == "kimi" { return kimiFlags() }
         var argv: [String] = []
         if let mode = permissionMode, !mode.isEmpty {
@@ -38,8 +57,19 @@ struct AgentLaunchOptions: Equatable, Hashable {
         if let effort = effort, !effort.isEmpty {
             argv += ["--effort", effort]
         }
+        if fastMode {
+            // The SDK opt-in. Print mode answers `sdk_opt_in_required`
+            // for fast mode unless the setting arrives on the FLAG
+            // layer — the same key in `settings.json` does not count.
+            argv += ["--settings", Self.claudeFastModeSettings]
+        }
         return argv
     }
+
+    /// Exactly the JSON claude's flag-settings layer takes for the fast
+    /// mode opt-in. Compact, one key: the flag accepts a file path or a
+    /// JSON string, and this is the whole of what it needs to say.
+    static let claudeFastModeSettings = "{\"fastMode\":true}"
 
     /// Codex spelling of the same three choices.
     ///
@@ -49,7 +79,7 @@ struct AgentLaunchOptions: Equatable, Hashable {
     /// restore a value saved before the session's agent was known — and
     /// passing it through would be a hard argv error that kills the
     /// turn. Falling back to codex's own default is the safe read.
-    private func codexFlags() -> [String] {
+    private func codexFlags(fastTier: String?) -> [String] {
         var argv: [String] = []
         if let mode = permissionMode, !mode.isEmpty,
            let preset = CodexCapabilities.sandboxArgv(for: mode) {
@@ -62,6 +92,15 @@ struct AgentLaunchOptions: Equatable, Hashable {
             // Codex has no dedicated effort flag; it travels as a
             // config override.
             argv += ["-c", "model_reasoning_effort=\(effort)"]
+        }
+        if fastMode, let tier = fastTier, !tier.isEmpty {
+            // Codex's fast mode is a service tier, and the id is the
+            // model's own: `service_tiers[].id` of its catalog entry
+            // ("priority", shown as "Fast"). A tier the model does not
+            // advertise is refused per request with an `error` item
+            // ("not advertised as supported … will be omitted"), so
+            // nothing here is ever guessed.
+            argv += ["-c", "service_tier=\(tier)"]
         }
         return argv
     }
@@ -494,7 +533,7 @@ struct KimiModel: Identifiable, Equatable {
     /// value at all — the model chip's Default row already names what
     /// it resolves to.
     let defaultEffort: String?
-    /// `max_context_size` — the model's window, for the token chip's
+    /// `max_context_size` — the model's window, for the context chip's
     /// occupancy tooltip. nil when the entry declares none (an
     /// observed-only model), and the tooltip falls back to its
     /// constant.
@@ -571,13 +610,15 @@ final class KimiCatalog: ObservableObject {
         return models.first { $0.slug == fallback }?.defaultEffort
     }
 
-    /// `max_context_size` for a model, for the token chip's occupancy
-    /// tooltip. The slug handed in is the `model` string off the wire's
-    /// newest `usage.record`, which IS the config alias (measured on a
-    /// real install: `"model":"moonshot-ai/kimi-k3"` against
-    /// `[models."moonshot-ai/kimi-k3"]`). Same resolution chain as
-    /// `defaultEffort(forModel:)`; nil means the tooltip keeps its
-    /// fallback constant rather than stating a guessed window.
+    /// `max_context_size` for a model — the denominator kimi's own
+    /// status bar divides by, and so the one the context chip's
+    /// percentage uses. The slug handed in is either the model
+    /// SELECTED in the composer or the `model` string off the wire's
+    /// newest `usage.record`, both of which are the config alias
+    /// (measured on a real install: `"model":"moonshot-ai/kimi-k3"`
+    /// against `[models."moonshot-ai/kimi-k3"]`). Same resolution chain
+    /// as `defaultEffort(forModel:)`; nil means the chip states a token
+    /// count rather than a percentage over a guessed window.
     func maxContextSize(forModel slug: String?) -> Int? {
         if let slug, !slug.isEmpty {
             return models.first { $0.slug == slug }?.maxContextSize
@@ -904,6 +945,15 @@ enum ClaudeModelDisplay {
         return parts(of: raw).family
     }
 
+    /// Whether a picker value is a FULL id ("claude-fable-5") rather
+    /// than an alias ("fable"). The "Other models" rows send full ids,
+    /// and a full id is never a key in the alias map: filing an
+    /// observation under one would be recording that "claude-fable-5"
+    /// resolves to itself, forever.
+    static func isFullId(_ value: String) -> Bool {
+        value.lowercased().contains("claude-")
+    }
+
     /// Whether `fullId` can be what `alias` resolves to.
     ///
     /// An alias names a FAMILY ("sonnet" is the latest Sonnet), so an
@@ -992,12 +1042,112 @@ enum ClaudeModelDisplay {
 /// keeps the HIGHEST version per family, which is exactly what the
 /// alias means. Every id here is one this account was actually served
 /// or offered; nothing is invented.
+/// Which context window a session's percentage is drawn over.
+///
+/// One pure rule for all three agents, so the chip cannot mean
+/// different things in different sections. The inputs arrive as
+/// closures rather than as catalog references for the same reason
+/// `ScheduledTaskScheduler.decide` takes its state as parameters: the
+/// rule is then testable headlessly, with no MainActor catalog and no
+/// files on disk.
+///
+/// Order, and why:
+///
+/// 1. **The model SELECTED in the composer.** The next call runs under
+///    it, so its window is the one that answers "how close am I". This
+///    is also what Claude Code divides by — the current main-loop
+///    model, not whichever model produced the last call.
+/// 2. **The model that produced the NUMBER**, when the selection
+///    resolves to nothing. Covers a session opened cold whose picker
+///    still reads Default, and a model the catalogs do not name.
+/// 3. **nil — no percentage.** A window is never guessed. The chip
+///    states the token count instead and says so, because a percentage
+///    over an invented denominator is a specific wrong claim where a
+///    count is merely less informative.
+/// How the context chip STATES what the resolver and the readers found.
+///
+/// Pure, and deliberately not inside the SwiftUI view: these two rules
+/// are the ones a reader checks against their agent's own terminal, so
+/// they have to be exercisable without a window.
+enum ContextUsageFormat {
+    /// Compact token counts: "999", "9.9k", "258k", "1.0M".
+    static func compact(_ n: Int) -> String {
+        if n < 1000 { return "\(n)" }
+        if n < 1_000_000 {
+            let k = Double(n) / 1000
+            return k < 10 ? String(format: "%.1fk", k) : "\(Int(k.rounded()))k"
+        }
+        return String(format: "%.1fM", Double(n) / 1_000_000)
+    }
+
+    /// Whole percent, rounded the way claude's own indicator rounds,
+    /// clamped to 1…100: a live session is never "0%", and a model that
+    /// overruns the window this machine knows for it (a long-context
+    /// tier nobody here has learned) reads as full rather than as
+    /// impossible. 0 means there is nothing to state.
+    static func percent(_ used: Int, of window: Int) -> Int {
+        guard window > 0, used > 0 else { return 0 }
+        return min(100, max(1, Int((Double(used) / Double(window) * 100).rounded())))
+    }
+}
+
+enum ContextWindowResolver {
+    static func resolve(agentKey: String,
+                        selectedAlias: String?,
+                        selectedFullId: String?,
+                        numeratorModel: String?,
+                        recordedWindow: Int,
+                        aliasToId: (String) -> String?,
+                        binaryWindow: (String) -> Int?,
+                        learnedWindow: (String) -> Int?,
+                        catalogWindow: (String?) -> Int?) -> Int? {
+        func claudeWindow(_ id: String?) -> Int? {
+            guard let id, !id.isEmpty else { return nil }
+            // The shipped table first — it names every model the picker
+            // offers and needs no turn to have run. The learned value
+            // is what covers the ids it does not carry.
+            if let w = binaryWindow(id), w > 0 { return w }
+            if let w = learnedWindow(id), w > 0 { return w }
+            return nil
+        }
+        if agentKey == "claude_code" {
+            // A concrete pick is itself the id; an alias resolves
+            // through the map this machine observed. An empty alias is
+            // claude's Default, which the map records under "".
+            let selectedId = (selectedFullId?.isEmpty == false)
+                ? selectedFullId
+                : aliasToId(selectedAlias ?? "")
+            if let w = claudeWindow(selectedId) { return w }
+            if let w = claudeWindow(numeratorModel) { return w }
+            return nil
+        }
+        // Codex and kimi: the selection is a literal model id their own
+        // catalogs answer for. `nil`/"" means Default, which each
+        // catalog resolves through its configured default model.
+        if let w = catalogWindow(selectedFullId?.isEmpty == false
+                                    ? selectedFullId : selectedAlias),
+           w > 0 {
+            return w
+        }
+        // What the store recorded beside the number — codex stamps the
+        // window on the same rollout record, and kimi's is joined from
+        // its config by the model on the usage record.
+        if recordedWindow > 0 { return recordedWindow }
+        return nil
+    }
+}
+
 enum ClaudeModelCatalog {
     struct Harvest {
         /// family alias → newest full id seen ("opus" → "claude-opus-5").
         var byFamily: [String: String] = [:]
         /// Model of the most recent session, for seeding the "" default.
         var newestSessionModel: String? = nil
+        /// Every id offered, in sighting order — the pool the "Other
+        /// models" section is drawn from. Same filter as `byFamily`
+        /// (variant-stripped, family known, versioned); unlike it,
+        /// nothing here is superseded by a newer version.
+        var allIds: [String] = []
     }
 
     /// One SUCCESSFUL harvest per app launch, merged into the observed
@@ -1044,6 +1194,11 @@ enum ClaudeModelCatalog {
                 // Only ever moves an alias FORWARD — see
                 // ConfigManager.learnAgentModelFullIds.
                 config.learnAgentModelFullIds(found.byFamily)
+                // …while the pool behind "Other models" only ever
+                // GROWS, and is trimmed by the installed binary, not
+                // by version.
+                config.learnAgentModelObservedIds(found.allIds)
+                Self.refreshOtherModels(config: config)
                 // The default is whatever claude picks with no --model
                 // flag; versions can't rank it (Fable 5 and Opus 5 are
                 // different families), so it stays a one-time seed the
@@ -1069,6 +1224,333 @@ enum ClaudeModelCatalog {
         }
     }
 
+    /// Rebuild the composer's "Other models" section: per family, the
+    /// newest observed id BELOW what the alias currently resolves to,
+    /// kept only if the installed claude still names it.
+    ///
+    /// The binary scan is the "still offered" test. Claude's model
+    /// table is literal strings in its executable, superseded models
+    /// listed beside their successors, so a model claude has dropped stops being
+    /// offered as `--model` the day its binary stops naming it, with
+    /// no table of ours to go stale. The observation half is what keeps
+    /// out ids the binary keeps only for legacy remapping (it still
+    /// names Haiku 3.5): a row is a model THIS account has run.
+    ///
+    /// One candidate per family, one read of the binary per binary
+    /// (cached by fingerprint), off the MainActor.
+    @MainActor
+    static func refreshOtherModels(config: ConfigManager) {
+        let observed = config.agentModelObservedIds()
+        var candidates: [(family: String, id: String)] = []
+        for alias in ClaudeCapabilities.shared.modelAliases {
+            guard let family = ClaudeModelDisplay.parts(of: alias).family,
+                  let current = config.agentModelFullId(forAlias: alias)
+            else { continue }
+            let older = observed.filter {
+                ClaudeModelDisplay.familyAlias(of: $0) == family
+                    && ClaudeModelDisplay.isNewer(current, than: $0)
+            }
+            guard let best = older.max(by: { ClaudeModelDisplay.isNewer($1, than: $0) })
+            else { continue }
+            candidates.append((family, best))
+        }
+        guard !candidates.isEmpty,
+              let binary = AgentManager.binaryPath(for: "claude_code") else {
+            ClaudeCapabilities.shared.setOtherModels([])
+            return
+        }
+        Task.detached(priority: .utility) {
+            let named = Self.idsNamedByBinary(at: binary,
+                                              candidates: candidates.map(\.id))
+            let rows = candidates
+                .filter { named.contains($0.id) }
+                .map { ClaudeOtherModel(fullId: $0.id, family: $0.family) }
+            await MainActor.run { ClaudeCapabilities.shared.setOtherModels(rows) }
+        }
+    }
+
+    /// What a send with NO `--model` runs as, read from claude's own
+    /// configuration the way the codex and kimi Default rows read
+    /// theirs: `ANTHROPIC_MODEL` in the login shell's environment, then
+    /// the `model` key of the project's `.claude/settings.local.json`
+    /// and `.claude/settings.json`, then the user's — claude's own
+    /// precedence. Nil when none sets one, and the caller falls back to
+    /// what a Default send was last OBSERVED to resolve to. Four small
+    /// reads; callers cache per composer appearance.
+    nonisolated static func configuredDefaultModel(cwd: URL?) -> String? {
+        if let env = ShellEnvironment.resolveIfCaptured("ANTHROPIC_MODEL") {
+            let trimmed = env.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        var files: [URL] = []
+        if let cwd {
+            files.append(cwd.appendingPathComponent(".claude/settings.local.json"))
+            files.append(cwd.appendingPathComponent(".claude/settings.json"))
+        }
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        files.append(home.appendingPathComponent(".claude/settings.local.json"))
+        files.append(home.appendingPathComponent(".claude/settings.json"))
+        for file in files {
+            guard let data = try? Data(contentsOf: file),
+                  let obj = (try? JSONSerialization.jsonObject(with: data))
+                    as? [String: Any],
+                  let model = obj["model"] as? String
+            else { continue }
+            let trimmed = model.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return nil
+    }
+
+    // MARK: Context window (binary model table)
+
+    /// One model's entry in claude's own table.
+    struct WindowEntry {
+        let window: Int
+        /// The base entry is already 1M with no suffix.
+        let native1M: Bool
+        /// A `[1m]` spelling of this id gets the long window.
+        let supports1MSuffix: Bool
+    }
+
+    /// Context window for a model id, read from the table claude SHIPS.
+    ///
+    /// This is why the chip can state an occupancy on a claude session
+    /// that has never run in this app: the window is a fact about the
+    /// installed CLI, exactly as codex's is a fact about
+    /// `models_cache.json` and kimi's about `config.toml`. Nothing here
+    /// is hardcoded — a table of windows would drift the day a model
+    /// ships, the same reason model lists are scraped.
+    ///
+    /// A `[1m]` id resolves through its BASE entry plus the base's
+    /// `supports_1m_suffix` flag: the suffix names a different window
+    /// on the same model, and the table records it once.
+    ///
+    /// nil for a model the table does not name — a gateway id, a custom
+    /// `ANTHROPIC_MODEL`, a binary too old to carry the table. The chip
+    /// then states the token count and says the window is unknown; it
+    /// never divides by a guess.
+    nonisolated static func contextWindow(forModelId raw: String,
+                                          binary: String) -> Int? {
+        let (base, variant) = ClaudeModelDisplay.splitVariant(raw)
+        guard !base.isEmpty else { return nil }
+        let table = windowTable(at: binary)
+        guard let entry = table[base] else { return nil }
+        if variant.lowercased() == "[1m]" {
+            return entry.supports1MSuffix ? 1_000_000 : entry.window
+        }
+        return entry.window
+    }
+
+    /// Every `first_party` id in the binary's model table, with the
+    /// window recorded beside it.
+    ///
+    /// The table is JS source, so an entry reads
+    /// `first_party:"claude-opus-5",…,context:{window:1e6,native_1m:!0,
+    /// supports_1m_suffix:!0}`. Two things about parsing it:
+    ///
+    /// * **`1e6` is a number.** Reading the digits alone answers 1, and
+    ///   a one-token window turns every percentage into 100%.
+    /// * **The id is found BACKWARD from the window, never forward from
+    ///   the id.** An entry names its predecessor in `fallback_3p`
+    ///   before stating its own window, so scanning forward from an id
+    ///   can land on the NEXT model's window. `first_party` is the only
+    ///   key that names the entry itself.
+    ///
+    /// Streamed in chunks with an overlap and never mapped, the same
+    /// rule and the same reason as `idsNamedByBinary`: claude's updater
+    /// rewrites its versions directory in place, and a mapped page
+    /// under a writer is a SIGBUS. Cached by (path, size, mtime).
+    nonisolated static func windowTable(at path: String) -> [String: WindowEntry] {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let size = (attrs?[.size] as? NSNumber)?.int64Value ?? -1
+        let mtime = (attrs?[.modificationDate] as? Date)?
+            .timeIntervalSince1970 ?? -1
+        let key = "\(path)|\(size)|\(mtime)"
+        windowLock.lock()
+        if let cached = windowCache, cached.key == key {
+            windowLock.unlock()
+            return cached.table
+        }
+        windowLock.unlock()
+
+        var table: [String: WindowEntry] = [:]
+        let needle = Data("context:{window:".utf8)
+        // Enough to reach back over an entry's other keys to its
+        // `first_party`, and forward over the flags to the closing
+        // brace. Measured entries sit well inside this.
+        let lookBehind = 2048
+        let lookAhead = 256
+        if let handle = FileHandle(forReadingAtPath: path) {
+            defer { try? handle.close() }
+            var carry = Data()
+            while true {
+                let chunk = handle.readData(ofLength: 8 * 1024 * 1024)
+                if chunk.isEmpty { break }
+                var window = carry
+                window.append(chunk)
+                var from = window.startIndex
+                while let hit = window.range(of: needle, in: from..<window.endIndex) {
+                    let lo = window.index(hit.lowerBound,
+                                          offsetBy: -min(lookBehind,
+                                                         window.distance(from: window.startIndex,
+                                                                         to: hit.lowerBound)))
+                    let hi = window.index(hit.upperBound,
+                                          offsetBy: min(lookAhead,
+                                                        window.distance(from: hit.upperBound,
+                                                                        to: window.endIndex)))
+                    if let (id, entry) = Self.parseWindowEntry(
+                        String(decoding: window[lo..<hi], as: UTF8.self)) {
+                        table[id] = entry
+                    }
+                    from = hit.upperBound
+                }
+                // Overlap so an entry straddling the boundary is still
+                // read whole on the next pass; a match seen twice
+                // parses to the same pair.
+                let keep = lookBehind + lookAhead + needle.count
+                carry = window.count > keep ? Data(window.suffix(keep)) : window
+            }
+        }
+        windowLock.lock()
+        windowCache = WindowScan(key: key, table: table)
+        windowLock.unlock()
+        return table
+    }
+
+    /// One entry out of a decoded slice ending just past its
+    /// `context:{window:…}`. Returns nil unless BOTH the id and a
+    /// positive window are present — a half-read entry is not a fact.
+    nonisolated private static func parseWindowEntry(_ text: String)
+    -> (String, WindowEntry)? {
+        guard let windowRange = text.range(of: "context:{window:",
+                                           options: .backwards)
+        else { return nil }
+        // Backward to the entry's own id.
+        let head = text[..<windowRange.lowerBound]
+        guard let idKey = head.range(of: "first_party:\"", options: .backwards)
+        else { return nil }
+        let afterKey = head[idKey.upperBound...]
+        guard let quote = afterKey.firstIndex(of: "\"") else { return nil }
+        let id = String(afterKey[..<quote])
+        guard !id.isEmpty else { return nil }
+
+        let tail = text[windowRange.upperBound...]
+        guard let close = tail.firstIndex(of: "}") else { return nil }
+        let body = tail[..<close]
+        var digits = ""
+        var exponent = ""
+        var inExponent = false
+        for ch in body {
+            if ch.isNumber {
+                if inExponent { exponent.append(ch) } else { digits.append(ch) }
+            } else if (ch == "e" || ch == "E"), !digits.isEmpty, !inExponent {
+                inExponent = true
+            } else {
+                break
+            }
+        }
+        // A window is at most a handful of digits; a mantissa or an
+        // exponent past what an Int holds is not a table entry, and a
+        // checked multiply refuses it rather than trapping on it.
+        guard digits.count <= 15, var window = Int(digits), window > 0 else { return nil }
+        if inExponent {
+            guard let exp = Int(exponent), exp >= 0, exp <= 12 else { return nil }
+            for _ in 0..<exp {
+                let (scaled, overflow) = window.multipliedReportingOverflow(by: 10)
+                guard !overflow else { return nil }
+                window = scaled
+            }
+        }
+        return (id, WindowEntry(
+            window: window,
+            native1M: body.contains("native_1m"),
+            supports1MSuffix: body.contains("supports_1m_suffix")))
+    }
+
+    private struct WindowScan {
+        let key: String
+        let table: [String: WindowEntry]
+    }
+    nonisolated private static let windowLock = NSLock()
+    nonisolated(unsafe) private static var windowCache: WindowScan? = nil
+
+    // MARK: Binary scan
+
+    private struct BinaryScan {
+        let key: String
+        var asked: Set<String>
+        var named: Set<String>
+    }
+    nonisolated private static let scanLock = NSLock()
+    nonisolated(unsafe) private static var scanCache: BinaryScan? = nil
+
+    /// Which of `candidates` the executable at `path` names.
+    ///
+    /// Streamed in chunks with an overlap, never mapped: claude's
+    /// updater writes into its versions directory IN PLACE (a version
+    /// file can sit empty for hours while its download completes), and a
+    /// mapped page under a writer is a SIGBUS. Each id is searched followed by
+    /// a quote, as the table spells it — `claude-fable-5` alone would
+    /// match inside `claude-fable-5-1`. A dated id (`…-4-5-20251001`)
+    /// is also tried undated, which is how the table spells those.
+    /// Cached by (path, size, mtime): one read per binary.
+    nonisolated static func idsNamedByBinary(at path: String,
+                                             candidates: [String]) -> Set<String> {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        let size = (attrs?[.size] as? NSNumber)?.int64Value ?? -1
+        let mtime = (attrs?[.modificationDate] as? Date)?
+            .timeIntervalSince1970 ?? -1
+        let key = "\(path)|\(size)|\(mtime)"
+        let asked = Set(candidates)
+        scanLock.lock()
+        if let cached = scanCache, cached.key == key, asked.isSubset(of: cached.asked) {
+            scanLock.unlock()
+            return cached.named.intersection(asked)
+        }
+        scanLock.unlock()
+
+        var probes: [String: [Data]] = [:]
+        var longest = 0
+        for id in asked {
+            var spellings = [id + "\""]
+            let tokens = id.split(separator: "-")
+            if let last = tokens.last, last.count == 8, last.allSatisfy(\.isNumber) {
+                spellings.append(tokens.dropLast().joined(separator: "-") + "\"")
+            }
+            let datas = spellings.map { Data($0.utf8) }
+            probes[id] = datas
+            longest = max(longest, datas.map(\.count).max() ?? 0)
+        }
+        var named: Set<String> = []
+        if let handle = FileHandle(forReadingAtPath: path) {
+            defer { try? handle.close() }
+            var carry = Data()
+            while named.count < asked.count {
+                let chunk = handle.readData(ofLength: 8 * 1024 * 1024)
+                if chunk.isEmpty { break }
+                var window = carry
+                window.append(chunk)
+                for (id, datas) in probes where !named.contains(id) {
+                    if datas.contains(where: { window.range(of: $0) != nil }) {
+                        named.insert(id)
+                    }
+                }
+                carry = window.count > longest ? window.suffix(longest) : window
+            }
+        }
+        scanLock.lock()
+        if let cached = scanCache, cached.key == key {
+            scanCache = BinaryScan(key: key,
+                                   asked: cached.asked.union(asked),
+                                   named: cached.named.union(named))
+        } else {
+            scanCache = BinaryScan(key: key, asked: asked, named: named)
+        }
+        scanLock.unlock()
+        return named
+    }
+
     /// Reads files — call from a detached task, never the MainActor.
     nonisolated static func harvest(sessionURLs: [URL]) -> Harvest {
         var out = Harvest()
@@ -1080,6 +1562,7 @@ enum ClaudeModelCatalog {
                   let family = ClaudeModelDisplay.familyAlias(of: id),
                   !ClaudeModelDisplay.parts(of: id).digits.isEmpty
             else { return }
+            if !out.allIds.contains(id) { out.allIds.append(id) }
             if let known = out.byFamily[family],
                !ClaudeModelDisplay.isNewer(id, than: known) { return }
             out.byFamily[family] = id
@@ -1200,6 +1683,19 @@ struct AgentPermissionMode: Identifiable, Hashable {
     ]
 }
 
+/// One row of the composer's "Other models" section: a full model id
+/// this account has run that is no longer what its family's alias
+/// resolves to, and that the installed claude still names. Sent
+/// verbatim (`--model claude-fable-5`) — claude's help says a full
+/// name is accepted wherever an alias is.
+struct ClaudeOtherModel: Identifiable, Equatable {
+    let fullId: String
+    /// The family alias it sits under ("fable"), for ordering beneath
+    /// that alias's row.
+    let family: String
+    var id: String { fullId }
+}
+
 /// Cached catalogs scraped from `claude --help`, with hardcoded
 /// fallbacks. The scrape runs once per app launch on a background
 /// thread; until it lands (or if it fails) callers see the fallbacks.
@@ -1210,18 +1706,33 @@ final class ClaudeCapabilities: ObservableObject {
     /// Fallback for when claude isn't installed or the help shape
     /// changed. Ordered for display.
     private static let modeFallback = ["bypassPermissions", "acceptEdits", "plan", "manual"]
-    // Deliberately NOT offering "ultracode" even though `--effort
-    // ultracode` parses without a warning: a headless run records
-    // `effort: "xhigh"` — a downgrade from max — and no ultracode
-    // orchestration reminder appears in `-p` mode (neither via the
-    // flag nor the prompt keyword). Ultracode is an interactive-TUI
-    // feature; offering it here would silently mean "xhigh".
+    // Deliberately NOT offering "ultracode". Claude defines it as
+    // "xhigh + dynamic workflow orchestration, this session only", and
+    // under `-p` only the xhigh half is provable: requested through
+    // the flag-settings layer (`{"ultracode":true}`) a headless run
+    // records `effort: "xhigh"` and nothing confirms the orchestration
+    // opt-in — no reminder, no field on init or result. `/effort
+    // ultracode` is accepted headlessly and claims to set it for the
+    // session; whether later resumed turns then orchestrate is
+    // unmeasured. Offering a row would label xhigh with a promise
+    // nobody has measured. `--help` does not list it either.
     private static let effortFallback = ["low", "medium", "high", "xhigh", "max"]
     private static let modelAliasFallback = ["fable", "opus", "sonnet", "haiku"]
 
     @Published private(set) var permissionModes: [AgentPermissionMode]
     @Published private(set) var effortLevels: [String]
     @Published private(set) var modelAliases: [String]
+
+    /// The composer's "Other models" section: per family, the previous
+    /// version this Mac has actually run that the installed claude
+    /// still names. Computed by `ClaudeModelCatalog.refreshOtherModels`
+    /// after each harvest; empty until then, and empty on a machine
+    /// that has only ever run the newest of every family.
+    @Published private(set) var otherModels: [ClaudeOtherModel] = []
+
+    func setOtherModels(_ models: [ClaudeOtherModel]) {
+        if otherModels != models { otherModels = models }
+    }
 
     private var scrapeStarted = false
 
@@ -1257,6 +1768,24 @@ final class ClaudeCapabilities: ObservableObject {
                 if !merged.isEmpty { self.modelAliases = merged }
             }
         }
+    }
+
+    /// Re-run the scrape because the BINARY moved.
+    ///
+    /// The one-shot latch above is a per-launch cache of what one
+    /// binary said, so it is correct only while that binary is the one
+    /// on disk. An update replaces it with one that may name different
+    /// permission modes, effort levels and model aliases — and until
+    /// this re-runs, every composer chip describes the binary that was
+    /// just replaced, with nothing on screen admitting it and no way
+    /// out but a relaunch.
+    ///
+    /// Only the update path calls this. The wider problem — these
+    /// catalogs latching over files that move for other reasons too —
+    /// is a fingerprint away and tracked separately.
+    func reloadAfterBinaryChange() {
+        scrapeStarted = false
+        ensureLoaded()
     }
 
     // MARK: - Scraping (`--help` parsers)
@@ -1357,6 +1886,16 @@ final class ClaudeCapabilities: ObservableObject {
 }
 
 
+/// The faster service tier a codex model advertises, as its catalog
+/// entry spells it: the id `-c service_tier=` takes, and the name and
+/// description codex shows for it ("Fast", "1.5x speed, increased
+/// usage" on the measured catalog).
+struct CodexServiceTier: Hashable {
+    let id: String
+    let name: String
+    let description: String
+}
+
 /// One codex model as codex itself describes it.
 struct CodexModel: Identifiable, Hashable {
     let slug: String
@@ -1366,6 +1905,18 @@ struct CodexModel: Identifiable, Hashable {
     /// Reasoning levels this model accepts, in codex's own order
     /// (fast → deep). Empty when unknown.
     let efforts: [String]
+    /// `service_tiers[0]` of the entry, or nil when it lists none
+    /// (`gpt-5.4-mini` and `gpt-5.3-codex-spark` on the measured
+    /// catalog) — the composer then offers no fast switch for it.
+    var fastTier: CodexServiceTier? = nil
+    /// The EFFECTIVE context window: the catalog's `context_window`
+    /// scaled by its `effective_context_window_percent`, which is the
+    /// number codex itself enforces and records on the rollout
+    /// (272,000 × 95 % = 258,400, equal to `model_context_window` to
+    /// the token). nil when the entry states none — the composer then
+    /// falls back to the window the rollout recorded, and states no
+    /// percentage if there is none.
+    var contextWindow: Int? = nil
 
     var id: String { slug }
 }
@@ -1417,7 +1968,14 @@ final class CodexCatalog: ObservableObject {
     /// chip shows in place of a bare "Model".
     @Published private(set) var defaultModel: String? = nil
 
-    private var loadStarted = false
+    /// Fingerprint of the two files the harvest reads, as of the lists
+    /// on screen; nil until the first load. See `ensureLoaded`.
+    private var loadedFingerprint: String? = nil
+    private var loading = false
+    /// When codex was last asked to bring its own catalog up to date —
+    /// see `refreshFromCodex`.
+    private var lastRefreshAt: Date? = nil
+    private var refreshing = false
 
     private init() {}
 
@@ -1442,31 +2000,143 @@ final class CodexCatalog: ObservableObject {
         return allEfforts
     }
 
-    /// One-shot load. Safe to call from every composer appearance.
+    /// The faster service tier for a model, resolved the way
+    /// `effortLevels(forModel:)` resolves: the selected model, else the
+    /// configured default. nil when neither advertises one — including
+    /// a model the catalog does not know, since a guessed tier is
+    /// refused by codex per request.
+    func fastTier(forModel slug: String?) -> CodexServiceTier? {
+        if let slug, !slug.isEmpty {
+            return models.first { $0.slug == slug }?.fastTier
+        }
+        guard let fallback = defaultModel else { return nil }
+        return models.first { $0.slug == fallback }?.fastTier
+    }
+
+    /// The context window for a model, resolved the way
+    /// `fastTier(forModel:)` resolves: the selected model, else the
+    /// configured default. nil for a model the catalog does not know —
+    /// the rollout's own `model_context_window` covers that case, and
+    /// a guessed window would misstate every percentage drawn over it.
+    func contextWindow(forModel slug: String?) -> Int? {
+        if let slug, !slug.isEmpty {
+            return models.first { $0.slug == slug }?.contextWindow
+        }
+        guard let fallback = defaultModel else { return nil }
+        return models.first { $0.slug == fallback }?.contextWindow
+    }
+
+    /// Load, and RE-load whenever `models_cache.json` or `config.toml`
+    /// has changed since the lists were built — the same fingerprint
+    /// rule as `KimiCatalog`, for a codex-shaped reason: the cache is
+    /// rewritten by codex ITSELF whenever it runs with a stale one (a
+    /// newer client version, an expired entry), so a one-shot snapshot
+    /// describes the catalog as it stood before the user's next codex
+    /// turn, and a model OpenAI shipped that morning shows only after a
+    /// relaunch. Safe to call from every composer appearance — the
+    /// check is two stats.
     func ensureLoaded() {
-        guard !loadStarted else { return }
-        loadStarted = true
-        Task.detached(priority: .utility) {
-            let found = Self.harvest()
-            await MainActor.run {
-                if !found.models.isEmpty { self.models = found.models }
-                if !found.efforts.isEmpty { self.allEfforts = found.efforts }
-                self.defaultModel = found.defaultModel
+        let fingerprint = Self.sourcesFingerprint()
+        if !loading, fingerprint != loadedFingerprint {
+            loading = true
+            Task.detached(priority: .utility) {
+                let found = Self.harvest()
+                await MainActor.run {
+                    if !found.models.isEmpty { self.models = found.models }
+                    if !found.efforts.isEmpty { self.allEfforts = found.efforts }
+                    self.defaultModel = found.defaultModel
+                    // Stamped with the fingerprint READ BEFORE the
+                    // harvest: a file rewritten mid-harvest must leave
+                    // the two disagreeing, so the next appearance
+                    // re-reads rather than trusting a list built from
+                    // a file that has already moved on.
+                    self.loadedFingerprint = fingerprint
+                    self.loading = false
+                }
             }
         }
+        refreshFromCodex(force: false)
+    }
+
+    /// Re-run the load because the BINARY moved. Same reason as
+    /// `ClaudeCapabilities.reloadAfterBinaryChange`: a codex update
+    /// brings a catalog the old client was not shown, and the picker
+    /// must not keep describing the binary that was replaced. A re-read
+    /// alone would find the OLD cache — codex keys that file by client
+    /// version and rewrites it only when it next runs — so the new
+    /// binary is asked for its list first.
+    func reloadAfterBinaryChange() {
+        loadedFingerprint = nil
+        refreshFromCodex(force: true)
+        ensureLoaded()
+    }
+
+    /// How long one refresh through codex stands before a composer
+    /// appearance asks again. Codex keeps its own cache TTL and answers
+    /// from the file while that has not expired (measured: an answer in
+    /// tens of milliseconds and no write), so this bounds process
+    /// spawns, not network fetches.
+    private static let refreshInterval: TimeInterval = 24 * 60 * 60
+
+    /// Ask codex to bring its own model list up to date, then re-read.
+    ///
+    /// `codex app-server` answers `model/list` the way the TUI's picker
+    /// is filled at bootstrap: from `models_cache.json` while that is
+    /// current for the running client, from the server otherwise — and
+    /// a server answer is written back to the file, which the
+    /// fingerprint above then notices. No model is called and nothing
+    /// is billed. Without this, a model the server lists only for a
+    /// NEWER client stays invisible after an update until the user's
+    /// next codex turn happens to refetch it, and one switched on
+    /// server-side stays invisible until then as well.
+    ///
+    /// Forced after an update; otherwise at most once per
+    /// `refreshInterval` per launch, from the composer's own
+    /// appearance. A codex that is missing, signed out or offline
+    /// answers nothing, and the cache stays as it was.
+    func refreshFromCodex(force: Bool) {
+        guard !refreshing,
+              let binary = AgentManager.binaryPath(for: "codex") else { return }
+        if !force, let last = lastRefreshAt,
+           Date().timeIntervalSince(last) < Self.refreshInterval { return }
+        refreshing = true
+        lastRefreshAt = Date()
+        Task.detached(priority: .utility) {
+            _ = await CodexModelListRefresh.run(binary: binary)
+            await MainActor.run {
+                self.refreshing = false
+                self.ensureLoaded()
+            }
+        }
+    }
+
+    /// Change-detector over the two files the harvest reads. A missing
+    /// file has its own stable fingerprint, so "not there yet" costs
+    /// two stats per composer appearance and turns into a real load
+    /// the moment codex writes it.
+    nonisolated private static func sourcesFingerprint() -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [".codex/models_cache.json", ".codex/config.toml"].map { rel -> String in
+            let path = home.appendingPathComponent(rel).path
+            let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+            let size = (attrs?[.size] as? NSNumber)?.int64Value ?? -1
+            let mtime = (attrs?[.modificationDate] as? Date)?
+                .timeIntervalSince1970 ?? -1
+            return "\(size)/\(mtime)"
+        }.joined(separator: "|")
     }
 
     // MARK: - Harvest
 
     nonisolated private static func harvest()
     -> (models: [CodexModel], efforts: [String], defaultModel: String?) {
-        let cache = readModelsCache()
+        let config = readConfigDefaults()
+        let cache = readModelsCache(contextWindowOverride: config.contextWindow)
         var models = cache.visible
         var efforts = models.flatMap(\.efforts).reduce(into: [String]()) {
             if !$0.contains($1) { $0.append($1) }
         }
 
-        let config = readConfigDefaults()
         // Anything the machine has actually RUN but the cache doesn't
         // list — a model newer than the last catalog fetch. Appended
         // with no effort list of its own, so it falls back to the union.
@@ -1525,7 +2195,7 @@ final class CodexCatalog: ObservableObject {
     /// not to show, which beats a deny-list of ours going stale — but
     /// the hidden SLUGS have to come back too, so the observation path
     /// can honour the same flag.
-    nonisolated private static func readModelsCache()
+    nonisolated private static func readModelsCache(contextWindowOverride: Int?)
     -> (visible: [CodexModel], hidden: Set<String>) {
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/models_cache.json")
@@ -1554,23 +2224,64 @@ final class CodexCatalog: ObservableObject {
                     efforts.append(effort)
                 }
             }
+            var tier: CodexServiceTier? = nil
+            if let tiers = entry["service_tiers"] as? [Any],
+               let first = tiers.first as? [String: Any],
+               let tierId = first["id"] as? String, !tierId.isEmpty {
+                tier = CodexServiceTier(
+                    id: tierId,
+                    name: (first["name"] as? String)
+                        .flatMap { $0.isEmpty ? nil : $0 } ?? tierId,
+                    description: (first["description"] as? String) ?? "")
+            }
+            // Effective, not raw: the percentage is what codex leaves
+            // usable, and dividing by the raw window would understate
+            // occupancy on every codex session.
+            //
+            // `context_window` is the window a session runs with by
+            // DEFAULT; `max_context_window` is how far the user's own
+            // `model_context_window` may raise it. Measured on codex: a
+            // 272,000 / 872,000 model configured to 872,000 records
+            // 828,400 on its rollouts, and configured to 1,000,000
+            // records the same 828,400 — the override is clamped to the
+            // maximum and the percentage applies to the result. The
+            // chip must divide by what codex enforces, which is this
+            // arithmetic, not the raw default.
+            var window: Int? = nil
+            let raw = (entry["context_window"] as? NSNumber)?.intValue ?? 0
+            let cap = (entry["max_context_window"] as? NSNumber)?.intValue ?? 0
+            var base = raw
+            if let override = contextWindowOverride, override > 0 {
+                base = cap > 0 ? min(override, cap) : override
+            }
+            if base > 0 {
+                if let pct = (entry["effective_context_window_percent"]
+                                as? NSNumber)?.doubleValue, pct > 0, pct <= 100 {
+                    window = Int((Double(base) * pct / 100).rounded())
+                } else {
+                    window = base
+                }
+            }
             out.append(CodexModel(slug: slug, displayName: name,
-                                  priority: priority, efforts: efforts))
+                                  priority: priority, efforts: efforts,
+                                  fastTier: tier, contextWindow: window))
         }
         return (out, hidden)
     }
 
-    /// Top-level `model` / `model_reasoning_effort` from config.toml.
-    /// Parsing stops at the first `[section]` header — the file also
-    /// carries `[marketplaces.*]` and `[plugins.*]` tables whose keys
-    /// are not the user's model choice.
+    /// Top-level `model` / `model_reasoning_effort` /
+    /// `model_context_window` from config.toml. Parsing stops at the
+    /// first `[section]` header — the file also carries
+    /// `[marketplaces.*]` and `[plugins.*]` tables whose keys are not
+    /// the user's model choice.
     nonisolated private static func readConfigDefaults()
-    -> (model: String?, effort: String?) {
+    -> (model: String?, effort: String?, contextWindow: Int?) {
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/config.toml")
-        guard let data = try? Data(contentsOf: url) else { return (nil, nil) }
+        guard let data = try? Data(contentsOf: url) else { return (nil, nil, nil) }
         var model: String? = nil
         var effort: String? = nil
+        var contextWindow: Int? = nil
         for rawLine in String(decoding: data, as: UTF8.self)
             .components(separatedBy: .newlines) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
@@ -1582,8 +2293,14 @@ final class CodexCatalog: ObservableObject {
                effort == nil {
                 effort = value
             }
+            // The user's own window override, which codex clamps to the
+            // model's maximum — see `readModelsCache`.
+            if let value = TomlScalar.integer(line, key: "model_context_window"),
+               contextWindow == nil {
+                contextWindow = value
+            }
         }
-        return (model, effort)
+        return (model, effort, contextWindow)
     }
 
     nonisolated private static func newestRollouts(limit: Int) -> [URL] {

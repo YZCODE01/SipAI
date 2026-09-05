@@ -269,6 +269,17 @@
         }
       }
     },
+    "%@ has a new version available (%@). Update it in Settings → Updates." : {
+      "comment" : "Banner: an agent's command-line tool is out of date; placeholders are the agent's label and a version number",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 有新版本可用（%@）。请在「设置 → 更新」中更新。"
+          }
+        }
+      }
+    },
     "%@ has no text layer, and %@ cannot read PDFs directly. Use a Claude model or an OpenAI Responses model, or attach the pages as images." : {
       "comment" : "Error when a scanned PDF is sent to a provider that takes no native PDF",
       "localizations" : {
@@ -458,7 +469,7 @@
       }
     },
     "%@ tokens" : {
-      "comment" : "Composer token counter, e.g. '370k tokens'",
+      "comment" : "Composer context chip when no window is known",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -994,6 +1005,17 @@
         }
       }
     },
+    "Applies to Opus models" : {
+      "comment" : "Model menu switch subtitle: claude's fast mode is Opus-only",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "适用于 Opus 模型"
+          }
+        }
+      }
+    },
     "Applies to the sidebar and chat/agent content. Bigger tiers also widen line spacing; Large text mode doubles it." : {
       "comment" : "Settings: font size help text",
       "localizations" : {
@@ -1181,12 +1203,23 @@
       }
     },
     "Cancel" : {
-      "comment" : "Button that abandons a message edit without branching\nCancel button\nCancel the provider removal\nDismiss the chat delete confirmation\nDismiss the chat-group delete confirmation\nDismiss the delete-group confirmation\nDismiss the factory reset confirmation\nDismiss the group name dialog\nDismiss the model delete confirmation\nDismiss the new-group dialog\nDismiss the scheduled-task delete confirmation\nDismiss the session delete confirmation\nScheduled-task editor button\nTagline editor button",
+      "comment" : "Button that abandons a message edit without branching\nCancel button\nCancel the provider removal\nDismiss the chat delete confirmation\nDismiss the chat-group delete confirmation\nDismiss the delete-group confirmation\nDismiss the factory reset confirmation\nDismiss the group name dialog\nDismiss the model delete confirmation\nDismiss the new-group dialog\nDismiss the scheduled-task delete confirmation\nDismiss the session delete confirmation\nScheduled-task editor button\nTagline editor button\nUpdates pane: stop the running CLI updater",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "取消"
+          }
+        }
+      }
+    },
+    "Cancelling…" : {
+      "comment" : "Updates pane: the CLI's updater has been asked to stop and is winding down",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在取消…"
           }
         }
       }
@@ -1369,6 +1402,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "自动检查更新"
+          }
+        }
+      }
+    },
+    "Check these tools for new versions automatically" : {
+      "comment" : "Updates pane: toggle the periodic agent CLI release check",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自动检查这些工具的新版本"
           }
         }
       }
@@ -1581,6 +1625,28 @@
         }
       }
     },
+    "Command-line tools" : {
+      "comment" : "Updates pane: header for the agent CLI version rows",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "命令行工具"
+          }
+        }
+      }
+    },
+    "Compacting context…" : {
+      "comment" : "Shown while the agent summarises the conversation to free context",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在压缩上下文…"
+          }
+        }
+      }
+    },
     "Complete the endpoint above before continuing." : {
       "comment" : "Model setup: URL-completion field empty or unusable at save time",
       "localizations" : {
@@ -1602,36 +1668,30 @@
         }
       }
     },
-    "Context usage — grows as the session runs" : {
-      "comment" : "Tooltip for the context token counter when empty",
+    "Context now %@ of %@ tokens" : {
+      "comment" : "Hover on the composer context chip",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "上下文用量——随会话进行而增加"
+            "value" : "当前上下文：%@ / %@ tokens"
           }
         }
       }
     },
-    "Context used: %@ of %@ tokens (%lld%%)" : {
-      "comment" : "Tooltip for the context token counter",
+    "Context now %@ tokens (window not yet known)" : {
+      "comment" : "Hover on the composer context chip when no window is known",
       "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "Context used: %1$@ of %2$@ tokens (%3$lld%%)"
-          }
-        },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "已用上下文：%@ / %@ tokens（%lld%%）"
+            "value" : "当前上下文：%@ tokens（尚未获知上下文窗口大小）"
           }
         }
       }
     },
     "Context window %lld percent used" : {
-      "comment" : "Accessibility label for the context token counter",
+      "comment" : "Accessibility label for the context usage chip",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1648,6 +1708,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "继续"
+          }
+        }
+      }
+    },
+    "Conversation compacted" : {
+      "comment" : "Transcript row after the agent summarised the conversation",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "对话已压缩"
+          }
+        }
+      }
+    },
+    "Conversation compacted (%@ → %@ tokens)" : {
+      "comment" : "Transcript row after the agent summarised the conversation, with before and after sizes",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "对话已压缩（%@ → %@ tokens）"
           }
         }
       }
@@ -2200,6 +2282,17 @@
         }
       }
     },
+    "Details" : {
+      "comment" : "Updates pane: show the updater's own output",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "详情"
+          }
+        }
+      }
+    },
     "Direct note" : {
       "comment" : "Note options row — generate the note immediately",
       "localizations" : {
@@ -2212,7 +2305,7 @@
       }
     },
     "Dismiss" : {
-      "comment" : "Dismiss error banner\nDismiss info banner",
+      "comment" : "Tooltip",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -2323,13 +2416,13 @@
         }
       }
     },
-    "Each provider has their dashboard to help users track their API credit usage. Please check your account dashboard for more information. SipAI also shows the total token consumption inside each agent session." : {
+    "Each provider has their dashboard to help users track their API credit usage. Please check your account dashboard for more information. SipAI also shows how full each agent session's context window is, in the chip under the composer." : {
       "comment" : "FAQ answer: tracking usage",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "每家提供商都提供控制台，帮助用户追踪 API 额度用量。更多信息请查看你的账号控制台。SipAI 也会在每个智能体会话中显示 token 总消耗量。"
+            "value" : "每家提供商都提供控制台，帮助用户追踪 API 额度用量。更多信息请查看你的账号控制台。SipAI 也会在每个智能体会话的输入框下方显示上下文窗口的使用比例。"
           }
         }
       }
@@ -2696,6 +2789,61 @@
         }
       }
     },
+    "Fast mode" : {
+      "comment" : "Model menu switch: the agent's faster inference mode",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快速模式"
+          }
+        }
+      }
+    },
+    "Fast mode is cooling down after a rate limit" : {
+      "comment" : "Model chip hover: claude reported fast mode paused after a rate limit",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快速模式因触发速率限制而暂时冷却"
+          }
+        }
+      }
+    },
+    "Fast mode is off" : {
+      "comment" : "Model chip hover: claude reported fast mode inactive",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快速模式已关闭"
+          }
+        }
+      }
+    },
+    "Fast mode is on" : {
+      "comment" : "Model chip hover: claude reported fast mode active",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "快速模式已开启"
+          }
+        }
+      }
+    },
+    "Fast mode requested" : {
+      "comment" : "Model chip hover: the switch is on and the agent has not yet reported a state",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已请求快速模式"
+          }
+        }
+      }
+    },
     "fast, cheap" : {
       "comment" : "Image model descriptor: fastest and least expensive",
       "localizations" : {
@@ -2779,6 +2927,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "完成"
+          }
+        }
+      }
+    },
+    "Finish the running turn before updating this tool." : {
+      "comment" : "Updates pane: why the Update button is disabled",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请先等待当前轮次结束，再更新此工具。"
           }
         }
       }
@@ -3105,6 +3264,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已中断——这一回合在完成前被停止。"
+          }
+        }
+      }
+    },
+    "It will appear in the “%@” group." : {
+      "comment" : "Draft empty-state line naming the custom group the new session will be filed into; placeholder is the group name",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "它将出现在“%@”分组中。"
           }
         }
       }
@@ -3676,12 +3846,23 @@
       }
     },
     "New session in %@" : {
-      "comment" : "Tooltip and accessibility label for the + on a folder group header",
+      "comment" : "Tooltip and accessibility label for the + on a folder or custom group header",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "在 %@ 中新建任务"
+          }
+        }
+      }
+    },
+    "New version %@" : {
+      "comment" : "Updates pane: a newer CLI release exists; placeholder is a version number",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新版本 %@"
           }
         }
       }
@@ -4034,6 +4215,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "不是有效的 5 字段 cron 表达式（分 时 日 月 周）。"
+          }
+        }
+      }
+    },
+    "Not offered for this model" : {
+      "comment" : "Model menu switch subtitle: the selected model has no fast mode",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此模型不提供"
           }
         }
       }
@@ -4391,6 +4583,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "其他"
+          }
+        }
+      }
+    },
+    "Other models" : {
+      "comment" : "Model menu section header: previous model versions the CLI still offers",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "其他模型"
           }
         }
       }
@@ -5628,6 +5831,16 @@
         }
       }
     },
+    "Show context usage" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示上下文用量"
+          }
+        }
+      }
+    },
     "Show earlier — %lld older messages" : {
       "comment" : "Button above a truncated chat; placeholder is the hidden message count",
       "localizations" : {
@@ -5726,17 +5939,6 @@
         }
       }
     },
-    "Show token count" : {
-      "comment" : "Settings: token counter group label (no toggle of its own)",
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "显示 token 计数"
-          }
-        }
-      }
-    },
     "Showing the first %lld — narrow the search for more." : {
       "comment" : "Global search notice when the result list is capped",
       "localizations" : {
@@ -5755,6 +5957,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "侧边栏"
+          }
+        }
+      }
+    },
+    "SipAI asks each tool's own release endpoint — the npm registry, or the vendor's version file — every few hours whether a newer version exists. Nothing about you or your machine is sent. A tool is updated only by running its own update command, or, where that command declines and names the vendor's installer instead, by running that installer pinned to the version shown." : {
+      "comment" : "Updates pane: what the CLI version check does",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SipAI 会每隔几小时向每个工具自己的发布接口（npm 仓库，或厂商的版本文件）查询是否有更新的版本。不会发送任何关于你或你的电脑的信息。更新工具时只会运行该工具自带的更新命令；若该命令拒绝更新并指向厂商的安装脚本，则运行该安装脚本，并固定为所显示的版本。"
           }
         }
       }
@@ -6075,6 +6288,28 @@
         }
       }
     },
+    "The installer could not be downloaded from %@." : {
+      "comment" : "Updates pane detail: the vendor's installer script did not download; placeholder is its URL",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法从 %@ 下载安装程序。"
+          }
+        }
+      }
+    },
+    "The installer could not be staged on disk." : {
+      "comment" : "Updates pane detail: the downloaded installer script could not be written to a temporary folder",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法将安装程序写入磁盘。"
+          }
+        }
+      }
+    },
     "The new name is saved here, but writing it into %@ failed: %@" : {
       "comment" : "Body of the rename-failure alert — agent label, then the underlying reason",
       "localizations" : {
@@ -6203,6 +6438,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "这一回合仍在运行，但已经有 3 分钟没有任何返回。这可能没有问题；但如果持续太久，就可能是网络线路被拦截或配置有误——出现这种情况时看起来正是如此，因为智能体会静默重试：智能体 CLI 只读取 HTTP_PROXY 和 HTTPS_PROXY 环境变量，并不会理会 macOS 的系统代理设置。"
+          }
+        }
+      }
+    },
+    "The updater printed nothing and did not exit cleanly." : {
+      "comment" : "Updates pane detail: the CLI's updater produced no output, was stopped or could not be started, and the installed version did not change",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新程序没有输出任何内容，且未正常退出。"
+          }
+        }
+      }
+    },
+    "The updater printed nothing and exited with code %lld." : {
+      "comment" : "Updates pane detail: the CLI's updater produced no output and the installed version did not change; placeholder is the exit code",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新程序没有输出任何内容，并以代码 %lld 退出。"
           }
         }
       }
@@ -6453,6 +6710,39 @@
         }
       }
     },
+    "Up to date" : {
+      "comment" : "Updates pane: the installed CLI matches the latest release",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已是最新"
+          }
+        }
+      }
+    },
+    "Update" : {
+      "comment" : "Updates pane: run the CLI's own update command",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新"
+          }
+        }
+      }
+    },
+    "Update did not complete" : {
+      "comment" : "Updates pane: the updater ran and the installed version did not change",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新未完成"
+          }
+        }
+      }
+    },
     "Updates" : {
       "comment" : "Settings pane header",
       "localizations" : {
@@ -6460,6 +6750,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "更新"
+          }
+        }
+      }
+    },
+    "Updating…" : {
+      "comment" : "Updates pane: the CLI's own updater is running",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在更新…"
           }
         }
       }

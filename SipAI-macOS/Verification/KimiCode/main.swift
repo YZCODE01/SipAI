@@ -223,7 +223,7 @@ if let alpha = byId["sess-alpha"] {
         case .toolUse(_, let name, let input):
             tools.append((name, (input["command"] as? String) ?? ""))
         case .toolResult(let id, let c, let e): results.append((id, c, e))
-        case .interrupted: break
+        case .interrupted, .compaction: break
         }
     }
     check("the request trace is NOT replayed as conversation",
@@ -548,11 +548,14 @@ check("the derived title comes from the real prompt, not the reminder",
       KimiSessionScanner.scan().first { $0.id == "session_real" }?
         .title.contains("Create a file") == true)
 
-// The token chip. Reading `inputOther` alone would under-report by the
-// whole cached prefix; reading a record NOT scoped to a turn is how
-// claude got "14242k tokens" and codex got "19741k".
-check("context tokens sum the four usage fields",
-      KimiSessionScanner.lastContextTokens(of: realWire) == 2045 + 18944 + 42,
+// The context chip. Reading `inputOther` alone would under-report by
+// the whole cached prefix; reading a record NOT scoped to a turn is how
+// claude got "14242k tokens" and codex got "19741k". The call's own
+// OUTPUT is excluded on purpose — kimi's own status bar divides the
+// input side by the model's window, and this chip has to agree with the
+// terminal a user can hold beside it.
+check("context tokens sum the three INPUT fields, not the output",
+      KimiSessionScanner.lastContextTokens(of: realWire) == 2045 + 18944,
       "\(KimiSessionScanner.lastContextTokens(of: realWire))")
 // The record's `model` string IS the config alias — the join that
 // lets the occupancy tooltip divide by that entry's

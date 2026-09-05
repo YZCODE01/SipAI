@@ -32,6 +32,24 @@ enum ShellEnvironment {
         return nil
     }
 
+    /// `resolve`, but never blocking: the process environment first,
+    /// then the login shell's capture ONLY if it is already in hand.
+    /// For readers on the MainActor that must not wait out a shell
+    /// startup — the composer reads `ANTHROPIC_MODEL` through this on
+    /// every appearance. Answers nil while the capture is pending;
+    /// `warmUp()` at launch keeps that window to the app's first
+    /// seconds.
+    static func resolveIfCaptured(_ name: String) -> String? {
+        let n = name.trimmingCharacters(in: .whitespaces)
+        guard !n.isEmpty else { return nil }
+        if let v = ProcessInfo.processInfo.environment[n], !v.isEmpty { return v }
+        condition.lock()
+        let captured = cache
+        condition.unlock()
+        if let v = captured?[n], !v.isEmpty { return v }
+        return nil
+    }
+
     /// The login shell's own `PATH`, split into directories. Empty
     /// until the capture lands, and it NEVER waits for one — agent
     /// detection reads this from the MainActor every few seconds, and
