@@ -11,4 +11,5 @@ import SwiftUI
 enum ChatDesign {
     static let blue = Color(red: 37/255, green: 99/255, blue: 235/255)
     static let textPrimary = Color.primary
+    static let textSecondary = Color.secondary
 }

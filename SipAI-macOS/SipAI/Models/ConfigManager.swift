@@ -51,10 +51,11 @@ struct DisplaySettings {
     var showNotePrompt: Bool = true
     /// Agent sessions only — chat sessions no longer have a counter.
     var showTokenAgent: Bool = true
-    /// The sidebar's brand lockup (mark + "SipAI" wordmark). On by
-    /// default; off gives the sections column the ~76 pt the lockup
-    /// occupies, which matters most on short windows.
-    var showSidebarBrand: Bool = true
+    /// A short line in the wordmark's place when an update has happened
+    /// (`UpdateAnnouncer`). On by default. The lockup it takes the place
+    /// of is always drawn — it is not a setting — so there is always
+    /// somewhere to say it.
+    var showUpdateMessages: Bool = true
     var spellCheck: Bool = true
     // This struct models the display keys the app READS; it is not the
     // whole `display` dict. `setDisplay` merges into the stored dict
@@ -166,9 +167,57 @@ final class ConfigManager: ObservableObject {
     /// at the next launch. See `AppLanguage`.
     @Published private(set) var appLanguage: AppLanguage = .effective
 
-    /// True if the user has been through setup at least once (has seen_agents or providers).
+    /// True once the user has been through first-run setup.
+    ///
+    /// The explicit `onboarding_completed` key is written by the welcome
+    /// page's Get started; the two derived clauses stay for installs
+    /// that finished the old wizard before the key existed (a provider
+    /// or a seen agent was the only trace it left) so an upgrade never
+    /// shows the welcome page a second time. config.json rather than
+    /// UserDefaults on purpose: a factory reset wipes this file and
+    /// promises first-run setup, and deleting the data folder by hand
+    /// should read as a fresh install. The CLI ignores the key.
     var hasCompletedSetup: Bool {
-        !seenAgents.isEmpty || !providers.isEmpty
+        onboardingCompleted || !seenAgents.isEmpty || !providers.isEmpty
+    }
+
+    @Published private(set) var onboardingCompleted: Bool = false
+
+    /// The one onboarding gate — ContentView's welcome-page switch and
+    /// the window's minimum size both read it, so the two cannot
+    /// disagree about whether the welcome page is up.
+    var needsOnboarding: Bool {
+        models.isEmpty && !hasCompletedSetup
+    }
+
+    /// Get started was clicked. Records the fact, and marks every CLI
+    /// this Mac has as seen so the command-line app's "agent detected"
+    /// nudge does not repeat — one save for both keys.
+    func completeOnboarding(installedAgents keys: [String]) {
+        raw["onboarding_completed"] = true
+        var seen = (raw["seen_agents"] as? [String]) ?? []
+        for k in keys where !seen.contains(k) { seen.append(k) }
+        raw["seen_agents"] = seen
+        saveRaw(); rebuildDerived()
+    }
+
+    /// Agents the user unticked in Settings → Agent Guide: installed
+    /// and signed in, but shown nowhere and asked nothing. Written ONLY
+    /// through `AgentManager.setHidden(_:for:)`, which recomputes
+    /// presence in the same call; the setter here is the storage.
+    var hiddenAgents: [String] {
+        (raw["hidden_agents"] as? [String]) ?? []
+    }
+
+    func setHiddenAgents(_ keys: [String]) {
+        // Sorted for a stable file; the manager hands in registry keys.
+        let ordered = Array(Set(keys)).sorted()
+        if ordered.isEmpty {
+            raw.removeValue(forKey: "hidden_agents")
+        } else {
+            raw["hidden_agents"] = ordered
+        }
+        saveRaw()
     }
 
     /// True if at least one chat model is configured with a resolvable default.
@@ -309,6 +358,7 @@ final class ConfigManager: ObservableObject {
         defaultModel = raw["default_model"] as? String
         noteModel = raw["note_model"] as? String
         dedicatedFolder = raw["dedicated_folder"] as? String
+        rebuildUnread()
 
         providers = (raw["providers"] as? [String: [String: Any]] ?? [:]).map { (key, dict) in
             ProviderConfig(
@@ -365,7 +415,7 @@ final class ConfigManager: ObservableObject {
         s.showNoteAgent = d["note_agent"] as? Bool ?? legacyNote ?? true
         s.showNotePrompt = d["note_prompt"] as? Bool ?? true
         s.showTokenAgent = d["token_agent"] as? Bool ?? legacyToken ?? true
-        s.showSidebarBrand = d["sidebar_brand"] as? Bool ?? true
+        s.showUpdateMessages = d["update_messages"] as? Bool ?? true
         s.spellCheck = d["spell_check"] as? Bool ?? true
         // A stored value that is only some language's default is not a
         // choice — leave `userLabel` on the localized default.
@@ -386,6 +436,7 @@ final class ConfigManager: ObservableObject {
         display = s
 
         seenAgents = (raw["seen_agents"] as? [String]) ?? []
+        onboardingCompleted = (raw["onboarding_completed"] as? Bool) ?? false
 
         if let s = raw["theme"] as? String, let t = AppTheme(rawValue: s) {
             appTheme = t
@@ -455,7 +506,10 @@ final class ConfigManager: ObservableObject {
         d["note_agent"] = s.showNoteAgent
         d["note_prompt"] = s.showNotePrompt
         d["token_agent"] = s.showTokenAgent
-        d["sidebar_brand"] = s.showSidebarBrand
+        // Retired with the switch that hid the sidebar's logo and name:
+        // the lockup is always drawn now, so the key converges away.
+        d.removeValue(forKey: "sidebar_brand")
+        d["update_messages"] = s.showUpdateMessages
         d["spell_check"] = s.spellCheck
         // `d` starts from the stored dict, so any key this app does not
         // model passes through this save untouched — which is the point.
@@ -697,7 +751,9 @@ final class ConfigManager: ObservableObject {
             permissionMode: field("mode"),
             model: field("model"),
             effort: field("effort"),
-            fastMode: prefs["fast_mode"] == "1"
+            fastMode: prefs["fast_mode"] == "1",
+            serviceTier: field("service_tier"),
+            chatOnly: prefs["chat_only"] == "1"
         )
     }
 
@@ -711,6 +767,11 @@ final class ConfigManager: ObservableObject {
         if let model = options.model, !model.isEmpty { prefs["model"] = model }
         if let effort = options.effort, !effort.isEmpty { prefs["effort"] = effort }
         if options.fastMode { prefs["fast_mode"] = "1" }
+        // Codex's speed pick; absent = follow codex's own default.
+        if let tier = options.serviceTier, !tier.isEmpty { prefs["service_tier"] = tier }
+        // Its own key, never a `mode` value — see `AgentLaunchOptions
+        // .chatOnly` for why the two must stay apart.
+        if options.chatOnly { prefs["chat_only"] = "1" }
         entry["launch_prefs"] = prefs
         agents[agentKey] = entry
         raw["agents"] = agents
@@ -738,6 +799,118 @@ final class ConfigManager: ObservableObject {
         }
         raw["agent_session_names"] = map
         saveRaw(); rebuildDerived()
+    }
+
+    // MARK: - Unread (a finished run nobody has opened)
+
+    /// Agent sessions whose run FINISHED while they were not open, and
+    /// that have not been opened since: the sidebar's steady dot, and the
+    /// middle of its three tiers (`SidebarTier`). Read per row per
+    /// render, so it is a Set derived from `agent_session_unread`
+    /// (session id → when the run finished, epoch seconds) rather than a
+    /// dictionary re-bridged out of `raw` on every call.
+    ///
+    /// In OUR config, beside the folded groups, for the reason branch
+    /// lineage is: no agent records whether its user has looked at a
+    /// run, and a SipAI marker in a transcript three other clients read
+    /// is not ours to write. So it survives a quit, and it is
+    /// per-machine. One writer marks it (`AgentManager`, where a turn's
+    /// dot goes out); opening the session clears it.
+    @Published private(set) var agentUnreadSessions: Set<String> = []
+
+    /// The same for chats, keyed by `ChatManager.liveKey` — the (group,
+    /// slug) pair every save and delivery is keyed by. JSON key
+    /// `chat_unread`. Written by `ChatManager` only.
+    @Published private(set) var chatUnreadKeys: Set<String> = []
+
+    /// Newest entries kept per map. Every run a schedule fires is a new
+    /// session, so a task nobody looks at would otherwise grow the file
+    /// by one entry per run, without end.
+    static let unreadCap = 500
+
+    private static let agentUnreadKey = "agent_session_unread"
+    private static let chatUnreadKey = "chat_unread"
+
+    func markAgentSessionUnread(_ sessionId: String, at date: Date = Date()) {
+        guard !sessionId.isEmpty else { return }
+        var map = unreadEntries(Self.agentUnreadKey)
+        map[sessionId] = date.timeIntervalSince1970
+        writeUnread(map, under: Self.agentUnreadKey)
+    }
+
+    /// No write at all when none of `ids` was unread — this runs on
+    /// every open of every session.
+    func clearAgentSessionUnread<S: Sequence>(_ ids: S) where S.Element == String {
+        var map = unreadEntries(Self.agentUnreadKey)
+        var removed = false
+        for id in ids where map.removeValue(forKey: id) != nil { removed = true }
+        guard removed else { return }
+        writeUnread(map, under: Self.agentUnreadKey)
+    }
+
+    func markChatUnread(key: String, at date: Date = Date()) {
+        guard !key.isEmpty else { return }
+        var map = unreadEntries(Self.chatUnreadKey)
+        map[key] = date.timeIntervalSince1970
+        writeUnread(map, under: Self.chatUnreadKey)
+    }
+
+    func clearChatUnread(key: String) {
+        var map = unreadEntries(Self.chatUnreadKey)
+        guard map.removeValue(forKey: key) != nil else { return }
+        writeUnread(map, under: Self.chatUnreadKey)
+    }
+
+    /// A chat that moved to another group takes its unread reply with it.
+    func moveChatUnread(from old: String, to new: String) {
+        guard old != new else { return }
+        var map = unreadEntries(Self.chatUnreadKey)
+        guard let stamp = map.removeValue(forKey: old) else { return }
+        map[new] = stamp
+        writeUnread(map, under: Self.chatUnreadKey)
+    }
+
+    /// Drop the chat keys no listed chat answers to — a chat file removed
+    /// outside the app. A slug is reused by the next chat given the same
+    /// title, and must not hand it a reply it never had.
+    func pruneChatUnread(keeping existing: Set<String>) {
+        var map = unreadEntries(Self.chatUnreadKey)
+        let before = map.count
+        map = map.filter { existing.contains($0.key) }
+        guard map.count != before else { return }
+        writeUnread(map, under: Self.chatUnreadKey)
+    }
+
+    private func unreadEntries(_ jsonKey: String) -> [String: Double] {
+        var out: [String: Double] = [:]
+        for (key, value) in (raw[jsonKey] as? [String: Any]) ?? [:] {
+            if let n = value as? NSNumber { out[key] = n.doubleValue }
+        }
+        return out
+    }
+
+    private func writeUnread(_ entries: [String: Double], under jsonKey: String) {
+        var map = entries
+        if map.count > Self.unreadCap {
+            let oldest = map.sorted { $0.value < $1.value }
+                .prefix(map.count - Self.unreadCap).map(\.key)
+            for key in oldest { map.removeValue(forKey: key) }
+        }
+        if map.isEmpty {
+            raw.removeValue(forKey: jsonKey)
+        } else {
+            raw[jsonKey] = map
+        }
+        saveRaw()
+        rebuildUnread()
+    }
+
+    /// Only publishes a set that changed.
+    private func rebuildUnread() {
+        let sessions = Set(unreadEntries(Self.agentUnreadKey).keys)
+        if sessions != agentUnreadSessions { agentUnreadSessions = sessions }
+        let chats = Set(unreadEntries(Self.chatUnreadKey).keys)
+        if chats != chatUnreadKeys { chatUnreadKeys = chats }
     }
 
     // MARK: - Session branches
@@ -768,6 +941,66 @@ final class ConfigManager: ObservableObject {
         var map = (raw["agent_session_branches"] as? [String: [String: String]]) ?? [:]
         map[sessionId] = ["from": source, "at": recordUuid]
         raw["agent_session_branches"] = map
+        saveRaw(); rebuildDerived()
+    }
+
+    // MARK: - Chat only turns
+
+    /// The turns of a session that ran in Chat only, by the handle each
+    /// user row carries (`AgentSessionHistoryItem.recordUuid`: claude
+    /// record `uuid`, codex `turn_id`, kimi prompt id). A reopened
+    /// session draws exactly these turns as Chat only — their thoughts
+    /// and web lookups on one line — and every other turn as usual.
+    ///
+    /// In OUR config for the reason branch lineage is: no agent records
+    /// that a turn ran in Chat only, and writing a SipAI marker into a
+    /// transcript three other clients read is not ours to do. So the look
+    /// is per-machine, and a turn with no record reads as an agent turn.
+    ///
+    /// Bounded per session (`chatOnlyTurnCap`, the newest kept): an
+    /// entry costs a few dozen bytes, and a long-lived session must not
+    /// grow the file without end.
+    func agentChatOnlyTurns(for sessionId: String) -> Set<String> {
+        guard !sessionId.isEmpty else { return [] }
+        let map = (raw["agent_session_chat_only_turns"] as? [String: [String]]) ?? [:]
+        return Set(map[sessionId] ?? [])
+    }
+
+    static let chatOnlyTurnCap = 500
+
+    /// Add one finished Chat only turn. A handle already there is left
+    /// in place, so a repeat costs no write.
+    func noteAgentChatOnlyTurn(_ handle: String, for sessionId: String) {
+        guard !sessionId.isEmpty, !handle.isEmpty else { return }
+        var map = (raw["agent_session_chat_only_turns"] as? [String: [String]]) ?? [:]
+        var turns = map[sessionId] ?? []
+        guard !turns.contains(handle) else { return }
+        turns.append(handle)
+        if turns.count > Self.chatOnlyTurnCap {
+            turns.removeFirst(turns.count - Self.chatOnlyTurnCap)
+        }
+        map[sessionId] = turns
+        raw["agent_session_chat_only_turns"] = map
+        saveRaw(); rebuildDerived()
+    }
+
+    /// A branch carries its parent's Chat only turns: every writer keeps
+    /// the records' ids (claude and kimi copy the prefix untouched, a
+    /// codex fork inherits its parent's turns by reference), so the
+    /// shared prefix keeps its look in the branch.
+    func copyAgentChatOnlyTurns(from source: String, to sessionId: String) {
+        guard !source.isEmpty, !sessionId.isEmpty else { return }
+        var map = (raw["agent_session_chat_only_turns"] as? [String: [String]]) ?? [:]
+        guard let turns = map[source], !turns.isEmpty else { return }
+        map[sessionId] = turns
+        raw["agent_session_chat_only_turns"] = map
+        saveRaw(); rebuildDerived()
+    }
+
+    func clearAgentChatOnlyTurns(for sessionId: String) {
+        var map = (raw["agent_session_chat_only_turns"] as? [String: [String]]) ?? [:]
+        guard map.removeValue(forKey: sessionId) != nil else { return }
+        raw["agent_session_chat_only_turns"] = map
         saveRaw(); rebuildDerived()
     }
 
@@ -806,7 +1039,9 @@ final class ConfigManager: ObservableObject {
             model: alias,
             effort: field("effort"),
             modelFullId: fullId,
-            fastMode: prefs["fast_mode"] == "1"
+            fastMode: prefs["fast_mode"] == "1",
+            serviceTier: field("service_tier"),
+            chatOnly: prefs["chat_only"] == "1"
         )
     }
 
@@ -825,16 +1060,57 @@ final class ConfigManager: ObservableObject {
             prefs["model_full_id"] = fullId
         }
         if options.fastMode { prefs["fast_mode"] = "1" }
+        if let tier = options.serviceTier, !tier.isEmpty { prefs["service_tier"] = tier }
+        if options.chatOnly { prefs["chat_only"] = "1" }
         map[sessionId] = prefs
         raw["agent_session_launch_prefs"] = map
         saveRaw(); rebuildDerived()
+    }
+
+    // MARK: - Kimi tool-policy restores
+
+    /// The journal behind a kimi Chat only turn: session id → what the
+    /// session's `tool-policy/state.json` held BEFORE SipAI wrote it
+    /// (`KimiToolPolicy.RestoreRecord`). Written before the turn,
+    /// cleared when the file is put back at turn end, and read at launch
+    /// and on session open to heal a session a crash left with its
+    /// tools switched off.
+    /// One JSON key, `kimi_tool_policy_restores`; goes with the rest of
+    /// config on a factory reset.
+    func kimiToolPolicyRestores() -> [String: KimiToolPolicy.RestoreRecord] {
+        let map = (raw["kimi_tool_policy_restores"] as? [String: [String: String]]) ?? [:]
+        var out: [String: KimiToolPolicy.RestoreRecord] = [:]
+        for (id, dict) in map {
+            if let record = KimiToolPolicy.decodeRecord(dict) { out[id] = record }
+        }
+        return out
+    }
+
+    func setKimiToolPolicyRestore(_ record: KimiToolPolicy.RestoreRecord,
+                                  for sessionId: String) {
+        guard !sessionId.isEmpty else { return }
+        var map = (raw["kimi_tool_policy_restores"] as? [String: [String: String]]) ?? [:]
+        map[sessionId] = KimiToolPolicy.encodeRecord(record)
+        raw["kimi_tool_policy_restores"] = map
+        saveRaw()
+    }
+
+    func clearKimiToolPolicyRestore(for sessionId: String) {
+        var map = (raw["kimi_tool_policy_restores"] as? [String: [String: String]]) ?? [:]
+        guard map.removeValue(forKey: sessionId) != nil else { return }
+        if map.isEmpty {
+            raw.removeValue(forKey: "kimi_tool_policy_restores")
+        } else {
+            raw["kimi_tool_policy_restores"] = map
+        }
+        saveRaw()
     }
 
     // MARK: - Agent session grouping
     //
     // Four JSON keys:
     //   agent_group_mode      {agent_key: mode}
-    //   agent_custom_groups   {agent_key: [names, in display order]}
+    //   agent_custom_groups   {agent_key: [names, in creation order]}
     //   agent_session_groups  {item_key: group_name}   — item_key is a
     //                         session id, or "sched:<task name>"
     //   agent_group_collapsed {agent_key: {mode: [folded group keys]}}
@@ -886,8 +1162,11 @@ final class ConfigManager: ObservableObject {
         return trimmed
     }
 
-    /// Rename in place — display order, every assignment, and the folded
-    /// state all follow the group to its new name.
+    /// Rename in place — creation order, every assignment, the folded
+    /// state and the dragged position all follow the group to its new
+    /// name. Groups are keyed by name, so any of these left behind makes
+    /// the renamed group read as a different one: unfiled rows, an
+    /// unfolded header, or a header that drops below every dragged one.
     @discardableResult
     func renameAgentCustomGroup(_ old: String,
                                 to new: String,
@@ -916,6 +1195,16 @@ final class ConfigManager: ObservableObject {
             perAgent["custom"] = folded.map { $0 == old ? trimmed : $0 }
             collapsed[agentKey] = perAgent
             raw["agent_group_collapsed"] = collapsed
+        }
+
+        // Written directly, not through `setAgentGroupOrder`: a rename
+        // is not a drag, and stamping the time here would stop every
+        // group with a turn since the last drag from being lifted.
+        var orders = (raw["agent_group_order"] as? [String: [String: [String]]]) ?? [:]
+        if var perAgent = orders[agentKey], let order = perAgent["custom"] {
+            perAgent["custom"] = order.map { $0 == old ? trimmed : $0 }
+            orders[agentKey] = perAgent
+            raw["agent_group_order"] = orders
         }
         saveRaw(); rebuildDerived()
         return true
@@ -983,11 +1272,53 @@ final class ConfigManager: ObservableObject {
         return full
     }
 
+    /// What a picker alias means on THIS machine — the wire id the
+    /// next send will run, and where that answer came from: the
+    /// child's `ANTHROPIC_DEFAULT_<FAMILY>_MODEL`, else the alias table
+    /// baked into the installed claude, else what the alias was last
+    /// observed to run (`agentModelFullId`), else nothing. The empty
+    /// alias is claude's Default and resolves through the FAMILY the
+    /// observed default records (`ClaudeModelCatalog.resolvedModel`).
+    ///
+    /// Every consumer of "what does this alias mean here" reads this
+    /// one rule — the chip, the rows, the panel, the context-window
+    /// resolver, the "Other models" anchor — and the observed map is
+    /// what the hover shows beside it when the two differ.
+    func resolvedModel(forAlias alias: String) -> ClaudeModelCatalog.Resolution? {
+        ClaudeModelCatalog.resolvedModel(alias: alias,
+                                         observed: { self.agentModelFullId(forAlias: $0) })
+    }
+
+    func resolvedModelId(forAlias alias: String) -> String? {
+        resolvedModel(forAlias: alias)?.id
+    }
+
+    /// The id a claude send runs as, for the rules that depend on the
+    /// MODEL rather than its name — the effort levels both pickers
+    /// offer. `picked` is the chip's alias or full id; with none, the
+    /// folder's configured default (`ClaudeModelCatalog
+    /// .configuredDefaultModel`, read and cached by the caller), else
+    /// claude's own Default. A full id is its own answer. nil when
+    /// nothing resolves it.
+    func resolvedClaudeModelId(picked: String?, configuredDefault: String?) -> String? {
+        let alias: String
+        if let picked, !picked.isEmpty {
+            alias = picked
+        } else if let configuredDefault, !configuredDefault.isEmpty {
+            alias = configuredDefault
+        } else {
+            alias = ""
+        }
+        if ClaudeModelDisplay.isFullId(alias) { return alias }
+        return resolvedModelId(forAlias: alias)
+    }
+
     /// Display name for a picker alias, carrying the version the alias
     /// resolves to on THIS machine ("opus" → "Opus 5"). A bare alias
     /// carries no version of its own, so `ClaudeModelDisplay.name` alone
-    /// can only ever answer "Opus" — the version has to come from the
-    /// observed id map.
+    /// can only ever answer "Opus" — the version comes from
+    /// `resolvedModel`: the installed binary's own table first, the
+    /// observed id map as the fallback. A concrete full id names itself.
     ///
     /// Lives here, not on a view, because more than one surface shows a
     /// model name for a stored alias (the composer's chip and rows, the
@@ -995,21 +1326,25 @@ final class ConfigManager: ObservableObject {
     /// would drift — the panel and the composer naming the same task's
     /// model differently.
     func rememberedModelName(forAlias alias: String) -> String {
-        if let full = agentModelFullId(forAlias: alias), !full.isEmpty {
-            return ClaudeModelDisplay.name(for: full)
+        if ClaudeModelDisplay.isFullId(alias) {
+            return ClaudeModelCatalog.displayName(forId: alias)
         }
-        // A variant alias ("opus[1m]") shares its family's version; the
-        // learned map is keyed by the plain family word.
-        let (base, variant) = ClaudeModelDisplay.splitVariant(alias)
-        if !variant.isEmpty,
-           let full = agentModelFullId(forAlias: base), !full.isEmpty {
-            return ClaudeModelDisplay.name(for: full + variant)
+        // A variant alias ("opus[1m]") shares its family's resolution
+        // and, like every derived name, is shown without the marker.
+        if let id = resolvedModelId(forAlias: alias) {
+            return ClaudeModelCatalog.displayName(forId: id)
         }
         return ClaudeModelDisplay.name(for: alias)
     }
 
     func setAgentModelFullId(_ fullId: String, forAlias alias: String) {
         guard !fullId.isEmpty else { return }
+        // Whatever alias it ran under, the id itself is a model this
+        // account has run: a candidate for "Other models" the day its
+        // alias moves on, without waiting for a harvest to find it on
+        // disk. The pool's own identity rule keeps out anything that is
+        // not a versioned family id.
+        learnAgentModelObservedIds([fullId])
         // A full id is a pick from the "Other models" section, not an
         // alias, and an observation made under it says nothing about
         // any alias. Filing it would record "claude-fable-5 resolves
@@ -1122,16 +1457,20 @@ final class ConfigManager: ObservableObject {
     func learnAgentModelObservedIds(_ ids: [String]) {
         var known = agentModelObservedIds()
         var changed = false
+        // One spelling per (family, version). The family comes from the
+        // casing table, else from the installed binary's catalog — a
+        // family the table has never heard of is still one to the
+        // binary that ships it, and its ids are still observations.
         func identity(_ id: String) -> String? {
             let parts = ClaudeModelDisplay.parts(of: id)
-            guard let family = parts.family, !parts.digits.isEmpty else { return nil }
+            guard let family = ClaudeModelCatalog.family(ofId: id),
+                  !parts.digits.isEmpty else { return nil }
             return family + ":" + parts.digits.map(String.init).joined(separator: ".")
         }
         var seen = Set(known.compactMap(identity))
         for raw in ids {
             let (id, _) = ClaudeModelDisplay.splitVariant(raw)
-            guard !id.isEmpty, ClaudeModelDisplay.familyAlias(of: id) != nil,
-                  let key = identity(id), !seen.contains(key) else { continue }
+            guard !id.isEmpty, let key = identity(id), !seen.contains(key) else { continue }
             seen.insert(key)
             known.append(id)
             changed = true
@@ -1201,13 +1540,18 @@ final class ConfigManager: ObservableObject {
     /// Persisted orders for the three drag-to-reorder surfaces (see
     /// `SidebarOrdering`). Each stores ids in display order; resolution
     /// against what actually exists happens at render time, so a stale
-    /// id is harmless and a new item simply appends.
+    /// id is harmless and a new item simply appends — except that an
+    /// agent group a turn has started in since the drag goes to the top
+    /// (`agentGroupOrderDate`).
 
     var sidebarSectionOrder: [String] {
         (raw["sidebar_section_order"] as? [String]) ?? []
     }
 
     func setSidebarSectionOrder(_ order: [String]) {
+        #if DEBUG
+        SidebarDropDiagnostics.log("sidebar_section_order ← \(order)")
+        #endif
         raw["sidebar_section_order"] = order
         saveRaw()
     }
@@ -1217,6 +1561,9 @@ final class ConfigManager: ObservableObject {
     }
 
     func setChatGroupOrder(_ order: [String]) {
+        #if DEBUG
+        SidebarDropDiagnostics.log("chat_group_order ← \(order)")
+        #endif
         raw["chat_group_order"] = order
         saveRaw()
     }
@@ -1231,15 +1578,40 @@ final class ConfigManager: ObservableObject {
         return all[agentKey]?[mode.rawValue] ?? []
     }
 
+    /// When that order was last dragged — `agent_group_order_at`, epoch
+    /// seconds, per agent and mode. A group a turn starts in AFTER this
+    /// moment is lifted over the dragged order
+    /// (`AgentSessionGrouping.arranged`). Nil for an order dragged
+    /// before the time was recorded.
+    func agentGroupOrderDate(for agentKey: String,
+                             mode: AgentGroupMode) -> Date? {
+        guard !agentKey.isEmpty else { return nil }
+        let all = (raw["agent_group_order_at"] as? [String: [String: Any]]) ?? [:]
+        guard let seconds = (all[agentKey]?[mode.rawValue] as? NSNumber)?.doubleValue
+        else { return nil }
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    /// The drag's writer, and the only one that stamps the time: the
+    /// stamp says "the user arranged these headers now", which a rename
+    /// following its group into the saved order does not.
     func setAgentGroupOrder(_ order: [String],
                             for agentKey: String,
                             mode: AgentGroupMode) {
         guard !agentKey.isEmpty else { return }
+        #if DEBUG
+        SidebarDropDiagnostics.log("agent_group_order[\(agentKey)][\(mode.rawValue)] ← \(order)")
+        #endif
         var all = (raw["agent_group_order"] as? [String: [String: [String]]]) ?? [:]
         var perAgent = all[agentKey] ?? [:]
         perAgent[mode.rawValue] = order
         all[agentKey] = perAgent
         raw["agent_group_order"] = all
+        var stamps = (raw["agent_group_order_at"] as? [String: [String: Any]]) ?? [:]
+        var agentStamps = stamps[agentKey] ?? [:]
+        agentStamps[mode.rawValue] = Date().timeIntervalSince1970
+        stamps[agentKey] = agentStamps
+        raw["agent_group_order_at"] = stamps
         saveRaw()
     }
 

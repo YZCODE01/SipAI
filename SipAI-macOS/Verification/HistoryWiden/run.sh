@@ -26,5 +26,6 @@ out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 swiftc -O -o "$out/historywiden" \
   "$here/Stubs.swift" "$here/main.swift" \
+  "$src/SipAI/Models/AttachmentInline.swift" \
   "$src/SipAI/Models/AgentSession.swift"
 "$out/historywiden" "$src/SipAI/Views/Chat/AgentSessionView.swift"

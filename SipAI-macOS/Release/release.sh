@@ -19,6 +19,8 @@
 # Environment:
 #   SIPAI_NOTARY_PROFILE   notarytool keychain profile (default SipAI-Notary)
 #   SIPAI_IDENTITY         override the signing identity match string
+#   SIPAI_RECUT=1          release a version that is NOT CHANGELOG.md's
+#                          newest section — a recut of one already out
 #
 set -euo pipefail
 
@@ -72,11 +74,16 @@ xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1 \
 ok "notarytool profile '$NOTARY_PROFILE' authenticates"
 
 # Sparkle's tools ship inside the resolved package artifact, so they only
-# exist once the project has been built at least once.
-SPARKLE_BIN="$(find ~/Library/Developer/Xcode/DerivedData/SipAI-*/SourcePackages/artifacts/sparkle/Sparkle/bin \
-    -name generate_appcast 2>/dev/null | head -1)"
+# exist once the project has been built at least once. A glob, not a
+# `find … | head -1` pipeline: with no DerivedData to match, the
+# unexpanded pattern made `find` fail, and under `set -euo pipefail` the
+# assignment failed with it — the script exited 1 before its own `die`
+# could say what was missing.
+SPARKLE_BIN=""
+for candidate in ~/Library/Developer/Xcode/DerivedData/SipAI-*/SourcePackages/artifacts/sparkle/Sparkle/bin; do
+    if [[ -x "$candidate/generate_appcast" ]]; then SPARKLE_BIN="$candidate"; break; fi
+done
 [[ -n "$SPARKLE_BIN" ]] || die "Sparkle's tools not found. Build the project once first."
-SPARKLE_BIN="$(dirname "$SPARKLE_BIN")"
 ok "Sparkle tools: $SPARKLE_BIN"
 
 # The EdDSA private key. Losing it strands every installed copy, so this
@@ -95,19 +102,77 @@ BUILD_NUM="$(sed -n 's/.*CURRENT_PROJECT_VERSION = \(.*\);/\1/p' "$PROJECT/proje
 [[ -n "$VERSION" && -n "$BUILD_NUM" ]] || die "could not read version from project.pbxproj"
 
 # Both build configurations must agree, or a Release ships a number the
-# Debug build was tested against.
+# Debug build was tested against. The build number too: it is read from
+# the first configuration above, but the archive takes Release's.
 if [[ "$(grep -c "MARKETING_VERSION = $VERSION;" "$PROJECT/project.pbxproj")" != "2" ]]; then
     die "MARKETING_VERSION differs between Debug and Release"
 fi
+if [[ "$(grep -c "CURRENT_PROJECT_VERSION = $BUILD_NUM;" "$PROJECT/project.pbxproj")" != "2" ]]; then
+    die "CURRENT_PROJECT_VERSION differs between Debug and Release"
+fi
 ok "version $VERSION (build $BUILD_NUM)"
+
+# The version has to be the one CHANGELOG.md is newest about. A
+# MARKETING_VERSION nobody bumped passes every other check here: it
+# equals the published version, which reads as a recut (so the build
+# number need not rise), and the previous release's dated section is
+# still in the changelog — so the run builds the OLD version, names the
+# zip after it, and signs an appcast pointing at the release that already
+# exists. Measured on copies of the project before this guard: 1.0.3 left
+# in place under a finished 1.0.4 section passed as "1.0.3 (build 4)",
+# and with only the build number bumped as "1.0.3 (build 5)". A recut of
+# a version already out is the one legitimate exception, asked for by
+# name.
+NEWEST_SECTION="$(awk '/^## \[/ { sub(/^## \[/, ""); sub(/\].*$/, ""); print; exit }' "$REPO_DIR/CHANGELOG.md")"
+if [[ "$NEWEST_SECTION" == "$VERSION" ]]; then
+    ok "$VERSION is CHANGELOG.md's newest section"
+elif [[ "${SIPAI_RECUT:-0}" == "1" ]]; then
+    info "recutting $VERSION — CHANGELOG.md's newest section is $NEWEST_SECTION (SIPAI_RECUT=1)"
+else
+    die "the project says $VERSION but CHANGELOG.md's newest section is $NEWEST_SECTION.
+        Raise MARKETING_VERSION and CURRENT_PROJECT_VERSION in both
+        configurations — or, to recut $VERSION as already released, run
+        with SIPAI_RECUT=1."
+fi
+
+# Sparkle offers an update only when CFBundleVersion RISES, so a new
+# version on an unbumped build number is an update nobody is ever
+# offered — and nothing fails to say so. What is published is what
+# docs/appcast.xml says (the feed serves that file). A recut of the SAME
+# version may keep its build number, deliberately; only a new version
+# must rise.
+# No pipeline here: under `set -euo pipefail` a `sed … | head -1` whose
+# reader closes early fails the assignment and the script with it, and a
+# missing appcast (a first release from a fresh clone) must read as
+# "nothing published", not as an error. awk stops at the first match.
+APPCAST="$REPO_DIR/docs/appcast.xml"
+PUBLISHED_VERSION=""
+PUBLISHED_BUILD=""
+if [[ -f "$APPCAST" ]]; then
+    PUBLISHED_VERSION="$(awk -F'[<>]' '/<sparkle:shortVersionString>/ { print $3; exit }' "$APPCAST")"
+    PUBLISHED_BUILD="$(awk -F'[<>]' '/<sparkle:version>/ { print $3; exit }' "$APPCAST")"
+fi
+if [[ -n "$PUBLISHED_BUILD" && "$VERSION" != "$PUBLISHED_VERSION" ]]; then
+    [[ "$BUILD_NUM" =~ ^[0-9]+$ && "$PUBLISHED_BUILD" =~ ^[0-9]+$ && "$BUILD_NUM" -gt "$PUBLISHED_BUILD" ]] \
+        || die "build $BUILD_NUM is not above the published build $PUBLISHED_BUILD ($PUBLISHED_VERSION, docs/appcast.xml).
+        Raise CURRENT_PROJECT_VERSION in both configurations — Sparkle
+        compares build numbers, and an unbumped one is never offered."
+    ok "build $BUILD_NUM is above the published $PUBLISHED_VERSION (build $PUBLISHED_BUILD)"
+fi
 
 # Release notes have to exist before the build, because the appcast
 # entry is generated from them and a missing section produces a silently
 # empty update dialog.
 grep -q "^## \[$VERSION\]" "$REPO_DIR/CHANGELOG.md" \
     || die "CHANGELOG.md has no '## [$VERSION]' section"
-grep -q "^## \[$VERSION\] — unreleased" "$REPO_DIR/CHANGELOG.md" \
-    && die "CHANGELOG.md still marks $VERSION as unreleased — date it first"
+# A positive check, on purpose: the section must carry a date. A search
+# for the word "unreleased" misses the file's own spelling
+# ("Unreleased") and lets an undated heading go out as the update's
+# release notes.
+grep -qE "^## \[$VERSION\] — [0-9]{4}-[0-9]{2}-[0-9]{2}" "$REPO_DIR/CHANGELOG.md" \
+    || die "CHANGELOG.md's $VERSION section is not dated — it reads
+        '$(grep -m1 "^## \[$VERSION\]" "$REPO_DIR/CHANGELOG.md")'
+        Write it as '## [$VERSION] — YYYY-MM-DD' first."
 ok "CHANGELOG.md has a dated section for $VERSION"
 
 # Release keeps the hardened runtime: notarization requires it.
@@ -117,6 +182,20 @@ ok "hardened runtime enabled in Release"
 
 if [[ -n "$(git -C "$REPO_DIR" status --porcelain)" ]]; then
     info "working tree is dirty — releasing anyway, but the tag will not match"
+fi
+
+# Files the app is built from that git does not know yet. Xcode reads
+# the working tree, so the build cannot notice — but a tag on a tree
+# missing them does not build from a clone. Listed so the release commit
+# can include them; the summary at the end lists them again.
+untracked_release_files() {
+    git -C "$REPO_DIR" ls-files --others --exclude-standard \
+        -- SipAI-macOS/SipAI SipAI-macOS/SipAI.xcodeproj docs
+}
+UNTRACKED="$(untracked_release_files)"
+if [[ -n "$UNTRACKED" ]]; then
+    info "untracked files the release commit must include:"
+    sed 's/^/          /' <<<"$UNTRACKED"
 fi
 
 if [[ "$PREFLIGHT_ONLY" == "1" ]]; then
@@ -200,6 +279,19 @@ grep -qi "Timestamp=" <<<"$SIGINFO" \
     || die "no secure timestamp — notarization will reject this"
 ok "secure timestamp present"
 
+# Entitlements. Signing.xcconfig includes Local.xcconfig last, and it is
+# Release's base configuration too, so one line there could carry an
+# entitlements file into a distribution build. Notarization refuses
+# get-task-allow but not disable-library-validation — and library
+# validation is what stops a swapped framework loading into an app that
+# updates itself. Captured once, like the signature above.
+ENTITLEMENTS="$(codesign -d --entitlements - "$APP" 2>/dev/null || true)"
+if grep -qE 'get-task-allow|disable-library-validation|allow-dyld-environment-variables|allow-unsigned-executable-memory' <<<"$ENTITLEMENTS"; then
+    die "the exported app carries a debugging or code-loading entitlement:
+$ENTITLEMENTS"
+fi
+ok "no debugging or code-loading entitlement"
+
 # Sparkle is useless without its helpers: the framework alone cannot
 # install anything, and the failure only shows on the first real update.
 SPK="$APP/Contents/Frameworks/Sparkle.framework/Versions/B"
@@ -212,6 +304,15 @@ ok "Sparkle.framework embedded with its helpers"
 # refuses an embedded framework whose team id differs from the app's.
 # Signing with a real Developer ID is what makes those match — this is
 # the step that proves it did.
+#
+# Four seconds on the REAL data folder: Foundation ignores $HOME for
+# Application Support, so nothing here can point the copy elsewhere.
+# What makes that safe is the scheduler — its first due check waits
+# `ScheduledTaskScheduler.firstTickDelay` (15 s) after launch, so a task
+# whose slot fell due while SipAI was quit for this release cannot fire,
+# be recorded as run, and be killed with the copy inside this window;
+# Verification/SparkleUpdate holds the two numbers apart. Run this with
+# SipAI quit all the same: two copies write one config.json.
 step "Launch check"
 "$APP/Contents/MacOS/SipAI" > "$OUT/launch.log" 2>&1 &
 LPID=$!
@@ -314,6 +415,19 @@ python3 "$HERE/changelog_to_html.py" "$REPO_DIR/CHANGELOG.md" "$VERSION" \
     > "$FEED_DIR/SipAI-$VERSION.html" || die "could not render release notes"
 ok "release notes rendered ($(wc -c < "$FEED_DIR/SipAI-$VERSION.html") bytes)"
 
+# The same section as Markdown, for the GitHub release's body — one
+# source for the update dialog, the release page and the changelog.
+# Written OUTSIDE the feed folder: generate_appcast takes a .html, .md
+# or .txt named like an archive as that archive's release notes, and
+# with two beside the zip which one it picks is not ours to say.
+RELEASE_BODY="$OUT/SipAI-$VERSION.md"
+awk -v v="$VERSION" '
+    $0 ~ "^## \\[" v "\\]" { on = 1; next }
+    on && /^## \[/ { exit }
+    on { print }' "$REPO_DIR/CHANGELOG.md" > "$RELEASE_BODY"
+[[ -s "$RELEASE_BODY" ]] || die "could not extract the $VERSION section for the release body"
+ok "release body extracted (SipAI-$VERSION.md)"
+
 step "Generating the appcast"
 # The enclosure URL has to point at where the zip will actually live.
 # generate_appcast signs each archive with the EdDSA key from the keychain.
@@ -348,25 +462,57 @@ ok "release-notes link matches the file in docs/"
 
 # ── 6. what to do with it ────────────────────────────────────────────────
 step "Done"
+# The order below is load-bearing. Pushing main publishes docs/ through
+# GitHub Pages, i.e. the feed goes live — and a feed that names a zip
+# nobody has uploaded yet hands every copy that checks in the meantime a
+# download error. So the tag goes up alone (a tag push moves no branch),
+# the release hangs off it with both assets, and main is pushed LAST.
+# `gh release create` on a tag GitHub does not have yet would make one —
+# pointing at the OLD main, since that is what the remote holds.
 cat <<SUMMARY
 
   Artefacts in $OUT:
 
-    $(basename "$DMG")                 → upload as the release asset people click
-    feed/SipAI-$VERSION.zip            → upload too; the appcast points at it
-    feed/appcast.xml                   → already copied to docs/appcast.xml
+    $(basename "$DMG")                 → the release asset people click
+    feed/SipAI-$VERSION.zip            → the release asset the appcast names
+    SipAI-$VERSION.md                  → the same notes as Markdown, for the release body
+    feed/appcast.xml                → already copied to docs/appcast.xml,
+                                      with docs/SipAI-$VERSION.html beside it
 
-  Remaining, in order:
+  Remaining, in order — the feed goes live LAST:
 
-    1.  git -C "$REPO_DIR" add docs/appcast.xml
-        git -C "$REPO_DIR" commit -m "Appcast for $VERSION"
-        git -C "$REPO_DIR" push
-        git -C "$REPO_DIR" tag v$VERSION && git -C "$REPO_DIR" push --tags
+    1.  Commit the release: the source, docs/appcast.xml AND
+        docs/SipAI-$VERSION.html (the appcast names that page as its
+        release notes; left out, the update dialog shows a 404 page).
+        Then tag the commit:
+          git -C "$REPO_DIR" add docs/appcast.xml docs/SipAI-$VERSION.html <the source>
+          git -C "$REPO_DIR" commit
+          git -C "$REPO_DIR" tag v$VERSION
 
-    2.  Create the GitHub release v$VERSION and attach BOTH files above.
-        The zip must keep its name: the appcast's URL already names it.
+    2.  Push the TAG alone — main stays put, so the feed does not move,
+        and the tag exists on GitHub for the release to hang off:
+          git -C "$REPO_DIR" push origin v$VERSION
 
-    3.  Confirm the feed is live and matches:
+    3.  Create the release from that tag with BOTH files. The zip must
+        keep its name: the appcast's URL already names it.
+          gh release create v$VERSION "$DMG" "$FEED_DIR/SipAI-$VERSION.zip" \\
+              --title "SipAI $VERSION" --notes-file "$RELEASE_BODY"
+
+    4.  Now push main. GitHub Pages publishes docs/, and the feed is live:
+          git -C "$REPO_DIR" push origin main
+
+    5.  Confirm from what a user's copy will fetch — the live feed, and
+        the zip it names checked against the signature it carries:
           curl -sS https://updates.sipai.dev/appcast.xml | head -20
+          curl -sSL -o /tmp/SipAI-$VERSION.zip \\
+              https://github.com/$REPO_SLUG/releases/download/v$VERSION/SipAI-$VERSION.zip
+          "$SPARKLE_BIN/sign_update" --verify /tmp/SipAI-$VERSION.zip "<sparkle:edSignature from the feed>"
 
 SUMMARY
+
+UNTRACKED_NOW="$(untracked_release_files)"
+if [[ -n "$UNTRACKED_NOW" ]]; then
+    printf '  Untracked files the release commit in step 1 must include:\n'
+    sed 's/^/    /' <<<"$UNTRACKED_NOW"
+    echo
+fi

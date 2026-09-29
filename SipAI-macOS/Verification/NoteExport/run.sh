@@ -25,6 +25,7 @@ swiftc -O -o "$out/noteexport" \
   "$here/Stubs.swift" \
   "$src/SipAI/Utilities/NoteHTML.swift" \
   "$src/SipAI/Utilities/MarkdownRenderer.swift" \
+  "$src/SipAI/Utilities/CodeBlockActions.swift" \
   "$src/SipAI/Utilities/DesignSystem.swift" \
   "$src/SipAI/Utilities/LatexSymbols.swift" \
   "$src/SipAI/Utilities/SearchMatching.swift" \

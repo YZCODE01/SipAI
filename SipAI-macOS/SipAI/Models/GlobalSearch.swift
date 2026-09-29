@@ -169,6 +169,12 @@ enum SearchTextExtractor {
                 // is defined on DISPLAYED text; the alternative is a
                 // result that highlights nothing.
                 break
+            case .thinking:
+                // Never read here (the readers keep no thoughts unless
+                // asked), and a thought is drawn only behind a click in
+                // its turn's activity line, so the conversation's text is
+                // what a search across sessions answers for.
+                break
             }
         }
         return parts.joined(separator: "\n")

@@ -25,10 +25,15 @@
 //     bubble under every prompt and a candidate for the derived title
 //     and for `lastUserMessageDate`, which the sidebar prints and
 //     sorts on. `isInjectedContext` drops it in `message(from:)`.
-//   * There is no stored title anywhere, so titles are ALWAYS derived
-//     from turn 1 and `titleIsFallback` is always true for kimi.
-//     `state.json` does carry `cwd`, which is what keeps kimi sessions
-//     out of `$HOME`.
+//   * Kimi stores no title of its own for a session it ran, so titles
+//     are derived from turn 1 and `titleIsFallback` is true for those.
+//     The exceptions are a rename (`AgentSessionRename`) and a fork —
+//     kimi's own and SipAI's (`KimiSessionFork`) both write `title`
+//     into `state.json`. `state.json` also carries `cwd`, which is what
+//     keeps kimi sessions out of `$HOME`.
+//   * The wire's `runtime.set_binding` names the workspace bucket the
+//     session lives under, and kimi refuses a session whose binding and
+//     bucket disagree. A branch therefore stays in its source's bucket.
 //
 // Store layout:
 //
@@ -36,9 +41,11 @@
 //   ├── config.toml
 //   ├── session_index.jsonl
 //   └── sessions/
-//       └── <workDirKey>/                 one folder per working directory
+//       └── <workDirKey>/                 one folder per working directory:
+//           │                             wd_<leaf>_<sha256(path)[0..<12]>
 //           └── <sessionId>/
-//               ├── state.json            title + creation timestamp
+//               ├── state.json            cwd, timestamps, title when set
+//               ├── notify/state.json
 //               └── agents/
 //                   ├── main/wire.jsonl   the conversation's event stream
 //                   └── <subagentId>/wire.jsonl
@@ -110,8 +117,18 @@ enum KimiSessionScanner {
     /// on disk but the index has not been flushed, which is exactly
     /// when `AgentRunner` asks (the id arrives on stdout at turn end).
     static func sessionDirectory(forId id: String) -> URL? {
-        guard !id.isEmpty else { return nil }
-        if let dir = indexedSessionDirectory(forId: id) { return dir }
+        // The id is joined into a path below, and the directory found is
+        // written into (a Chat only turn's tool-policy file): a plain
+        // component only, and the index's `sessionDir` only when it has
+        // the store's own shape — `sessions/<bucket>/<id>` — rather than
+        // wherever a line of that file says.
+        guard !id.isEmpty, !id.hasPrefix("."), !id.contains("/"),
+              !id.contains("\u{0}") else { return nil }
+        if let dir = indexedSessionDirectory(forId: id),
+           dir.lastPathComponent == id,
+           sessionDirectory(of: dir)?.standardizedFileURL.path == dir.standardizedFileURL.path {
+            return dir
+        }
         let fm = FileManager.default
         guard let buckets = try? fm.contentsOfDirectory(
             at: sessionRoot, includingPropertiesForKeys: nil,
@@ -356,27 +373,39 @@ enum KimiSessionScanner {
         return out
     }
 
-    /// The session a just-spawned `kimi --prompt` run created.
+    /// The session a just-spawned `kimi --prompt` run created — read off
+    /// the store, because kimi names it on stdout only with the turn's
+    /// FINAL answer (`session.resume_hint`, `KimiEventParser
+    /// .announcedSessionId`), where claude and codex name theirs first
+    /// (`system.init` / `thread.started`). Kimi will not take an id from
+    /// the caller either: `--session` with a new id is refused as "not
+    /// found".
     ///
-    /// Claude and codex both announce their session id on stdout
-    /// (`system.init` / `thread.started`), which is what migrates a
-    /// draft runner onto its permanent key. Kimi's documented
-    /// stream-json stdout is plain chat messages — `{"role":…}` — and
-    /// carries no id at all, so the id has to be read back off the
-    /// store instead.
+    /// Four filters, and an answer only when ONE directory passes them
+    /// all: the id is not one that existed before the spawn (`known`); the
+    /// directory is younger than the send (`since`, with a few seconds of
+    /// slack for clock and stat granularity); its working directory — its
+    /// own, or its BUCKET's, since a bucket is a working directory — is
+    /// ours or unknown; and its first user message is exactly the text
+    /// this run sent (`prompt`). The last is what tells two runs in one
+    /// folder apart — a scheduled run firing while the user starts a
+    /// session there, a `kimi` started in a terminal at the same moment —
+    /// where "the newest new directory" handed both runs the same id and
+    /// bound one to the other's conversation.
     ///
-    /// Three filters keep that honest: the id must not be one that
-    /// existed BEFORE we spawned (`known`), the directory must be
-    /// younger than the send (`since`, with a few seconds of slack for
-    /// clock/stat granularity), and its working directory — its own, or
-    /// its BUCKET's, since a bucket is a working directory — must be
-    /// ours or unknown. The bucket half matters: a just-created session
-    /// may not have written its cwd yet, but if a sibling in the same
-    /// bucket names a different folder then this candidate is some
-    /// other kimi's, not ours.
+    /// A new directory in this folder whose first message has not landed
+    /// yet (it follows the directory by a tenth of a second) is UNDECIDED,
+    /// and while one exists the answer is nil — never "the one that has
+    /// landed": two runs sending the same words land their messages tens
+    /// of milliseconds apart, and a poll between the two would find one
+    /// match and hand BOTH runners that session. The caller asks again.
+    /// Two that both hold the sent text cannot be told apart from here,
+    /// so there is no guess either: the run's own announcement names it
+    /// at the turn's end.
     static func discoverSession(cwd: URL,
                                 excluding known: Set<String>,
-                                since: Date) -> (id: String, fileURL: URL)? {
+                                since: Date,
+                                prompt: String) -> (id: String, fileURL: URL)? {
         let fm = FileManager.default
         guard storeExists,
               let buckets = try? fm.contentsOfDirectory(
@@ -386,7 +415,10 @@ enum KimiSessionScanner {
         else { return nil }
         let cutoff = since.addingTimeInterval(-5)
         let wanted = cwd.standardizedFileURL.path
-        var best: (id: String, url: URL, at: Date)? = nil
+        let sent = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sent.isEmpty else { return nil }
+        var matches: [(id: String, url: URL)] = []
+        var undecided = false
 
         for bucket in buckets {
             guard let entries = try? fm.contentsOfDirectory(
@@ -414,12 +446,14 @@ enum KimiSessionScanner {
                    recorded.standardizedFileURL.path != wanted {
                     continue
                 }
-                if best == nil || born > best!.at {
-                    best = (id, dir, born)
+                guard let first = readFirstUserMessage(of: wireFile(inSessionDir: dir)) else {
+                    undecided = true
+                    continue
                 }
+                if first == sent { matches.append((id, dir)) }
             }
         }
-        guard let found = best else { return nil }
+        guard !undecided, matches.count == 1, let found = matches.first else { return nil }
         return (found.id, wireFile(inSessionDir: found.url))
     }
 
@@ -580,6 +614,12 @@ enum KimiSessionScanner {
         let toolCallId: String?
         let isError: Bool
         let timestamp: Date?
+        /// The message's own id (`message.id`, a `msg_…` ulid on a
+        /// user record) — the `promptId` the turn's `turn.prompt` and
+        /// `prompt.completed` records carry, and therefore the handle a
+        /// user row keeps into the wire (`AgentSessionHistoryItem
+        /// .recordUuid`). Nil on the agent's half, which is loop events.
+        let id: String?
     }
 
     /// Records that are not conversation and must never be replayed.
@@ -655,6 +695,8 @@ enum KimiSessionScanner {
                 break
             }
         }
+        let messageId = (body["id"] as? String)
+            .flatMap { $0.isEmpty ? nil : $0 }
         return WireMessage(
             role: role,
             text: text,
@@ -663,7 +705,8 @@ enum KimiSessionScanner {
                 ?? (body["toolCallId"] as? String),
             isError: (body["is_error"] as? Bool)
                 ?? (KimiEventParser.present(body, "error") != nil),
-            timestamp: timestamp)
+            timestamp: timestamp,
+            id: messageId)
     }
 
     /// How full the context window is on the newest API call, for the
@@ -779,9 +822,10 @@ enum KimiSessionScanner {
     ///
     /// `step.begin` / `step.end` are bookkeeping and fall out of the
     /// switch. So does `part.type == "think"`, which is the model's
-    /// private reasoning: it is not an assistant TURN, and rendering it
-    /// as one would put the deliberation and the answer on screen as
-    /// two equal replies.
+    /// reasoning: it is not an assistant TURN, and rendering it as one
+    /// would put the deliberation and the answer on screen as two equal
+    /// replies. A Chat only turn draws it inside the turn's activity
+    /// line instead, read through `thought(_:)`.
     private static func loopEventMessage(_ obj: [String: Any])
     -> WireMessage? {
         guard (obj["type"] as? String) == "context.append_loop_event",
@@ -800,7 +844,7 @@ enum KimiSessionScanner {
             else { return nil }
             return WireMessage(role: "assistant", text: text, toolCalls: [],
                                toolCallId: nil, isError: false,
-                               timestamp: stamp)
+                               timestamp: stamp, id: nil)
 
         case "tool.call":
             guard let id = event["toolCallId"] as? String, !id.isEmpty,
@@ -810,7 +854,7 @@ enum KimiSessionScanner {
                 role: "assistant", text: "",
                 toolCalls: [(id: id, name: name,
                              input: (event["args"] as? [String: Any]) ?? [:])],
-                toolCallId: nil, isError: false, timestamp: stamp)
+                toolCallId: nil, isError: false, timestamp: stamp, id: nil)
 
         case "tool.result":
             guard let id = event["toolCallId"] as? String, !id.isEmpty
@@ -827,7 +871,7 @@ enum KimiSessionScanner {
                 ?? (KimiEventParser.present(result ?? [:], "error") != nil)
             return WireMessage(role: "tool", text: output, toolCalls: [],
                                toolCallId: id, isError: failed,
-                               timestamp: stamp)
+                               timestamp: stamp, id: nil)
 
         default:
             return nil
@@ -920,31 +964,282 @@ enum KimiSessionScanner {
                     ? raw / 1000 : raw)
     }
 
+    // MARK: - Turn markers
+
+    /// The records that open and close a turn in a wire file, read in
+    /// ONE place: the history reader stamps user rows with the prompt
+    /// id, the fork cuts on it, and a live watcher of an external turn
+    /// would flip on these. Two spellings of this vocabulary is how
+    /// those drift.
+    ///
+    /// A turn opens with `turn.prompt {promptId}`, immediately followed
+    /// by the `context.append_message` whose `message.id` IS that
+    /// prompt id; it closes with `turn.ended {turnId, reason}` and then
+    /// `prompt.completed {promptId}`. No record carries the session id
+    /// — only `agentId` — which is what lets a copied prefix stand as a
+    /// new session without a rewrite.
+    static func turnPromptId(_ obj: [String: Any]) -> String? {
+        guard (obj["type"] as? String) == "turn.prompt",
+              let id = obj["promptId"] as? String, !id.isEmpty
+        else { return nil }
+        return id
+    }
+
+    static func promptCompletedId(_ obj: [String: Any]) -> String? {
+        guard (obj["type"] as? String) == "prompt.completed",
+              let id = obj["promptId"] as? String, !id.isEmpty
+        else { return nil }
+        return id
+    }
+
+    static func turnEnded(_ obj: [String: Any]) -> Bool {
+        (obj["type"] as? String) == "turn.ended"
+    }
+
+    /// The newest turn the wire's tail records (see `RecordedTurn`),
+    /// through the markers above: open after a `turn.prompt` with no
+    /// `turn.ended` (or `prompt.completed`) behind it — including the
+    /// turn a finished background task opens with a prompt of its own.
+    /// Its start is the prompt record's `time`, its length kimi's own
+    /// `durationMs`. Nil when the tail holds no marker.
+    ///
+    /// Only lines naming a marker are parsed, for the reason the codex
+    /// reader gives.
+    static func latestTurn(of wire: URL, budget: Int = 1024 * 1024) -> RecordedTurn? {
+        // Escalating window, for the reason the codex reader gives.
+        let size = ((try? FileManager.default.attributesOfItem(atPath: wire.path))?[.size]
+                    as? NSNumber)?.uint64Value
+        let wide = 8 * 1024 * 1024
+        for window in (budget < wide ? [budget, wide] : [budget]) {
+            if let found = latestTurnScan(of: wire, budget: window) { return found }
+            if let size, size <= UInt64(window) { break }
+        }
+        return nil
+    }
+
+    private static func latestTurnScan(of wire: URL, budget: Int) -> RecordedTurn? {
+        guard let text = AgentSessionScanner.boundedTail(of: wire, budget: budget)
+        else { return nil }
+        var latest: RecordedTurn? = nil
+        text.enumerateLines { line, _ in
+            guard line.contains("turn.prompt") || line.contains("turn.ended")
+                    || line.contains("prompt.completed"),
+                  let data = line.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data))
+                    as? [String: Any]
+            else { return }
+            if turnPromptId(obj) != nil {
+                latest = RecordedTurn(open: true, startedAt: flexibleDate(obj["time"]),
+                                      seconds: nil)
+            } else if turnEnded(obj) || promptCompletedId(obj) != nil {
+                var turn = latest ?? RecordedTurn(open: false, startedAt: nil, seconds: nil)
+                turn.open = false
+                if let ms = (obj["durationMs"] as? NSNumber)?.doubleValue, ms > 0 {
+                    turn.seconds = ms / 1000
+                }
+                latest = turn
+            }
+        }
+        return latest
+    }
+
+    /// The user message a `context.append_message` record carries —
+    /// its id and its cleaned text — or nil for every other record,
+    /// including the bookkeeping kimi appends AS the user, which
+    /// `message(from:)` already refuses.
+    static func userMessage(_ obj: [String: Any]) -> (id: String?, text: String)? {
+        guard (obj["type"] as? String) == "context.append_message",
+              let msg = message(from: obj), msg.role == "user"
+        else { return nil }
+        return (msg.id, AgentSessionScanner.cleanUserText(msg.text))
+    }
+
+    /// The text of a `think` part — the model's reasoning for one step,
+    /// which kimi records on the wire and never prints on stdout — or
+    /// nil for every other record and for a thought with no text.
+    ///
+    ///   {"type":"context.append_loop_event",
+    ///    "event":{"type":"content.part",
+    ///             "part":{"type":"think","think":"…"}}}
+    static func thought(_ obj: [String: Any]) -> String? {
+        guard (obj["type"] as? String) == "context.append_loop_event",
+              let event = obj["event"] as? [String: Any],
+              (event["type"] as? String) == "content.part",
+              let part = event["part"] as? [String: Any],
+              (part["type"] as? String) == "think",
+              let text = (part["think"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !text.isEmpty
+        else { return nil }
+        return text
+    }
+
+    /// One row of a live kimi turn, as far as placing its thoughts goes.
+    enum LiveRow: Equatable {
+        case toolUse(id: String)
+        case toolResult
+        case text(String)
+        case thought
+        /// Anything else — an error, an interrupted marker.
+        case other
+    }
+
+    /// Where a kimi Chat only turn's thoughts go among the rows its
+    /// stdout produced — kimi prints none of them, and its wire records
+    /// each one before the step it led to.
+    ///
+    /// `wireItems` is the wire read with thoughts, and only the records
+    /// after its LAST user message count — the turn's own. A tail
+    /// holding a single user message comes back whole, the end of the
+    /// turn before it included, and a thought from there would shift
+    /// every placement after it; a tail with no user message at all
+    /// opened inside the turn, where thoughts cannot be counted from the
+    /// start, so none are placed (the reopened transcript has them).
+    /// `turnRows` are the live rows after the user's message.
+    ///
+    /// Each thought is anchored to the row that followed it on the wire —
+    /// the tool call with the same id, or the answer text — and placed
+    /// BEFORE that row. Placed strictly in order, starting after the
+    /// `alreadyPlaced` first: a thought whose row has not reached stdout
+    /// yet stops the walk until a later read. Only a `final` read places
+    /// the leftovers (a step cut off by Stop), after the turn's last
+    /// step or word, ahead of an error or interrupted row. A new anchor
+    /// is looked for AFTER the previous one, so a sentence the turn says
+    /// twice anchors each thought to its own saying.
+    ///
+    /// Returns insertion positions in order, each an index into
+    /// `turnRows` as it stands after the placements before it.
+    static func thoughtPlacements(wireItems: [AgentSessionHistoryItem],
+                                  turnRows: [LiveRow],
+                                  alreadyPlaced: Int,
+                                  final: Bool) -> [(text: String, at: Int)] {
+        // `item` tells two sayings of the same words apart.
+        enum Anchor: Equatable { case tool(String), text(String, item: Int), none }
+        guard let opened = wireItems.lastIndex(where: { item in
+            if case .userText = item.kind { return !item.isSystemNotice }
+            return false
+        }) else { return [] }
+        var thoughts: [(text: String, anchor: Anchor)] = []
+        var waiting: [String] = []
+        for index in wireItems.indices where index > opened {
+            switch wireItems[index].kind {
+            case .thinking(let text):
+                waiting.append(text)
+            case .toolUse(let id, _, _):
+                thoughts += waiting.map { ($0, .tool(id)) }
+                waiting = []
+            case .assistantText(let text):
+                thoughts += waiting.map { ($0, .text(text, item: index)) }
+                waiting = []
+            default:
+                break
+            }
+        }
+        thoughts += waiting.map { ($0, .none) }
+        guard alreadyPlaced < thoughts.count else { return [] }
+
+        func trimmed(_ s: String) -> String {
+            s.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        // Contained, not equal: one stdout message can carry what the
+        // wire split into several text parts.
+        func says(_ row: LiveRow, _ text: String) -> Bool {
+            if case .text(let shown) = row { return trimmed(shown).contains(trimmed(text)) }
+            return false
+        }
+        var rows = turnRows
+        // Rows before `from` belong to steps already placed.
+        var from = 0
+        if alreadyPlaced > 0 {
+            var seen = 0
+            for (i, row) in rows.enumerated() where row == .thought {
+                seen += 1
+                if seen == alreadyPlaced { from = i + 1; break }
+            }
+        }
+        // The previous thought's anchor and where its row is now.
+        var previous: (anchor: Anchor, row: Int)? = nil
+        var placements: [(text: String, at: Int)] = []
+        for thought in thoughts.dropFirst(alreadyPlaced) {
+            var at: Int?
+            if let previous, thought.anchor != .none, previous.anchor == thought.anchor {
+                // Two thoughts before one step: both go before it, in order.
+                at = previous.row
+            } else {
+                switch thought.anchor {
+                case .tool(let id):
+                    at = rows[from...].firstIndex(of: .toolUse(id: id))
+                case .text(let text, _):
+                    at = rows[from...].firstIndex { says($0, text) }
+                    // Or the previous anchor's own message, carrying a
+                    // later part of it: these words must follow those.
+                    if at == nil, let previous,
+                       case .text(let before, _) = previous.anchor,
+                       case .text(let shown) = rows[previous.row],
+                       let range = trimmed(shown).range(of: trimmed(before)),
+                       trimmed(shown)[range.upperBound...].contains(trimmed(text)) {
+                        at = previous.row
+                    }
+                case .none:
+                    at = final
+                        ? max(from, rows.lastIndex { $0 != .other }.map { $0 + 1 } ?? 0)
+                        : nil
+                }
+            }
+            guard let at else { break }
+            rows.insert(.thought, at: at)
+            placements.append((thought.text, at))
+            // Its anchor row is one further down now; a new anchor is
+            // looked for after it.
+            previous = (thought.anchor, at + 1)
+            from = thought.anchor == .none ? at + 1 : at + 2
+        }
+        return placements
+    }
+
+    /// True for a record that is the AGENT speaking or acting — a loop
+    /// event carrying a text part or a tool call. What a prefix must
+    /// hold, beside a user message, to count as a conversation.
+    static func isAgentOutput(_ obj: [String: Any]) -> Bool {
+        guard let msg = loopEventMessage(obj) else { return false }
+        return msg.role == "assistant"
+    }
+
     // MARK: - History
 
-    /// Walk a session's wire file and emit history items in
-    /// chronological order.
-    static func readHistory(of wire: URL, maxTurns: Int = 50,
-                            byteBudget: Int? = nil)
-    -> [AgentSessionHistoryItem] {
-        // Same contract as both other readers: bounded tail + lossy
-        // decode, so a live file mid-write can lose at most one edge
-        // line — never the whole transcript — and an oversized one
-        // can't freeze the open. `byteBudget` widens the tail for
-        // whole-conversation callers (search); it never removes the
-        // bound.
-        guard let text = AgentSessionScanner.boundedTail(
-            of: wire, budget: byteBudget ?? (8 * 1024 * 1024))
-        else { return [] }
+    /// One wire record at a time into history rows.
+    ///
+    /// A struct rather than a function over the whole file so the
+    /// same decoder can be fed a prefix and then a tail — and, later,
+    /// the lines a live watcher of an external turn appends. It
+    /// remembers the prompt the turn it is inside was opened with,
+    /// which is the only turn state the wire carries.
+    struct WireDecoder {
+        private(set) var currentPromptId: String? = nil
+        /// Keep `think` parts as `.thinking` rows (see `readHistory`).
+        /// Off, a thought reads as nothing — see `loopEventMessage`.
+        var includeThinking = false
 
-        var items: [AgentSessionHistoryItem] = []
-        text.enumerateLines { line, _ in
+        init(includeThinking: Bool = false) {
+            self.includeThinking = includeThinking
+        }
+
+        mutating func items(forLine line: String) -> [AgentSessionHistoryItem] {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty,
                   let data = trimmed.data(using: .utf8),
                   let obj = (try? JSONSerialization.jsonObject(with: data))
                     as? [String: Any]
-            else { return }
+            else { return [] }
+
+            if let prompt = KimiSessionScanner.turnPromptId(obj) {
+                currentPromptId = prompt
+                return []
+            }
+
+            if includeThinking, let thought = KimiSessionScanner.thought(obj) {
+                return [AgentSessionHistoryItem(kind: .thinking(thought))]
+            }
 
             // The agent summarised the conversation and carried on.
             // Checked before `message(from:)`, which reports nil for
@@ -962,49 +1257,91 @@ enum KimiSessionScanner {
                     else { return nil }
                     return n
                 }
-                items.append(AgentSessionHistoryItem(
+                var out = [AgentSessionHistoryItem(
                     kind: .compaction(preTokens: positive(obj["tokensBefore"]),
-                                      postTokens: positive(obj["tokensAfter"]))))
+                                      postTokens: positive(obj["tokensAfter"])))]
                 if let summary = (obj["summary"] as? String)?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                    !summary.isEmpty {
-                    items.append(AgentSessionHistoryItem(
+                    out.append(AgentSessionHistoryItem(
                         kind: .userText(summary), isSystemNotice: true))
                 }
-                return
+                return out
             }
 
-            guard let msg = message(from: obj) else { return }
+            guard let msg = KimiSessionScanner.message(from: obj) else {
+                return []
+            }
 
             switch msg.role {
             case "user":
                 // Show the prompt, not the bookkeeping tag that filed
-                // the run under its task — same as both other readers.
+                // it under its task — same as both other readers. The
+                // row's handle is the record's own message id, with
+                // the turn's prompt id as the fallback for a writer
+                // that omits one.
                 let body = AgentSessionScanner.cleanUserText(msg.text)
-                guard !body.isEmpty else { return }
-                items.append(AgentSessionHistoryItem(kind: .userText(body)))
+                // Inlined attachments: the names come off the raw text,
+                // before the strip inside `cleanUserText`.
+                let attached = AttachmentInline.names(in: msg.text)
+                guard !body.isEmpty || !attached.isEmpty else { return [] }
+                var item = AgentSessionHistoryItem(
+                    kind: .userText(body),
+                    recordUuid: msg.id ?? currentPromptId)
+                item.attachedFiles = attached
+                return [item]
 
             case "assistant":
+                var out: [AgentSessionHistoryItem] = []
                 let body = msg.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !body.isEmpty {
-                    items.append(AgentSessionHistoryItem(
+                    out.append(AgentSessionHistoryItem(
                         kind: .assistantText(body)))
                 }
                 for call in msg.toolCalls {
-                    items.append(AgentSessionHistoryItem(kind: .toolUse(
+                    out.append(AgentSessionHistoryItem(kind: .toolUse(
                         id: call.id, name: call.name, input: call.input)))
                 }
+                return out
 
             case "tool":
-                guard let id = msg.toolCallId else { return }
-                items.append(AgentSessionHistoryItem(kind: .toolResult(
-                    toolUseId: id, content: msg.text, isError: msg.isError)))
+                guard let id = msg.toolCallId else { return [] }
+                return [AgentSessionHistoryItem(kind: .toolResult(
+                    toolUseId: id, content: msg.text, isError: msg.isError))]
 
             default:
                 // `system` / `developer` records are the prompt kimi was
                 // primed with, not conversation.
-                return
+                return []
             }
+        }
+    }
+
+    /// Walk a session's wire file and emit history items in
+    /// chronological order.
+    ///
+    /// `includeThinking` keeps each step's `think` part as a `.thinking`
+    /// row, for a session with Chat only turns in it (the caller then
+    /// applies `AgentSessionHistoryItem.keepingThoughts`) and for the
+    /// runner's own Chat only turn, whose thoughts reach it no other way.
+    static func readHistory(of wire: URL, maxTurns: Int = 50,
+                            byteBudget: Int? = nil,
+                            includeThinking: Bool = false)
+    -> [AgentSessionHistoryItem] {
+        // Same contract as both other readers: bounded tail + lossy
+        // decode, so a live file mid-write can lose at most one edge
+        // line — never the whole transcript — and an oversized one
+        // can't freeze the open. `byteBudget` widens the tail for
+        // whole-conversation callers (search); it never removes the
+        // bound.
+        guard let text = AgentSessionScanner.boundedTail(
+            of: wire, budget: byteBudget ?? (8 * 1024 * 1024))
+        else { return [] }
+
+        var decoder = WireDecoder(includeThinking: includeThinking)
+        var items: [AgentSessionHistoryItem] = []
+        text.enumerateLines { line, _ in
+            items.append(contentsOf: decoder.items(forLine: line))
         }
 
         // Same turn-based cap as the other two readers.

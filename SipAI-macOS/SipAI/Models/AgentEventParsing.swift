@@ -28,8 +28,16 @@ enum AgentEventParser {
     ///     keeps the default false: its own `send()` already draws the
     ///     bubble, and `--resume` replays historical user inputs on
     ///     stdout that must not render twice.
+    ///   - includeThinking: emit `.thinking` for a thinking block that
+    ///     carries text. Only a Chat only turn asks — its thoughts are
+    ///     drawn inside the turn's activity line — so every other turn's
+    ///     events are exactly what they always were. Claude is asked for
+    ///     readable thinking on a Chat only turn alone
+    ///     (`ChatOnlyArgv.claudeThinkingSummaries`); elsewhere its blocks
+    ///     arrive empty anyway.
     static func parse(line: String, fallbackCwd: URL,
-                      includeUserMessages: Bool = false) -> [StreamEvent] {
+                      includeUserMessages: Bool = false,
+                      includeThinking: Bool = false) -> [StreamEvent] {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty,
               let data = trimmed.data(using: .utf8),
@@ -41,7 +49,7 @@ enum AgentEventParser {
             return parseSystem(obj, fallbackCwd: fallbackCwd,
                                includeLocalCommands: includeUserMessages)
         case "assistant":
-            return parseAssistant(obj)
+            return parseAssistant(obj, includeThinking: includeThinking)
         case "user":
             let toolResults = parseUserToolResult(obj)
             if !toolResults.isEmpty || !includeUserMessages {
@@ -100,7 +108,8 @@ enum AgentEventParser {
         let cwdStr = (obj["cwd"] as? String) ?? fallbackCwd.path
         return [StreamEvent(kind: .systemInit(
             sessionId: sid, model: model, cwd: cwdStr
-        ), fastModeState: obj["fast_mode_state"] as? String)]
+        ), fastModeState: obj["fast_mode_state"] as? String,
+           fastModeDisabledReason: obj["fast_mode_disabled_reason"] as? String)]
     }
 
     /// How full the context window is right now: the INPUT side of ONE
@@ -124,7 +133,8 @@ enum AgentEventParser {
         return total > 0 ? total : nil
     }
 
-    private static func parseAssistant(_ obj: [String: Any]) -> [StreamEvent] {
+    private static func parseAssistant(_ obj: [String: Any],
+                                       includeThinking: Bool) -> [StreamEvent] {
         let msg = (obj["message"] as? [String: Any]) ?? [:]
         // Stamped on every event of this record: any of them updating
         // the runner's counter is equivalent, and a record whose blocks
@@ -153,11 +163,17 @@ enum AgentEventParser {
         // `local_command` record and renders as a system notice.
         // Text only: any other block type keeps its ordinary shape.
         let isSynthetic = (msg["model"] as? String) == "<synthetic>"
+        // What the call actually ran at — the ground truth behind the
+        // fast switch, main loop only, for the same reason as `ctx`.
+        let speed: String? = isSubagent || isSynthetic ? nil
+            : ((msg["usage"] as? [String: Any])?["speed"] as? String)
+                .flatMap { $0.isEmpty ? nil : $0 }
         func textEvent(_ t: String) -> StreamEvent {
             isSynthetic
                 ? StreamEvent(kind: .userMessage(text: t), contextTokens: ctx,
                               isSystemNotice: true)
-                : StreamEvent(kind: .assistantText(text: t), contextTokens: ctx)
+                : StreamEvent(kind: .assistantText(text: t), contextTokens: ctx,
+                              callSpeed: speed)
         }
         let content = msg["content"]
         guard let arr = content as? [Any] else {
@@ -182,9 +198,17 @@ enum AgentEventParser {
                 let input = dict["input"] as? [String: Any] ?? [:]
                 out.append(StreamEvent(kind: .toolUse(
                     toolUseId: id, name: name, input: input
-                ), contextTokens: ctx))
+                ), contextTokens: ctx, callSpeed: speed))
+            case "thinking" where includeThinking && !isSubagent:
+                // An empty block is thinking the API was asked to leave
+                // out (the signature alone); it has nothing to draw.
+                if let t = dict["thinking"] as? String,
+                   !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    out.append(StreamEvent(kind: .thinking(text: t), contextTokens: ctx,
+                                           callSpeed: speed))
+                }
             default:
-                break  // "thinking" and other content types: silently ignored
+                break  // other content types: silently ignored
             }
         }
         return out
@@ -244,7 +268,31 @@ enum AgentEventParser {
             inputTokens: inTok,
             outputTokens: outTok
         ), fastModeState: obj["fast_mode_state"] as? String,
+           fastModeDisabledReason: obj["fast_mode_disabled_reason"] as? String,
            modelContextWindows: windows.isEmpty ? nil : windows)]
+    }
+
+    /// Claude's own sentence when the API refused a call's fast mode for
+    /// want of usage credits — the `system` notification keyed
+    /// `ClaudeFastMode.refusalKey` ("Fast mode disabled · usage credits
+    /// exhausted") — or nil for every other line.
+    ///
+    /// Read beside the parse rather than as an event, like
+    /// `compactingSignal`: it is STATE (the session's fast mode is not
+    /// being served), which the chip shows, and no transcript keeps it.
+    static func fastModeRefusal(line: String) -> String? {
+        guard line.contains(ClaudeFastMode.refusalKey) else { return nil }
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard let data = trimmed.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data))
+                as? [String: Any],
+              (obj["type"] as? String) == "system",
+              (obj["subtype"] as? String) == "notification",
+              (obj["key"] as? String) == ClaudeFastMode.refusalKey
+        else { return nil }
+        let text = ((obj["text"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
     }
 
     /// Whether the child is summarising the conversation right now:

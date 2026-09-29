@@ -7,6 +7,7 @@
 //     "messages": [ {role, content, model?, time?, files?}, ... ] }
 
 import Foundation
+import Combine
 
 /// ISO-8601 for the chat files' `last_user_message_at`. Written plain,
 /// read leniently: a value carrying fractional seconds — from a hand
@@ -211,6 +212,20 @@ final class ChatManager: ObservableObject {
         liveTurns[Self.liveKey(slug: slug, project: project)] != nil
     }
 
+    /// Whether any chat in one scope — a chat group's slug, or nil for
+    /// the root Chats list — is waiting on its reply: what a folded
+    /// group and a collapsed section draw their activity dot from.
+    ///
+    /// Read off the live set, not off the listed chats: a new chat's
+    /// first reply is in flight before any reload has listed it. The
+    /// scope is `liveKey` with an empty slug, so the key is still
+    /// spelled once — and a slug never holds a "/" (`slugify`), so the
+    /// prefix names exactly one scope.
+    func hasChatInFlight(inProject project: String?) -> Bool {
+        let scope = Self.liveKey(slug: "", project: project)
+        return liveTurns.keys.contains { $0.hasPrefix(scope) }
+    }
+
     /// The in-flight turn for a chat, if any — the composer reads its
     /// `startedAt` for the "Sipping… (m:ss)" clock, so the clock keeps
     /// the turn's own start time across a detour rather than restarting
@@ -225,12 +240,101 @@ final class ChatManager: ObservableObject {
     /// would strand the row of a chat the user has since left.
     func beginTurn(slug: String, project: String?,
                    startedAt: Date, task: Task<Void, Never>) {
-        liveTurns[Self.liveKey(slug: slug, project: project)] =
-            ChatTurn(startedAt: startedAt, task: task)
+        let key = Self.liveKey(slug: slug, project: project)
+        liveTurns[key] = ChatTurn(startedAt: startedAt, task: task)
+        if key == openChatKey { openChatHeldTier = .running }
     }
 
     func endTurn(slug: String, project: String?) {
-        liveTurns.removeValue(forKey: Self.liveKey(slug: slug, project: project))
+        let key = Self.liveKey(slug: slug, project: project)
+        // Nothing to remove means the turn was already torn down — the
+        // chat was deleted or moved — and there is nothing to open.
+        guard liveTurns.removeValue(forKey: key) != nil else { return }
+        // A reply (or a failure to say why there is none) landed while
+        // the user was elsewhere: the steady dot, until they open the
+        // chat. Not when they are looking at it, and not when they
+        // stopped it themselves — Stop is pressed from the chat, and
+        // leaving before the stop lands is still their own act.
+        guard key != openChatKey, turnOutcomes[key] != .interrupted else { return }
+        config?.markChatUnread(key: key)
+    }
+
+    // MARK: - Unread replies and the open chat
+
+    /// Where unread replies are kept (`chat_unread`), set once at launch
+    /// (`configure(config:)`) the way `AgentManager` holds its config.
+    private weak var config: ConfigManager?
+    private var unreadWatch: AnyCancellable?
+
+    func configure(config: ConfigManager) {
+        self.config = config
+        // The chat rows read the marks through this manager and observe
+        // only it, so a change to the marks has to reach them as a
+        // change of its own — whoever made it.
+        unreadWatch = config.$chatUnreadKeys
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+    }
+
+    /// The chat the centre pane shows (`liveKey`), as ContentView reports
+    /// it — nil for anything else. A reply that lands while its chat is
+    /// open leaves no steady dot.
+    private(set) var openChatKey: String? = nil
+
+    /// The tier the open chat stood in when it was opened, raised if a
+    /// reply has been asked for since — held until the user opens
+    /// anything else (`SidebarTier.placed`), exactly as for a session.
+    @Published private(set) var openChatHeldTier: SidebarTier? = nil
+
+    /// Opening a chat reads it: its unread mark goes, and its place is
+    /// held at the tier it had a moment ago.
+    func noteOpenChat(slug: String?, project: String?) {
+        let key = slug.map { Self.liveKey(slug: $0, project: project) }
+        guard key != openChatKey else { return }
+        openChatKey = key
+        guard let key else {
+            openChatHeldTier = nil
+            return
+        }
+        openChatHeldTier = actualTier(key: key)
+        config?.clearChatUnread(key: key)
+    }
+
+    func isChatUnread(slug: String, project: String?) -> Bool {
+        config?.chatUnreadKeys.contains(Self.liveKey(slug: slug, project: project)) ?? false
+    }
+
+    /// Whether a chat in one scope — a group's slug, or nil for the root
+    /// Chats list — has an unread reply: a folded group's and a collapsed
+    /// section's steady dot. Same scope spelling as `hasChatInFlight`.
+    func hasChatUnread(inProject project: String?) -> Bool {
+        let scope = Self.liveKey(slug: "", project: project)
+        return config?.chatUnreadKeys.contains { $0.hasPrefix(scope) } ?? false
+    }
+
+    private func actualTier(key: String) -> SidebarTier {
+        SidebarTier.of(running: liveTurns[key] != nil,
+                       unread: config?.chatUnreadKeys.contains(key) ?? false)
+    }
+
+    /// Where a chat is PLACED in its list — see `SidebarTier`.
+    func sidebarTier(slug: String, project: String?) -> SidebarTier {
+        let key = Self.liveKey(slug: slug, project: project)
+        return SidebarTier.placed(actualTier(key: key),
+                                  heldSinceOpened: key == openChatKey ? openChatHeldTier : nil)
+    }
+
+    /// `chats` — one list, newest first — with the replying ones first,
+    /// then the unread ones, and the rest after; newest first within
+    /// each. Stable, so a tier keeps the list's own order.
+    func sidebarOrdered(_ chats: [StoredChat]) -> [StoredChat] {
+        let tiers = chats.map { sidebarTier(slug: $0.slug, project: $0.project) }
+        return zip(chats, tiers).enumerated()
+            .sorted {
+                if $0.element.1 != $1.element.1 { return $0.element.1 < $1.element.1 }
+                return $0.offset < $1.offset
+            }
+            .map { $0.element.0 }
     }
 
     /// Stop button. Reaches the turn through the manager rather than a
@@ -334,6 +438,15 @@ final class ChatManager: ObservableObject {
         }
         self.rootChats = roots
         self.projectChats = perProject
+        // An unread mark for a chat no longer listed — its file removed
+        // outside the app, its group deleted — goes, keyed the way the
+        // rows key it. Only on a folder that was actually read: the
+        // failed read above empties the lists and must not empty this.
+        var existing = Set(roots.map { Self.liveKey(slug: $0.slug, project: $0.project) })
+        for chats in perProject.values {
+            for chat in chats { existing.insert(Self.liveKey(slug: chat.slug, project: chat.project)) }
+        }
+        config?.pruneChatUnread(keeping: existing)
     }
 
     private static func loadChatFile(at url: URL) -> StoredChat? {
@@ -424,6 +537,9 @@ final class ChatManager: ObservableObject {
         // and, when the in-flight task delivers, the deleted
         // conversation's reply.
         teardownTurn(slug: slug, project: project)
+        // Its unread reply goes with it — the slug is reused by the next
+        // chat given the same title.
+        config?.clearChatUnread(key: Self.liveKey(slug: slug, project: project))
         let url = SipaiPaths.chatStateFile(slug: slug, project: project)
         try? FileManager.default.removeItem(at: url)
         reload()
@@ -480,6 +596,9 @@ final class ChatManager: ObservableObject {
             return nil
         }
         try? FileManager.default.removeItem(at: oldURL)
+        // An unread reply moves with the chat it belongs to.
+        config?.moveChatUnread(from: Self.liveKey(slug: slug, project: project),
+                               to: Self.liveKey(slug: saved.slug, project: saved.project))
         reload()
         return saved
     }

@@ -48,6 +48,7 @@ fi
 # compiler wall: an absent subject IS the pre-fix result.
 if ! swiftc -O -o "$out/contextchip" \
   "$here/Stubs.swift" "$here/main.swift" \
+  "$src/SipAI/Models/AttachmentInline.swift" \
   "$src/SipAI/Models/AgentSession.swift" \
   "$src/SipAI/Models/AgentEventParsing.swift" \
   "$src/SipAI/Models/CodexSessions.swift" \
@@ -55,6 +56,7 @@ if ! swiftc -O -o "$out/contextchip" \
   "$src/SipAI/Models/KimiSessions.swift" \
   "$src/SipAI/Models/KimiEventParsing.swift" \
   "$src/SipAI/Models/AgentLaunchOptions.swift" \
+  "$src/SipAI/Models/KimiToolPolicy.swift" \
   "$src/SipAI/Models/ConfigManager.swift" \
   "$src/SipAI/Models/ProviderCatalog.swift" 2>"$out/build.log"; then
   if grep -q "cannot find 'ContextWindowResolver'\|cannot find 'ContextUsageFormat'\|has no member 'compactingSignal'" "$out/build.log"; then

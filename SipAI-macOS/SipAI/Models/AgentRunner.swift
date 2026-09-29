@@ -42,9 +42,17 @@ struct StreamEvent: Identifiable, Hashable {
     /// Claude's `fast_mode_state` as reported on the `system.init` and
     /// `result` events — "on", "off" or "cooldown" (paused after a
     /// rate limit). Nil on every other event and on agents that report
-    /// no such thing. What the composer's fast switch is checked
-    /// against: the switch states an intent, this states what served.
+    /// no such thing. One of the channels `ClaudeFastModeReport`
+    /// gathers: it stays "on" while claude's calls are being refused.
     let fastModeState: String?
+    /// `fast_mode_disabled_reason` beside it, when claude names what
+    /// blocks fast mode for the session ("extra_usage_disabled", …).
+    let fastModeDisabledReason: String?
+    /// `usage.speed` of the MAIN-LOOP API call this event came from —
+    /// "fast" or "standard", what the call actually ran at. Nil on
+    /// subagent records, on the harness's own `<synthetic>` text, and
+    /// on every event whose record carries no usage.
+    let callSpeed: String?
 
     /// Context window per full model id, as CLAUDE reported it on the
     /// `result` event (`modelUsage[<id>].contextWindow`) — the window
@@ -57,16 +65,40 @@ struct StreamEvent: Identifiable, Hashable {
     /// several places that have no use for it.
     let modelContextWindows: [String: Int]?
 
+    /// The files a `.userMessage` carried as inlined attachments
+    /// (`AttachmentInline`), for the paperclip line — the event's text is
+    /// the DISPLAY text, blocks stripped, and the names are what is left
+    /// of them. Empty on every other event. Set by `AgentRunner.send`,
+    /// and by the tailer for a codex or kimi row, which comes through the
+    /// reader a reopened transcript uses and so carries the names that
+    /// reader read; claude's live parser has none to give.
+    let attachedFiles: [String]
+
+    /// True on the `.userMessage` of a turn that ran in Chat only — the
+    /// flag the transcript reads to draw that turn's thoughts and web
+    /// lookups as one line (`ChatOnlyActivity`). Set by `send` from the
+    /// options the turn actually ran with, so switching the chip later
+    /// never restyles a turn already on screen. False on every other
+    /// event, and on a message another process sent.
+    let chatOnlyTurn: Bool
+
     init(kind: StreamEventKind, contextTokens: Int? = nil,
          isSystemNotice: Bool = false, fastModeState: String? = nil,
-         modelContextWindows: [String: Int]? = nil) {
+         fastModeDisabledReason: String? = nil, callSpeed: String? = nil,
+         modelContextWindows: [String: Int]? = nil,
+         attachedFiles: [String] = [],
+         chatOnlyTurn: Bool = false) {
         self.id = UUID()
         self.timestamp = Date()
         self.kind = kind
         self.contextTokens = contextTokens
         self.isSystemNotice = isSystemNotice
         self.fastModeState = fastModeState
+        self.fastModeDisabledReason = fastModeDisabledReason
+        self.callSpeed = callSpeed
         self.modelContextWindows = modelContextWindows
+        self.attachedFiles = attachedFiles
+        self.chatOnlyTurn = chatOnlyTurn
     }
 
     // Identity-only equality keeps SwiftUI diffs cheap; the kind
@@ -82,6 +114,11 @@ enum StreamEventKind {
     /// One assistant text block. Multiple per turn are possible when
     /// Claude interleaves text with tool calls.
     case assistantText(text: String)
+    /// A readable thought — the model's thinking summary. Only ever
+    /// present in a Chat only turn: the parsers emit none unless asked,
+    /// and the runner asks only for a turn that ran in Chat only, so an
+    /// agent turn's event list is exactly what it always was.
+    case thinking(text: String)
     /// One tool_use block from an assistant message. The `toolUseId`
     /// ties this to a later `toolResult` carrying the same id. The raw
     /// input dict is carried through so the view can render the rich
@@ -248,11 +285,19 @@ final class AgentRunner: ObservableObject {
     }
     @Published private(set) var resolvedModel: ResolvedModel? = nil
 
-    /// The newest `fast_mode_state` claude reported for this session's
-    /// own turns ("on" / "off" / "cooldown"), or nil before any did.
-    /// Same delivery shape as `resolvedModel`, and read the same way:
-    /// the view mirrors it behind an equality guard.
-    @Published private(set) var fastModeState: String? = nil
+    /// What claude has said about fast mode on this session's turns —
+    /// its reported state and reason, the refusal sentence of the
+    /// current turn, and the speed the newest call ran at. Same delivery
+    /// shape as `resolvedModel`, and read the same way: the view mirrors
+    /// it behind an equality guard. Always empty for codex and kimi.
+    @Published private(set) var fastModeReport = ClaudeFastModeReport()
+
+    /// One write per change: a publish re-renders the session view.
+    private func updateFastModeReport(_ change: (inout ClaudeFastModeReport) -> Void) {
+        var next = fastModeReport
+        change(&next)
+        if next != fastModeReport { fastModeReport = next }
+    }
 
     /// The alias the in-flight turn was launched with, captured at
     /// `send` — the only moment it is knowable, since the chips are
@@ -325,6 +370,14 @@ final class AgentRunner: ObservableObject {
     /// Claude only — the other two announce nothing while they compact.
     @Published private(set) var compacting: Bool = false
 
+    /// This turn was sent while SipAI is updating the agent's own
+    /// command-line tool, and is waiting for that update to finish
+    /// before it spawns (`runOnce`). The user's message is already on
+    /// screen; the waiting row says why nothing has happened yet. STATE,
+    /// like `compacting`: cleared when the wait ends and when the turn
+    /// does, and never written into `events`.
+    @Published private(set) var waitingForToolUpdate: Bool = false
+
     /// The single pending finalize bound on the turn — armed by Stop
     /// (`armTurnFinalize`), and by the child's exit when a reader
     /// misses its EOF.
@@ -358,6 +411,70 @@ final class AgentRunner: ObservableObject {
     /// because its JSONL doesn't exist to be appended to.
     var onExternalInProgressChange: ((_ sessionId: String, _ inProgress: Bool) -> Void)?
 
+    /// The journal behind a kimi Chat only turn (`KimiToolPolicy`): a
+    /// record means "SipAI is about to write the session's tool-policy
+    /// file; this is what was there", nil means "put back, forget it".
+    /// Wired by `AgentManager` into config so a crash mid-turn is healed
+    /// at the next launch. The runner never touches config itself.
+    var onKimiToolPolicyJournal: ((_ sessionId: String,
+                                   _ record: KimiToolPolicy.RestoreRecord?) -> Void)?
+
+    /// The restore owed for the kimi `--prompt` turn in flight, applied
+    /// by whichever caller ends the turn first (`finalizeTurn`, a spawn
+    /// failure) — first caller wins, like `stampTurnDuration`.
+    private var pendingKimiRestore: (sessionId: String, file: URL,
+                                     record: KimiToolPolicy.RestoreRecord)? = nil
+
+    /// A kimi Chat only turn is running through kimi's local server
+    /// (`runKimiWebTurn`) — no child process of ours, so Stop must not
+    /// end the turn before that task has aborted the prompt, shut the
+    /// server down and put the tool-policy file back; see `cancel()`.
+    /// Held as the turn's `runToken`: a stopped server turn's teardown
+    /// can outlive the bound Stop arms, and must not clear the flag of
+    /// a newer turn that started meanwhile.
+    private var kimiWebTurnToken: Int? = nil
+    private var kimiWebTurnInFlight: Bool { kimiWebTurnToken == runToken }
+
+    /// Temp image files written for a codex `-i` turn, removed when the
+    /// turn ends — the same first-caller-wins cleanup shape as the kimi
+    /// tool-policy restore. Codex reads the files while it runs; nothing
+    /// keeps them afterwards.
+    private var pendingCodexImageFiles: [URL] = []
+
+    /// A finished Chat only turn's handle into the transcript — its user
+    /// record's id in the reader's own vocabulary (claude record `uuid`,
+    /// codex `turn_id`, kimi prompt id) — so the turn keeps its look when
+    /// the session is reopened. No agent records that a turn ran in Chat
+    /// only, so SipAI remembers it. Wired by `AgentManager` into config;
+    /// the runner never touches config itself.
+    var onChatOnlyTurnRecorded: ((_ sessionId: String, _ handle: String) -> Void)?
+
+    /// Whether the turn in flight (or the newest one) ran in Chat only.
+    /// Decides whether the parsers keep the model's thoughts: an agent
+    /// turn's events never carry one.
+    private var turnChatOnly = false
+
+    /// This turn's handle has been resolved and handed out — at its
+    /// `result` or at `finalizeTurn`, whichever comes first, like
+    /// `stampTurnDuration`.
+    private var chatOnlyTurnRecorded = false
+
+    /// Kimi prints no thinking on stdout; its wire records every step's.
+    /// How many of this turn's wire thoughts are already in `events`
+    /// (they are placed in order — see `placeKimiThoughts`), and the
+    /// single-flight state of the read that fetches them.
+    private var kimiThoughtsPlaced = 0
+    private var kimiThoughtSyncRunning = false
+    private var kimiThoughtSyncPending = false
+    private var kimiThoughtSyncFinal = false
+
+    /// What the turn the live buffer opens inside ran as, once the front
+    /// trim has cut that turn's message away (`trimLiveEventsIfNeeded`):
+    /// the transcript reads it to keep the rest of a Chat only turn on
+    /// its one line (`ChatOnlyActivity.LiveStart`). Changes only with
+    /// `events`, whose publish re-renders the view.
+    private(set) var trimmedHeadChatOnly = false
+
     /// `true` while a separate Claude Code process (another terminal,
     /// a scheduled task, another SipAI instance) is mid-turn against
     /// the same session JSONL. Drives the sidebar activity dot and
@@ -380,6 +497,15 @@ final class AgentRunner: ObservableObject {
     /// can't be identified at all.
     @Published private(set) var externalStoppablePid: Int32? = nil
 
+    /// Whether the external turn being watched was stopped from this
+    /// app's composer (`stopExternalTurn`). Read at its end by the
+    /// sidebar's unread rule, the way `turnWasStoppedByUser` is for a
+    /// turn of ours: a run the user ended leaves no steady dot. The
+    /// end arrives through the tailer's sweep, seconds after the
+    /// click, by when the user may have moved on. Reset when the next
+    /// external turn starts.
+    private(set) var externalTurnWasStoppedByUser: Bool = false
+
     // MARK: Private
 
     private var process: Process?
@@ -395,6 +521,13 @@ final class AgentRunner: ObservableObject {
     /// pressing Stop while the previous press was still taking effect
     /// would stamp a fresh row per press.
     private var stopRequested: Bool = false
+
+    /// Whether the turn that just ended was ended by the user — the Stop
+    /// button, or quitting SipAI, which stops through the same
+    /// `cancel()`. Read at the turn's end by the sidebar's unread rule:
+    /// a run the user ended leaves no steady dot behind. Reset by the
+    /// next send.
+    var turnWasStoppedByUser: Bool { stopRequested }
 
     /// Whether THIS turn has already had its duration recorded. The
     /// chip must show thinking time, so the first stamp wins and every
@@ -533,8 +666,9 @@ final class AgentRunner: ObservableObject {
     private var tailer: AgentSessionTailer?
 
     /// Poller that reads a kimi session's id back off the store — the
-    /// stand-in for the `system.init` / `thread.started` event kimi's
-    /// stdout doesn't have. See `startKimiSessionDiscovery`.
+    /// stand-in for a `system.init` / `thread.started` event, which kimi
+    /// sends only as its final answer's `session.resume_hint`. See
+    /// `startKimiSessionDiscovery`.
     private var kimiDiscoveryTask: Task<Void, Never>?
 
     // MARK: Init
@@ -583,7 +717,8 @@ final class AgentRunner: ObservableObject {
     /// Returns false when the send was refused (mid-turn or empty text)
     /// so the composer can keep the draft instead of dropping it.
     @discardableResult
-    func send(text: String, options: AgentLaunchOptions = AgentLaunchOptions()) -> Bool {
+    func send(text: String, options: AgentLaunchOptions = AgentLaunchOptions(),
+              images: [AgentImage] = []) -> Bool {
         guard !status.isRunning else { return false }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
@@ -598,12 +733,33 @@ final class AgentRunner: ObservableObject {
             killChild(reason: "superseded by a new send")
         }
 
-        events.append(StreamEvent(kind: .userMessage(text: trimmed)))
-        inFlightUserText = trimmed
+        // The WIRE text is the composed message, inlined attachment
+        // blocks included; the BUBBLE shows the user's own words with a
+        // paperclip line naming the files — the same split the readers
+        // make on reopen (`AttachmentInline`), so a mid-turn reload's
+        // cut (`inFlightUserText`), the branch pencil's text match and
+        // the find pipeline all see one spelling: the displayed one.
+        // The `<scheduled-task>` marker a fired run is prefixed with is
+        // filing, not words, and every reader strips it too — left in
+        // here, the live row would draw the tag and never match its
+        // record (no cut on a mid-turn reload, no branch from the row).
+        let display = CodexSessionScanner.strippedTaskMarker(trimmed)
+        events.append(StreamEvent(kind: .userMessage(text: display),
+                                  attachedFiles: AttachmentInline.names(in: trimmed),
+                                  chatOnlyTurn: options.chatOnly))
+        inFlightUserText = display
+        turnChatOnly = options.chatOnly
+        chatOnlyTurnRecorded = false
+        kimiThoughtsPlaced = 0
+        kimiThoughtSyncPending = false
+        kimiThoughtSyncFinal = false
         // Whatever the chips say when this turn's system.init lands is
         // not what this turn ran as — the user is free to move them
         // mid-turn. Captured here, it can only ever describe this send.
         launchedModelAlias = options.model ?? ""
+        // A refusal describes the turn it happened in; the next one asks
+        // for fast mode afresh (credits may have been added meanwhile).
+        updateFastModeReport { $0.refusal = nil }
         stderrTail = ""
         stderrBuffer = ""
         retryNotice = ""
@@ -623,7 +779,7 @@ final class AgentRunner: ObservableObject {
 
         runTask = Task { [weak self] in
             guard let self = self else { return }
-            await self.runOnce(text: trimmed, options: options)
+            await self.runOnce(text: trimmed, options: options, images: images)
         }
         return true
     }
@@ -671,6 +827,16 @@ final class AgentRunner: ObservableObject {
             // Past killChild's own 3 s SIGTERM→SIGKILL escalation, so
             // the child is certainly gone by the time this fires.
             armTurnFinalize(after: Self.stopGrace, reason: "Stop")
+        } else if kimiWebTurnInFlight {
+            // No child of ours to kill: the turn runs through kimi's
+            // local server, and the cancelled task aborts the prompt,
+            // shuts the server down, puts the session's tool-policy
+            // file back and THEN finalizes. Ending the turn here would
+            // let the next send start under that teardown — two writers
+            // on one session, and the new turn's policy file removed
+            // from under it by the old turn's restore. The bound is for
+            // a server that stops answering.
+            armTurnFinalize(after: Self.stopGrace, reason: "Stop, kimi web turn")
         } else {
             // Nothing to kill. Whatever the readers are doing, the turn
             // is over the moment the child is gone — end it now.
@@ -697,14 +863,16 @@ final class AgentRunner: ObservableObject {
 
     /// SIGTERM now; SIGKILL a few seconds later if it was ignored.
     ///
-    /// The claude pid ONLY, deliberately. No descendant of `claude`
-    /// inherits our descriptors — tool subprocesses get /dev/null plus
-    /// a temp file, MCP stdio servers get socketpairs — so the only
-    /// holder of our PTY slave is claude itself, and killing claude
-    /// alone is enough for both readers to reach EOF. Signalling the
-    /// process GROUP would be actively wrong: Foundation gives us no
-    /// way to put the child in a group of its own, so its group is
-    /// OURS, and `kill(-pgid)` would take down SipAI with it.
+    /// The SIGTERM reaches claude's whole process GROUP: `Process` makes
+    /// the child the leader of a group of its own, and `terminate()`
+    /// signals that group — the MCP approver claude started is in it
+    /// (its Bash tool shells lead groups of their own). The SIGKILL
+    /// escalation goes to the claude pid alone, and nothing here signals
+    /// a group by hand: no descendant of `claude` inherits our
+    /// descriptors — tool subprocesses get /dev/null plus a temp file,
+    /// MCP stdio servers get socketpairs — so the only holder of our PTY
+    /// slave is claude itself, and killing claude alone is enough for
+    /// both readers to reach EOF.
     private func killChild(reason: String) {
         guard let p = process, p.isRunning else { return }
         let pid = p.processIdentifier
@@ -794,7 +962,7 @@ final class AgentRunner: ObservableObject {
     /// sentence, in every language it is translated into. Moving the
     /// number here means moving that string and its translations with
     /// it, or the transcript reports a wait it never made.
-    private static let firstOutputGrace: TimeInterval = 180
+    private static let firstOutputGrace: TimeInterval = 300
 
     /// Bound the SILENCE at the start of a turn — the one failure mode
     /// the transcript had no way to describe.
@@ -910,6 +1078,12 @@ final class AgentRunner: ObservableObject {
             return false
         }
         disarmTurnEndWatchdog()
+        // A kimi Chat only turn wrote the session's tool-policy file;
+        // the child is gone (or being killed), so put it back now —
+        // whichever of the finalize callers got here first.
+        restoreKimiToolPolicyIfPending()
+        // A codex image turn's temp files have been read by now.
+        cleanupCodexImageFilesIfPending()
         if status.isRunning {
             if let reason = fallbackReason {
                 // The ordinary path finalizes from the join, so reaching
@@ -929,6 +1103,7 @@ final class AgentRunner: ObservableObject {
             disarmStallNotice()
             retryNotice = ""
             compacting = false
+            waitingForToolUpdate = false
             // Last chance to freeze the composer's clock. A no-op for a
             // turn that emitted `result` or was stopped; the only stamp
             // a kimi turn ever gets, since its stdout has no turn-end
@@ -971,7 +1146,112 @@ final class AgentRunner: ObservableObject {
         // only arrives with the last stdout line.
         refreshCodexContextTokens()
         refreshKimiContextTokens()
+        // The wire is complete: every thought of a kimi Chat only turn
+        // can be placed now, including one whose step never reached
+        // stdout (a stopped turn).
+        syncKimiThoughts(final: true)
+        recordChatOnlyTurnIfNeeded()
         return true
+    }
+
+    // MARK: - Chat only turns: the record and kimi's thoughts
+
+    /// Hand out a finished Chat only turn's handle (see
+    /// `onChatOnlyTurnRecorded`), resolved off the main thread by the
+    /// same newest-first text match the branch writers use for a live
+    /// row. Best effort: a turn whose record cannot be found keeps its
+    /// look until the session is reopened, then reads as an agent turn.
+    private func recordChatOnlyTurnIfNeeded() {
+        guard turnChatOnly, !chatOnlyTurnRecorded,
+              let sid = sessionId, !sid.isEmpty,
+              let text = inFlightUserText else { return }
+        chatOnlyTurnRecorded = true
+        let key = agentKey
+        let known = sessionFileURL
+        Task.detached(priority: .utility) { [weak self] in
+            guard let url = known ?? Self.locateSessionFile(id: sid, agentKey: key)
+            else { return }
+            let handle: String?
+            switch key {
+            case "codex":
+                handle = CodexSessionFork.resolveCutPoint(matchingUserText: text, in: url)
+            case "kimi":
+                handle = KimiSessionFork.resolveCutPoint(matchingUserText: text, in: url)
+            default:
+                handle = AgentSessionFork.resolveCutPoint(matchingUserText: text, in: url)
+            }
+            guard let handle, !handle.isEmpty else { return }
+            await MainActor.run { [weak self] in
+                self?.onChatOnlyTurnRecorded?(sid, handle)
+            }
+        }
+    }
+
+    /// Read this kimi Chat only turn's thoughts back off the wire and
+    /// place the ones not yet in `events`.
+    ///
+    /// Kimi's print-mode stdout carries no thinking at all, while its
+    /// wire records every step's. Single-flight: a request that arrives
+    /// while a read is running is folded into one more read after it,
+    /// and `final` is sticky across that fold — the finalize call must
+    /// never be absorbed by an earlier, non-final read.
+    private func syncKimiThoughts(final: Bool = false) {
+        guard isKimi, turnChatOnly else { return }
+        if final { kimiThoughtSyncFinal = true }
+        guard !kimiThoughtSyncRunning else {
+            kimiThoughtSyncPending = true
+            return
+        }
+        guard let wire = sessionFileURL
+                ?? sessionId.flatMap({ KimiSessionScanner.sessionDirectory(forId: $0) })
+                    .map({ KimiSessionScanner.wireFile(inSessionDir: $0) })
+        else { return }
+        kimiThoughtSyncRunning = true
+        kimiThoughtSyncPending = false
+        let isFinal = kimiThoughtSyncFinal
+        let token = runToken
+        Task.detached(priority: .utility) { [weak self] in
+            // The current turn only, from a tail that comfortably holds
+            // one chat turn: this runs once per step.
+            let items = KimiSessionScanner.readHistory(
+                of: wire, maxTurns: 1, byteBudget: 2 * 1024 * 1024,
+                includeThinking: true)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.kimiThoughtSyncRunning = false
+                if token == self.runToken {
+                    self.placeKimiThoughts(from: items, final: isFinal)
+                }
+                if self.kimiThoughtSyncPending {
+                    self.syncKimiThoughts()
+                }
+            }
+        }
+    }
+
+    /// Insert the wire's thoughts into this turn's events where
+    /// `KimiSessionScanner.thoughtPlacements` says — each BEFORE the row
+    /// it led to — and never by replacing events: replacing would mint
+    /// new row ids and collapse whatever the user had opened.
+    private func placeKimiThoughts(from items: [AgentSessionHistoryItem],
+                                   final: Bool) {
+        guard let start = events.lastIndex(where: Self.opensTurn) else { return }
+        let rows: [KimiSessionScanner.LiveRow] = events[(start + 1)...].map { event in
+            switch event.kind {
+            case .toolUse(let id, _, _): return .toolUse(id: id)
+            case .toolResult: return .toolResult
+            case .assistantText(let text): return .text(text)
+            case .thinking: return .thought
+            default: return .other
+            }
+        }
+        for placement in KimiSessionScanner.thoughtPlacements(
+            wireItems: items, turnRows: rows,
+            alreadyPlaced: kimiThoughtsPlaced, final: final) {
+            events.insert(StreamEvent(kind: .thinking(text: placement.text)),
+                          at: start + 1 + placement.at)
+            kimiThoughtsPlaced += 1
+        }
     }
 
     /// Stop a turn some OTHER claude process is running on this
@@ -990,6 +1270,7 @@ final class AgentRunner: ObservableObject {
             externalStoppablePid = nil
             return
         }
+        externalTurnWasStoppedByUser = true
         // Freeze the chip on the turn's own clock (transcript stamp);
         // the tailer's idle sweep flips the running state off once the
         // writer is gone.
@@ -1019,12 +1300,30 @@ final class AgentRunner: ObservableObject {
             externalStoppablePid = nil
             return
         }
+        // A fresh turn: whatever the user did to the last one is over.
+        externalTurnWasStoppedByUser = false
         guard let url = sessionFileURL else { return }
         let sid = sessionId
+        let agent = agentKey
         Task.detached(priority: .utility) { [weak self] in
-            let start = AgentSessionScanner.lastTurnStartDate(of: url)
-            let stoppable = sid.flatMap {
-                ClaudeSessionStatusStore.stoppableExternalPid(sessionId: $0)
+            // Each agent's own record of when the turn began. Only claude
+            // leaves a writer this app may stop — a headless `claude -p`
+            // it orphaned; codex and kimi keep a disabled Stop, like an
+            // interactive terminal claude.
+            let start: Date?
+            let stoppable: Int32?
+            switch agent {
+            case "codex":
+                start = CodexSessionScanner.latestTurn(of: url)?.startedAt
+                stoppable = nil
+            case "kimi":
+                start = KimiSessionScanner.latestTurn(of: url)?.startedAt
+                stoppable = nil
+            default:
+                start = AgentSessionScanner.lastTurnStartDate(of: url)
+                stoppable = sid.flatMap {
+                    ClaudeSessionStatusStore.stoppableExternalPid(sessionId: $0)
+                }
             }
             await MainActor.run { [weak self] in
                 guard let self, self.externalInProgress else { return }
@@ -1075,23 +1374,44 @@ final class AgentRunner: ObservableObject {
     func clearEvents() {
         guard !status.isRunning else { return }
         events.removeAll()
+        trimmedHeadChatOnly = false
     }
 
     // MARK: - Argument construction
 
     private func claudeArguments(text: String,
-                                 options: AgentLaunchOptions) -> [String] {
-        var args: [String] = [
-            "-p", text,
-            "--output-format", "stream-json",
-            "--verbose",
-        ]
+                                 options: AgentLaunchOptions,
+                                 streamJSONInput: Bool = false) -> [String] {
+        // An image turn reads its whole prompt (text + image blocks) as
+        // a stream-json message on stdin, so the positional prompt is
+        // dropped and `--input-format stream-json` is added; `-p` stays
+        // (the input format is only valid with it). Every other turn
+        // passes the prompt positionally.
+        var args: [String] = streamJSONInput
+            ? ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+            : ["-p", text, "--output-format", "stream-json", "--verbose"]
         args.append(contentsOf: options.flags(for: agentKey))
+        // Chat only: web lookups only, no MCP, the persona — in `ChatOnlyArgv`'s
+        // order, BEFORE `--resume`, because two of its flags are
+        // variadic and would swallow the id. The snapshot-off flag
+        // rides every claude turn, but only when the installed `--help`
+        // lists it (an unknown flag is a startup error).
+        args.append(contentsOf: ChatOnlyArgv.claude(
+            options: options,
+            snapshotFlagListed: ClaudeCapabilities.shared.chatOnlyHelp?.listsSnapshot == true,
+            thinkingDisplayAccepted: ClaudeCapabilities.shared.acceptsThinkingSummaries == true))
         if let id = sessionId, !id.isEmpty {
             args.append("--resume")
             args.append(id)
         }
-        if let bridge = bridge {
+        // The only tools left are the web lookups, pre-approved by the
+        // list itself, so there is nothing to approve: the bridge's
+        // `--mcp-config … --permission-prompt-tool …` pair is omitted on
+        // a Chat only turn — and it would re-add the approver as an MCP
+        // server the empty strict config just removed. The environment
+        // overlay stays: harmless, and the alias registration on
+        // `system.init` still has a bridge to talk to.
+        if let bridge = bridge, !options.chatOnly {
             args.append(contentsOf: bridge.argsForClaude())
         }
         return args
@@ -1106,7 +1426,8 @@ final class AgentRunner: ObservableObject {
     /// take their positional arguments last, so every option is
     /// appended before them.
     private func codexArguments(text: String,
-                                options: AgentLaunchOptions) -> [String] {
+                                options: AgentLaunchOptions,
+                                imageFiles: [URL] = []) -> [String] {
         var args = ["exec"]
         let resuming = (sessionId?.isEmpty == false)
         if resuming { args.append("resume") }
@@ -1127,15 +1448,79 @@ final class AgentRunner: ObservableObject {
         // needed anyway: `--json` output arrives clean under our PTY,
         // no colour codes.
         //
-        // The fast switch travels as the service tier the model's own
-        // catalog entry advertises; resolved here because the catalog
-        // is MainActor state and the flag list is a pure value.
-        args.append(contentsOf: options.flags(
-            for: agentKey,
-            codexFastTier: CodexCatalog.shared.fastTier(forModel: options.model)?.id))
-        if resuming, let id = sessionId { args.append(id) }
-        args.append(text)
+        // The speed rides `codexServiceTierOverride`, which the
+        // composer's send resolved against the model's advertised tiers
+        // (`CodexCatalog.serviceTierOverride`); a send that set none
+        // runs at what `codex exec` resolves by itself.
+        args.append(contentsOf: options.flags(for: agentKey))
+        // Chat only: the `-c` switch set, and the persona file on RESUMED
+        // turns only — `bornPlain` is exactly `resuming`, which is the
+        // birth rule (a thread must never be born with the persona; see
+        // `ChatOnlyArgv.codex`). The file itself is ensured by `runOnce`
+        // before the spawn.
+        args.append(contentsOf: ChatOnlyArgv.codex(
+            options: options, bornPlain: resuming,
+            personaFile: SipaiPaths.chatOnlyInstructionsFile.path))
+        // The session id (resume only), the positional prompt, then
+        // `-i <file>` per image — the order is a correctness rule
+        // (`-i` is variadic on `codex exec` and would swallow the
+        // prompt if placed first), spelled once in `ChatOnlyImages` so
+        // the harness can pin it.
+        args.append(contentsOf: ChatOnlyImages.codexTrailingArgs(
+            resuming: resuming, sessionId: sessionId, text: text,
+            imageFiles: imageFiles.map(\.path)))
         return args
+    }
+
+    /// Write each image to a temp file for a codex `-i` turn and return
+    /// the paths. Best effort — a file that cannot be written is
+    /// dropped (its name still rides the message text, so the bubble is
+    /// honest), rather than failing the whole turn.
+    private func writeCodexImageFiles(_ images: [AgentImage]) -> [URL] {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent(Self.codexImageDirectoryPrefix + UUID().uuidString.prefix(8),
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var files: [URL] = []
+        for (i, image) in images.enumerated() {
+            guard let data = Data(base64Encoded: image.base64) else { continue }
+            let ext = ChatOnlyImages.codexFileExtension(mediaType: image.mediaType)
+            let file = dir.appendingPathComponent("image-\(i).\(ext)")
+            if (try? data.write(to: file)) != nil { files.append(file) }
+        }
+        return files
+    }
+
+    nonisolated static let codexImageDirectoryPrefix = "sipai-codex-image-"
+
+    /// At launch: remove the image folders a crash or a force-quit left
+    /// in the temp folder — a user's screenshots, kept past their turn.
+    /// Only folders an hour old: the temp folder is shared with any other
+    /// copy of SipAI running, whose turn may still be reading its own.
+    nonisolated static func sweepStaleCodexImageFiles(now: Date = Date()) {
+        let fm = FileManager.default
+        let temp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        guard let entries = try? fm.contentsOfDirectory(
+            at: temp, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        for entry in entries where entry.lastPathComponent.hasPrefix(codexImageDirectoryPrefix) {
+            let modified = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? now
+            if now.timeIntervalSince(modified) > 60 * 60 {
+                try? fm.removeItem(at: entry)
+            }
+        }
+    }
+
+    /// Remove the temp image files a codex turn was handed. Called from
+    /// `finalizeTurn` (first caller wins, like the kimi tool-policy
+    /// restore) and from the spawn-failure path.
+    private func cleanupCodexImageFilesIfPending() {
+        guard !pendingCodexImageFiles.isEmpty else { return }
+        let files = pendingCodexImageFiles
+        pendingCodexImageFiles = []
+        let dirs = Set(files.map { $0.deletingLastPathComponent() })
+        for file in files { try? FileManager.default.removeItem(at: file) }
+        for dir in dirs { try? FileManager.default.removeItem(at: dir) }
     }
 
     /// `kimi --prompt … --output-format stream-json` — the headless,
@@ -1183,7 +1568,37 @@ final class AgentRunner: ObservableObject {
 
     // MARK: - Run loop
 
-    private func runOnce(text: String, options: AgentLaunchOptions) async {
+    private func runOnce(text: String, options: AgentLaunchOptions,
+                         images: [AgentImage] = []) async {
+        // Every await below is a moment Stop can land in. `cancel()`
+        // finalizes a turn with no child at once; a spawn after that
+        // would stream a ghost turn under the interrupted row, and a
+        // second send meanwhile would find this one's policy file and
+        // temp files still in the way. So after each await: still ours,
+        // or put everything prepared so far back and stop.
+        let token = runToken
+        func turnStillOurs() -> Bool {
+            token == runToken && !stopRequested && status.isRunning && !Task.isCancelled
+        }
+
+        // SipAI is replacing this tool's binary right now. A spawn in the
+        // middle of that can find half a tool (an npm install removes the
+        // package before it writes the new one), so the turn waits for
+        // the update and runs on whatever version it leaves — FIRST,
+        // before anything below reads the binary's path. The wait is not
+        // the agent's silence: the stall notice is armed for the spawn,
+        // not for the queue. A Stop meanwhile ends the turn at once
+        // (`cancel()` finalizes a turn with no child); this task then
+        // finds its turn gone when the update ends, and runs nothing.
+        if AgentCLIUpdateMonitor.shared.isUpdating(agentKey) {
+            disarmStallNotice()
+            waitingForToolUpdate = true
+            await AgentCLIUpdateMonitor.shared.waitForUpdate(agentKey: agentKey)
+            guard turnStillOurs() else { return }
+            waitingForToolUpdate = false
+            armStallNotice()
+        }
+
         guard let binary = AgentManager.binaryPath(for: agentKey) else {
             let name = AgentManager.registry
                 .first { $0.key == agentKey }?.name ?? agentKey
@@ -1193,6 +1608,45 @@ final class AgentRunner: ObservableObject {
             setStatus(.done(exitCode: -1,
                             errorMessage: "\(name) not installed."))
             return
+        }
+
+        // A kimi DRAFT's first Chat only turn has no session directory
+        // to put a tool-policy file in, and a session born through
+        // kimi's server refuses `--prompt` until its first prompt — so
+        // that one turn goes through the server. Every later turn is
+        // the ordinary spawn below, around the policy file.
+        if isKimi, options.chatOnly, sessionId?.isEmpty ?? true {
+            await runKimiWebTurn(text: text, options: options, images: images, binary: binary)
+            return
+        }
+
+        // A resumed kimi turn is `--prompt --session`, which has no
+        // image input — so an image cannot reach the model on one, and
+        // sending the words alone would be a silent drop. The composer
+        // refuses images on a resumed kimi session at stage time
+        // (`ChatOnlyImages.kimiResumeAcceptsImages`); this is the
+        // backstop, so nothing ever runs a turn whose picture went
+        // nowhere.
+        if isKimi, !images.isEmpty, !(sessionId?.isEmpty ?? true) {
+            events.append(StreamEvent(kind: .error(message:
+                String(localized: "An image can only be attached to a NEW \(agentDisplayName) chat, not to one already under way.",
+                       comment: "Runner error: images are refused on a resumed kimi session; placeholder is the agent label"))))
+            setStatus(.done(exitCode: -1, errorMessage: "images unsupported on a resumed kimi turn"))
+            return
+        }
+
+        // Codex reads the Chat only persona from a FILE; make sure it
+        // says what the constant says before the spawn.
+        if agentKey == "codex", options.chatOnly {
+            do {
+                try ChatOnlyPersona.ensureFile(at: SipaiPaths.chatOnlyInstructionsFile)
+            } catch {
+                events.append(StreamEvent(kind: .error(message:
+                    String(localized: "Chat only could not be prepared: \(error.localizedDescription)",
+                           comment: "Runner error when the Chat only persona file cannot be written; placeholder is the system's error text"))))
+                setStatus(.done(exitCode: -1, errorMessage: error.localizedDescription))
+                return
+            }
         }
 
         // Ensure MCP runtime is up before spawning claude.
@@ -1224,21 +1678,61 @@ final class AgentRunner: ObservableObject {
             return fresh
         }()
 
+        // Images travel each CLI's own image channel. Codex reads FILES
+        // (`-i <path>`), so its images are written to temp files now and
+        // removed when the turn ends; claude reads a stream-json message
+        // on STDIN, built below and written after the spawn. Kimi never
+        // reaches here with images (a draft goes through the server; a
+        // resume was refused above).
+        var codexImageFiles: [URL] = []
+        if agentKey == "codex", !images.isEmpty {
+            codexImageFiles = writeCodexImageFiles(images)
+            // Added to, never replacing: a send that supersedes a turn
+            // still winding down moves the run token, so that turn's
+            // finalize no-ops — its files are only ever removed here.
+            pendingCodexImageFiles += codexImageFiles
+        }
+        // claude's stdin line, when this turn carries images: the whole
+        // prompt (text + image blocks) comes from stdin under
+        // `--input-format stream-json`, so nothing positional is passed.
+        let claudeStdinLine: String? =
+            (agentKey != "codex" && !isKimi && !images.isEmpty)
+            ? ChatOnlyImages.claudeStdinLine(text: text, images: images)
+            : nil
+
         let args: [String]
         switch agentKey {
-        case "codex": args = codexArguments(text: text, options: options)
+        case "codex": args = codexArguments(text: text, options: options, imageFiles: codexImageFiles)
         case "kimi":  args = kimiArguments(text: text, options: options)
-        default:      args = claudeArguments(text: text, options: options)
+        default:      args = claudeArguments(text: text, options: options,
+                                             streamJSONInput: claudeStdinLine != nil)
         }
 
-        // Kimi announces no session id on stdout, so a draft's id is
-        // read back off the store afterwards — and telling OUR new
-        // session apart from the ones already there needs the "before"
-        // list taken before the child can create anything. Cheap: two
-        // levels of directory names, no file reads.
+        // Kimi names its session on stdout only with the turn's final
+        // answer, so a draft's id is read back off the store meanwhile —
+        // and telling OUR new session apart from the ones already there
+        // needs the "before" list taken before the child can create
+        // anything. Cheap: two levels of directory names, no file reads.
         let kimiKnownIds: Set<String> =
             (isKimi && (sessionId?.isEmpty ?? true))
             ? KimiSessionScanner.sessionIds() : []
+
+        // A resumed kimi Chat only turn: the session's tool-policy file
+        // is written NOW (journaled first) and put back when the turn
+        // ends. A file of a shape this app does not know refuses the
+        // send — nothing is written, no turn runs with tools under a
+        // chip that says otherwise.
+        if isKimi, options.chatOnly, let id = sessionId, !id.isEmpty {
+            guard await prepareKimiToolPolicy(sessionId: id) else {
+                setStatus(.done(exitCode: -1, errorMessage: "Chat only refused"))
+                return
+            }
+        }
+        guard turnStillOurs() else {
+            restoreKimiToolPolicyIfPending()
+            cleanupCodexImageFilesIfPending()
+            return
+        }
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binary)
@@ -1249,8 +1743,11 @@ final class AgentRunner: ObservableObject {
         // turn forever on "Reading additional input from stdin…". A
         // GUI app's inherited stdin is not something to gamble on, so
         // hand it an explicitly empty one. Harmless for claude, which
-        // never reads stdin under `-p`.
-        p.standardInput = FileHandle.nullDevice
+        // never reads stdin under `-p` — EXCEPT the one image turn,
+        // where the prompt (text + image blocks) is the stream-json
+        // message written below and stdin must be a pipe we close.
+        let stdinPipe: Pipe? = claudeStdinLine != nil ? Pipe() : nil
+        p.standardInput = stdinPipe ?? FileHandle.nullDevice
 
         // Build PATH-rich env + overlay MCP-related vars. The await is
         // load-bearing: `buildEnvironment` reads the login shell's
@@ -1259,6 +1756,11 @@ final class AgentRunner: ObservableObject {
         // MainActor would freeze the app. Normally a no-op; `warmUp()`
         // has run since launch.
         await ShellEnvironment.prepare()
+        guard turnStillOurs() else {
+            restoreKimiToolPolicyIfPending()
+            cleanupCodexImageFilesIfPending()
+            return
+        }
         var env = Self.buildEnvironment()
         if let bridge = bridge {
             for (k, v) in bridge.environmentOverlay(sessionIdOrTaskUuid: sipaiIdentity) {
@@ -1323,6 +1825,10 @@ final class AgentRunner: ObservableObject {
                        comment: "Runner error when Process.run() throws"))))
             setStatus(.done(exitCode: -1, errorMessage: error.localizedDescription))
             stdoutSource.cleanup()
+            // No child ever read the policy file: put it straight back.
+            restoreKimiToolPolicyIfPending()
+            // Nor the temp image files: remove them.
+            cleanupCodexImageFilesIfPending()
             // Failed to spawn — tailer is back to being the only writer.
             // Resume immediately so it keeps watching.
             if let url = sessionFileURL {
@@ -1335,13 +1841,33 @@ final class AgentRunner: ObservableObject {
         stdoutSource.afterSpawn()
         process = p
 
+        // claude's image turn: hand it the stream-json user record and
+        // close the write end, so it reads one message and reaches EOF
+        // (the turn is exactly that message). Done off the MainActor —
+        // the payload is a few hundred KB of base64 and the write can
+        // block until claude drains it.
+        if let line = claudeStdinLine, let pipe = stdinPipe {
+            let handle = pipe.fileHandleForWriting
+            // The payload is larger than the pipe's buffer, so the write
+            // blocks until claude drains it — and a claude that exits
+            // first (a startup failure, a Stop in the first second)
+            // would deliver SIGPIPE to THIS process and end it. Told
+            // not to, the write fails with EPIPE and the task ends.
+            _ = fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1)
+            Task.detached(priority: .utility) {
+                try? handle.write(contentsOf: Data(line.utf8))
+                try? handle.close()
+            }
+        }
+
         if isKimi, sessionId == nil {
-            startKimiSessionDiscovery(excluding: kimiKnownIds, since: Date())
+            startKimiSessionDiscovery(excluding: kimiKnownIds, since: Date(),
+                                      prompt: text)
         }
 
         // Two concurrent readers: stdout (line-oriented JSON events)
-        // and stderr (buffered as text, surfaced only on error).
-        let token = runToken
+        // and stderr (buffered as text, surfaced only on error). `token`
+        // is this turn's, captured at the top of the function.
         await withTaskGroup(of: Void.self) { group in
             group.addTask { [weak self] in
                 await self?.readStdout(handle: stdoutSource.readHandle)
@@ -1409,14 +1935,10 @@ final class AgentRunner: ObservableObject {
 
     /// Read the child's stdout (PTY master or pipe) line-by-line on a
     /// dedicated background queue and hop each complete line to the
-    /// MainActor for parsing. Same shape as
+    /// MainActor for parsing. The loop itself is
+    /// `makeDrainingLineSource`, shared with the stderr reader; this is
+    /// its stdout binding. Same shape as
     /// `AgentSessionTailer.handleExtend`.
-    ///
-    /// Why not `for try await line in handle.bytes.lines`: that iterator
-    /// round-trips every line through this actor, so a busy main actor
-    /// can make bytes-available bursts look like end-of-run bursts to
-    /// the view. Reading on a background queue and only hopping back
-    /// once per line keeps streaming visually incremental.
     /// See CLAUDE.md → "Agent-session streaming" for the invariant.
     private func readStdout(handle: FileHandle) async {
         let fd = handle.fileDescriptor
@@ -1426,118 +1948,20 @@ final class AgentRunner: ObservableObject {
 
         await withTaskCancellationHandler {
             await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
-                let queue = DispatchQueue(label: "sipai.runner.stdout.\(UUID().uuidString)",
-                                          qos: .userInitiated)
-                let source = DispatchSource.makeReadSource(
-                    fileDescriptor: fd, queue: queue
-                )
-                // State captured by reference so the handler closures
-                // share one leftover buffer + one resume guard.
-                let state = StdoutReadState()
-
-                source.setEventHandler { [weak self] in
-                    guard let self = self else {
-                        source.cancel()
-                        return
-                    }
-                    let bufSize = 4096
-                    var buf = [UInt8](repeating: 0, count: bufSize)
-                    var accumulated = Data()
-                    // Set when this same invocation both read bytes and
-                    // hit EOF: the bytes must still be parsed — they are
-                    // the tail of the turn, `result` included — and only
-                    // then may the source be cancelled. Returning
-                    // straight from the EOF branch would throw that
-                    // last read away.
-                    var atEnd = false
-                    while true {
-                        // errno is captured WITH the result, inside the
-                        // closure. It is thread-local but not call-local,
-                        // and the buffer's exclusivity/retain epilogue
-                        // sits between the syscall and any later read of
-                        // it. Every errno that is not EAGAIN ends this
-                        // reader, and this reader is the only thing
-                        // draining the child's stdout — so a stale value
-                        // read here is paid for by the whole turn.
-                        let (n, err): (Int, Int32) =
-                            buf.withUnsafeMutableBufferPointer { ptr in
-                                let r = read(fd, ptr.baseAddress, bufSize)
-                                return (r, r < 0 ? errno : 0)
-                            }
-                        if n > 0 {
-                            accumulated.append(buf, count: n)
-                            // Keep reading. A short read does NOT mean
-                            // the descriptor is drained: a PTY master
-                            // hands back one line-discipline block per
-                            // call, so short is the NORM here, not the
-                            // exception. Stopping on it leaves the rest
-                            // queued and keeps this reader permanently a
-                            // wake behind the child — which is the state
-                            // in which the child fills the PTY and blocks
-                            // in write(), and the state in which a child
-                            // that exits takes the unread tail of its
-                            // turn (`result` included) down with it.
-                            continue
-                        }
-                        if n == 0 {
-                            // The last slave is closed: the child is gone
-                            // and no further byte can arrive. This is the
-                            // one true end of stream.
-                            atEnd = true
-                            break
-                        }
-                        if err == EINTR {
-                            // A signal landed mid-syscall. Nothing ended;
-                            // read again. Counting this as end-of-stream
-                            // cancels the source under a LIVE child, and
-                            // then nothing drains its stdout: the child
-                            // blocks in write() forever, and since every
-                            // turn-end bound waits on the child exiting,
-                            // the turn never ends either. The session
-                            // sits at "Sipping…" until the app is quit.
-                            continue
-                        }
-                        if err == EAGAIN || err == EWOULDBLOCK {
-                            // Drained. The source re-arms and fires again
-                            // when the child writes more.
-                            break
-                        }
-                        // A descriptor that can only keep failing. It has
-                        // to end the reader: leaving the source armed on
-                        // it re-enters this handler in a tight spin.
-                        atEnd = true
-                        break
-                    }
-                    defer { if atEnd { source.cancel() } }
-                    if accumulated.isEmpty { return }
-                    // Split on newline BYTES and decode complete lines
-                    // only. A read() ending mid-UTF-8-sequence must not
-                    // discard the burst (a whole-chunk String(data:)
-                    // decode returns nil there, silently dropping
-                    // every event in the read and desyncing leftover).
-                    state.leftover.append(accumulated)
-                    while let nl = state.leftover.firstIndex(of: 0x0A) {
-                        let lineData = state.leftover.subdata(
-                            in: state.leftover.startIndex..<nl)
-                        state.leftover.removeSubrange(
-                            state.leftover.startIndex...nl)
-                        guard let line = String(data: lineData,
-                                                encoding: .utf8) else {
-                            continue  // corrupt single line — skip it alone
-                        }
-                        let captured = line
+                let source = Self.makeDrainingLineSource(
+                    fd: fd,
+                    label: "sipai.runner.stdout.\(UUID().uuidString)",
+                    owner: self,
+                    onLine: { [weak self] line in
                         Task { @MainActor [weak self] in
-                            await self?.handleStdoutLine(captured)
+                            await self?.handleStdoutLine(line)
                         }
-                    }
-                }
-                source.setCancelHandler {
-                    if state.resumed { return }
-                    state.resumed = true
-                    cont.resume()
-                }
+                    },
+                    // A newline-less tail is half a JSONL record, never
+                    // an event — dropped, as it always was.
+                    onEnd: { _ in cont.resume() }
+                )
                 source.resume()
-                state.source = source
             }
         } onCancel: {
             // Nothing to do, deliberately. This reader ends on EOF, and
@@ -1551,15 +1975,158 @@ final class AgentRunner: ObservableObject {
         }
     }
 
-    /// Mutable state shared between the DispatchSource's event and
-    /// cancel handlers in `readStdout`. A reference type so both
-    /// closures observe the same `leftover` buffer and `resumed` flag
-    /// without @escaping-inout gymnastics. Both handlers run on the
-    /// source's own serial queue, so no locking is needed.
-    private final class StdoutReadState {
+    // MARK: Draining line reader — stdout AND stderr
+
+    /// Build a read source that drains `fd` line by line on a serial
+    /// queue of its own, handing each complete line to `onLine` and —
+    /// exactly once, at the true end of the stream — the newline-less
+    /// tail to `onEnd`. Both readers of a child ride this ONE loop:
+    /// stdout's PTY master and stderr's pipe. Two spellings of it is
+    /// how the drain rules drift, and every one of them has cost a
+    /// hung turn.
+    ///
+    /// Why not `FileHandle.bytes.lines`: Foundation performs that
+    /// iterator's blocking `read()` inside one shared internal actor,
+    /// so every reader in the process queues behind whichever one is
+    /// parked — a second child's stderr is not read until the first
+    /// child EXITS — and a loop driven from the MainActor issues its
+    /// next read only after the previous line was delivered there, so
+    /// a stalled main thread stops the drain outright. On the stdout
+    /// side the same shape round-trips every line through the actor
+    /// and makes bytes-available bursts look like end-of-run bursts.
+    /// See CLAUDE.md → "Agent-session streaming".
+    ///
+    /// `owner` is observed weakly: a source whose runner has been
+    /// deallocated cancels itself, since nothing is left to consume
+    /// its lines. Pass nil for a source with no owner.
+    /// Internal rather than private since the Agent Guide's sign-in
+    /// child (`claude auth login` on a PTY) binds the same loop — the
+    /// third binding; a fourth spelling of the drain is the thing this
+    /// helper exists to prevent.
+    nonisolated static func makeDrainingLineSource(
+        fd: Int32,
+        label: String,
+        owner: AnyObject?,
+        onLine: @escaping (String) -> Void,
+        onEnd: @escaping (Data) -> Void
+    ) -> DispatchSourceRead {
+        let queue = DispatchQueue(label: label, qos: .userInitiated)
+        let source = DispatchSource.makeReadSource(
+            fileDescriptor: fd, queue: queue
+        )
+        // State captured by reference so the handler closures share
+        // one leftover buffer + one end guard.
+        let state = DrainState()
+        let hasOwner = owner != nil
+        weak let weakOwner = owner
+
+        source.setEventHandler {
+            if hasOwner, weakOwner == nil {
+                source.cancel()
+                return
+            }
+            let bufSize = 4096
+            var buf = [UInt8](repeating: 0, count: bufSize)
+            var accumulated = Data()
+            // Set when this same invocation both read bytes and hit
+            // EOF: the bytes must still be parsed — they are the tail
+            // of the turn, `result` included — and only then may the
+            // source be cancelled. Returning straight from the EOF
+            // branch would throw that last read away.
+            var atEnd = false
+            while true {
+                // errno is captured WITH the result, inside the
+                // closure. It is thread-local but not call-local, and
+                // the buffer's exclusivity/retain epilogue sits between
+                // the syscall and any later read of it. Every errno
+                // that is not EAGAIN ends this reader, and this reader
+                // is the only thing draining the child's descriptor —
+                // so a stale value read here is paid for by the whole
+                // turn.
+                let (n, err): (Int, Int32) =
+                    buf.withUnsafeMutableBufferPointer { ptr in
+                        let r = read(fd, ptr.baseAddress, bufSize)
+                        return (r, r < 0 ? errno : 0)
+                    }
+                if n > 0 {
+                    accumulated.append(buf, count: n)
+                    // Keep reading. A short read does NOT mean the
+                    // descriptor is drained: a PTY master hands back
+                    // one line-discipline block per call, so short is
+                    // the NORM here, not the exception. Stopping on it
+                    // leaves the rest queued and keeps this reader
+                    // permanently a wake behind the child — which is
+                    // the state in which the child fills the PTY and
+                    // blocks in write(), and the state in which a child
+                    // that exits takes the unread tail of its turn
+                    // (`result` included) down with it.
+                    continue
+                }
+                if n == 0 {
+                    // The last writer is closed: the child is gone and
+                    // no further byte can arrive. This is the one true
+                    // end of stream.
+                    atEnd = true
+                    break
+                }
+                if err == EINTR {
+                    // A signal landed mid-syscall. Nothing ended; read
+                    // again. Counting this as end-of-stream cancels the
+                    // source under a LIVE child, and then nothing
+                    // drains its stdout: the child blocks in write()
+                    // forever, and since every turn-end bound waits on
+                    // the child exiting, the turn never ends either.
+                    // The session sits at "Sipping…" until the app is
+                    // quit.
+                    continue
+                }
+                if err == EAGAIN || err == EWOULDBLOCK {
+                    // Drained. The source re-arms and fires again when
+                    // the child writes more.
+                    break
+                }
+                // A descriptor that can only keep failing. It has to
+                // end the reader: leaving the source armed on it
+                // re-enters this handler in a tight spin.
+                atEnd = true
+                break
+            }
+            defer { if atEnd { source.cancel() } }
+            if accumulated.isEmpty { return }
+            // Split on newline BYTES and decode complete lines only. A
+            // read() ending mid-UTF-8-sequence must not discard the
+            // burst (a whole-chunk String(data:) decode returns nil
+            // there, silently dropping every event in the read and
+            // desyncing leftover).
+            state.leftover.append(accumulated)
+            while let nl = state.leftover.firstIndex(of: 0x0A) {
+                let lineData = state.leftover.subdata(
+                    in: state.leftover.startIndex..<nl)
+                state.leftover.removeSubrange(
+                    state.leftover.startIndex...nl)
+                guard let line = String(data: lineData,
+                                        encoding: .utf8) else {
+                    continue  // corrupt single line — skip it alone
+                }
+                onLine(line)
+            }
+        }
+        source.setCancelHandler {
+            if state.ended { return }
+            state.ended = true
+            onEnd(state.leftover)
+        }
+        return source
+    }
+
+    /// Mutable state shared between a draining source's event and
+    /// cancel handlers. A reference type so both closures observe the
+    /// same `leftover` buffer and `ended` flag without @escaping-inout
+    /// gymnastics. Both handlers run on the source's own serial queue,
+    /// so no locking is needed.
+    private final class DrainState {
         var leftover = Data()
-        var resumed: Bool = false
-        var source: DispatchSourceRead?
+        var ended: Bool = false
     }
 
     /// Parse one JSONL line into zero or more StreamEvents and apply
@@ -1574,7 +2141,8 @@ final class AgentRunner: ObservableObject {
         let parsed: [StreamEvent]
         switch agentKey {
         case "codex":
-            let read = CodexEventParser.parse(line: line, fallbackCwd: cwd)
+            let read = CodexEventParser.parse(line: line, fallbackCwd: cwd,
+                                              includeThinking: turnChatOnly)
             parsed = read.events
             // Newest notice REPLACES the previous one, and any real
             // output clears it: this is the state of the connection,
@@ -1585,24 +2153,30 @@ final class AgentRunner: ObservableObject {
                 retryNotice = ""
             }
         case "kimi":
-            // Kimi DOES announce its session id, as the last stdout
-            // line of a print-mode run:
+            // Kimi names its session on stdout exactly once, right after
+            // the turn's final answer:
             //   {"role":"meta","type":"session.resume_hint",
             //    "session_id":"session_…","command":"kimi -r session_…"}
-            // Taking it is strictly better than the store diff below it
-            // (`startKimiSessionDiscovery`), which infers the same value
-            // by watching for a directory that wasn't there before: the
-            // announcement is authoritative, immediate, and cannot pick
-            // the wrong session when two runs start together. The diff
-            // stays as the fallback for a turn that dies before its
-            // last line — which is exactly what a crashing child does.
-            if sessionId == nil,
-               let announced = KimiEventParser.announcedSessionId(line: line) {
-                adoptDiscoveredSession(
-                    id: announced,
-                    fileURL: KimiSessionScanner.wireFile(
-                        inSessionDir: KimiSessionScanner
-                            .sessionDirectory(forId: announced) ?? cwd))
+            // It is the authority, but it comes LAST — a long turn names
+            // its session minutes in — so a draft's id is normally read
+            // off the store long before it (`startKimiSessionDiscovery`),
+            // and this is what a turn whose directory the store read
+            // could not single out lands on. An announcement that names
+            // a DIFFERENT session from the one adopted says the store
+            // read picked someone else's; that is said in the log, since
+            // by then the session has been routed, named and filed.
+            if let announced = KimiEventParser.announcedSessionId(line: line) {
+                if sessionId == nil {
+                    adoptDiscoveredSession(
+                        id: announced,
+                        fileURL: KimiSessionScanner.wireFile(
+                            inSessionDir: KimiSessionScanner
+                                .sessionDirectory(forId: announced) ?? cwd))
+                } else if let adopted = sessionId, adopted != announced {
+                    NSLog("%@", "SipAI: kimi named this turn's session \(announced), "
+                          + "but the runner in \(cwd.path) had adopted \(adopted) "
+                          + "from the store — the next send resumes \(adopted).")
+                }
             }
             parsed = KimiEventParser.parse(line: line, fallbackCwd: cwd)
         default:
@@ -1615,7 +2189,20 @@ final class AgentRunner: ObservableObject {
             if let flag = AgentEventParser.compactingSignal(line: line) {
                 compacting = flag
             }
-            parsed = AgentEventParser.parse(line: line, fallbackCwd: cwd)
+            // A refused fast call: claude says so once per turn and
+            // re-sends the call at standard speed. The parse turns the
+            // notification into nothing, so it is read here. The call it
+            // refers to runs standard, so it is recorded as such at once —
+            // otherwise the previous turn's fast call would read as the
+            // newest until the re-sent call's first event lands.
+            if let refusal = AgentEventParser.fastModeRefusal(line: line) {
+                updateFastModeReport {
+                    $0.refusal = refusal
+                    $0.lastSpeed = "standard"
+                }
+            }
+            parsed = AgentEventParser.parse(line: line, fallbackCwd: cwd,
+                                            includeThinking: turnChatOnly)
         }
         for event in parsed {
             // Any real output means the summarising is over, whether or
@@ -1634,8 +2221,17 @@ final class AgentRunner: ObservableObject {
             if let ctx = event.contextTokens, ctx > 0 {
                 lastContextTokens = ctx
             }
-            if let state = event.fastModeState, state != fastModeState {
-                fastModeState = state
+            if let state = event.fastModeState {
+                // The reason rides the same two events as the state, so
+                // an event that states one and not the other clears it.
+                updateFastModeReport {
+                    $0.state = state
+                    $0.disabledReason = event.fastModeDisabledReason
+                        .flatMap { $0.isEmpty ? nil : $0 }
+                }
+            }
+            if let speed = event.callSpeed {
+                updateFastModeReport { $0.lastSpeed = speed }
             }
             if let windows = event.modelContextWindows, !windows.isEmpty,
                windows != observedContextWindows {
@@ -1666,6 +2262,11 @@ final class AgentRunner: ObservableObject {
                 refreshCodexContextTokens()
                 refreshKimiContextTokens()
                 endTurnSegment()
+                // The turn's record is on disk by its answer, so a Chat
+                // only turn is filed now as well as at finalize: a send
+                // that supersedes a child still winding down moves the
+                // run token first, and THIS turn's finalize then no-ops.
+                recordChatOnlyTurnIfNeeded()
             }
             applySubprocessSideEffects(for: event)
         }
@@ -1678,6 +2279,9 @@ final class AgentRunner: ObservableObject {
         if !parsed.isEmpty {
             refreshCodexContextTokens(throttled: true)
             refreshKimiContextTokens(throttled: true)
+            // A kimi step has just landed on stdout, and the thought
+            // that led to it is on the wire by now.
+            syncKimiThoughts()
         }
         trimLiveEventsIfNeeded()
     }
@@ -1723,6 +2327,271 @@ final class AgentRunner: ObservableObject {
         // approvals to the real session_id scope.
         if let tu = taskUuid {
             bridge?.registerAlias(taskUuid: tu, sessionId: sid)
+        }
+    }
+
+    // MARK: Kimi Chat only — the policy file and the server path
+
+    /// The agent's name as Settings → Labels spells it, for the
+    /// sentences this runner writes into the transcript. Provided by
+    /// `AgentManager` (which holds the config); the registry's default
+    /// name is the fallback for a runner nobody wired.
+    var agentLabelProvider: (() -> String)?
+
+    private var agentDisplayName: String {
+        agentLabelProvider?()
+            ?? AgentManager.registry.first { $0.key == agentKey }?.name
+            ?? agentKey
+    }
+
+    /// Capture, journal and write the session's `tool-policy/state.json`
+    /// for the turn about to run. False = refused, with the reason
+    /// already on the transcript.
+    private func prepareKimiToolPolicy(sessionId id: String) async -> Bool {
+        guard let dir = KimiSessionScanner.sessionDirectory(forId: id) else {
+            events.append(StreamEvent(kind: .error(message:
+                String(localized: "Chat only can't be applied to this session — its folder in \(agentDisplayName)'s store could not be found.",
+                       comment: "Runner error: a kimi session directory is missing for a Chat only turn; placeholder is the agent label"))))
+            return false
+        }
+        let file = KimiToolPolicy.disabledFile(sessionDir: dir)
+        let wire = KimiSessionScanner.wireFile(inSessionDir: dir)
+        let root = KimiSessionScanner.sessionRoot
+        // Reads and a store walk, bounded but not for the MainActor.
+        let plan = await Task.detached(priority: .utility) {
+            () -> (capture: KimiToolPolicy.Capture, names: [String]) in
+            let capture = KimiToolPolicy.capture(at: file)
+            let own = KimiToolPolicy.names(fromWire: wire)
+            let store = own == nil ? KimiToolPolicy.newestNames(inStore: root) : nil
+            return (capture, KimiToolPolicy.namesToDisable(sessionSnapshot: own,
+                                                          storeSnapshot: store))
+        }.value
+        switch plan.capture {
+        case .unknownShape:
+            events.append(StreamEvent(kind: .error(message:
+                String(localized: "Chat only can't be applied to this session — \(agentDisplayName)'s tool-policy file has a shape SipAI doesn't know.",
+                       comment: "Runner error: a kimi session's tool-policy/state.json is not the measured shape; placeholder is the agent label"))))
+            return false
+        case .record(let record):
+            // Journal BEFORE the write, so a crash between the two
+            // still knows what to put back.
+            onKimiToolPolicyJournal?(id, record)
+            do {
+                try KimiToolPolicy.write(names: plan.names, to: file)
+            } catch {
+                onKimiToolPolicyJournal?(id, nil)
+                events.append(StreamEvent(kind: .error(message:
+                    String(localized: "Chat only could not be prepared: \(error.localizedDescription)",
+                           comment: "Runner error when the Chat only persona file cannot be written; placeholder is the system's error text"))))
+                return false
+            }
+            pendingKimiRestore = (id, file, record)
+            return true
+        }
+    }
+
+    /// Put the session's policy file back and clear the journal. A
+    /// restore that fails keeps its journal entry, which is what the
+    /// launch and session-open heals act on.
+    private func restoreKimiToolPolicyIfPending() {
+        guard let pending = pendingKimiRestore else { return }
+        pendingKimiRestore = nil
+        do {
+            try KimiToolPolicy.restore(pending.record, at: pending.file)
+            onKimiToolPolicyJournal?(pending.sessionId, nil)
+        } catch {
+            NSLog("%@", "SipAI: could not restore \(pending.file.path): "
+                  + "\(error.localizedDescription) — the journal keeps it for the next launch.")
+        }
+    }
+
+    /// A new kimi session's first Chat only turn, through kimi's local
+    /// server (`KimiWebTurn`). No stdout to stream: the answer is read
+    /// off the wire whole once the session reports idle, so the static
+    /// "Sipping…" spinner holds until then.
+    private func runKimiWebTurn(text: String, options: AgentLaunchOptions,
+                                images: [AgentImage] = [], binary: String) async {
+        let token = runToken
+        kimiWebTurnToken = token
+        defer { if kimiWebTurnToken == token { kimiWebTurnToken = nil } }
+        func fail(_ message: String) {
+            guard token == runToken else { return }
+            finalizeTurn(token: token, exitCode: -1, errorMessage: message)
+        }
+        /// Stop landed (the task is cancelled): the interrupted row is on
+        /// the transcript already (`cancel()` wrote it), so the turn ends
+        /// quietly here. True when the caller should return.
+        func stopped() -> Bool {
+            guard token == runToken else { return true }
+            guard Task.isCancelled else { return false }
+            finalizeTurn(token: token, exitCode: 0, errorMessage: nil)
+            return true
+        }
+        // The first prompt binds the model, so it has to name one: the
+        // chip's pick, else kimi's own `default_model`.
+        KimiCatalog.shared.ensureLoaded()
+        guard let model = (options.model?.isEmpty == false ? options.model
+                           : KimiCatalog.shared.defaultModel) else {
+            fail(String(localized: "\(agentDisplayName) has no model configured, so a new session cannot start.",
+                        comment: "Runner error: kimi's config.toml names no default_model; placeholder is the agent label"))
+            return
+        }
+        let root = KimiSessionScanner.sessionRoot
+        let disabled = await Task.detached(priority: .utility) {
+            KimiToolPolicy.namesToDisable(sessionSnapshot: nil,
+                                          storeSnapshot: KimiToolPolicy.newestNames(inStore: root))
+        }.value
+        if stopped() { return }
+
+        let session: KimiWebServerCall.Session
+        switch await KimiWebServerCall.Session.start(binary: binary, scratchDirectory: cwd) {
+        case .failed(let why):
+            fail(String(localized: "\(agentDisplayName)'s local server did not start: \(why)",
+                        comment: "Runner error when kimi web could not be started for a Chat only turn; placeholders are the agent label and the reason"))
+            return
+        case .started(let started):
+            session = started
+        }
+        if token != runToken || Task.isCancelled {
+            await session.shutdown()
+            _ = stopped()
+            return
+        }
+
+        let sid: String
+        switch await KimiWebTurn.createSession(session, cwd: cwd) {
+        case .failure(let failure):
+            await session.shutdown()
+            fail(Self.kimiWebFailureText(failure, agent: agentDisplayName))
+            return
+        case .success(let id):
+            sid = id
+        }
+        if token != runToken || Task.isCancelled {
+            await session.shutdown()
+            _ = stopped()
+            return
+        }
+        // The id is known at once — announce it the way a `system.init`
+        // would, and let the file watcher re-announce with the wire once
+        // the prompt has written it (`awaitSessionFile`).
+        adoptDiscoveredSession(id: sid, fileURL: nil)
+        awaitSessionFile(id: sid)
+        // The server writes the policy file for this prompt; what was
+        // there before is nothing, and that is what goes back — through
+        // the same first-caller-wins slot the `--prompt` path uses, so
+        // the bounded finalize a Stop arms (`cancel()`) restores it too
+        // when the server stops answering.
+        let policyFile = KimiSessionScanner.sessionDirectory(forId: sid)
+            .map { KimiToolPolicy.disabledFile(sessionDir: $0) }
+        onKimiToolPolicyJournal?(sid, .absent)
+        if let policyFile {
+            pendingKimiRestore = (sid, policyFile, .absent)
+        }
+        func restore() {
+            if policyFile != nil {
+                // Only while this turn still owns the slot. A Stop's
+                // bounded finalize may have ended the turn already —
+                // restoring its record then — and the next turn may
+                // have put its own record here since: restoring THAT
+                // would take its policy file away while it runs.
+                guard token == runToken else { return }
+                restoreKimiToolPolicyIfPending()
+            } else {
+                // No directory to look in: nothing was written, so the
+                // journal entry has nothing to restore.
+                onKimiToolPolicyJournal?(sid, nil)
+            }
+        }
+
+        let promptId: String
+        switch await KimiWebTurn.prompt(session, sessionId: sid, text: text,
+                                        model: model, disabledTools: disabled,
+                                        images: images) {
+        case .failure(let failure):
+            await session.shutdown()
+            restore()
+            fail(Self.kimiWebFailureText(failure, agent: agentDisplayName))
+            return
+        case .success(let id):
+            promptId = id
+        }
+
+        let idle = await KimiWebTurn.waitIdle(session, sessionId: sid) { Task.isCancelled }
+        if idle {
+            await session.shutdown()
+        } else {
+            // Stop (the task was cancelled) or the server stopped
+            // answering: the action route, then the shutdown that
+            // certainly ends it.
+            await KimiWebTurn.abort(session, sessionId: sid, promptId: promptId)
+        }
+        restore()
+        guard token == runToken else { return }
+        if idle, let wire = sessionFileURL ?? KimiSessionScanner.sessionDirectory(forId: sid)
+            .map({ KimiSessionScanner.wireFile(inSessionDir: $0) }) {
+            // The answer, off the wire: the turn's rows after our own
+            // prompt.
+            // Thoughts included: this path only ever runs a Chat only
+            // turn, and the wire is the only place kimi records them.
+            let items = await Task.detached(priority: .utility) {
+                KimiSessionScanner.readHistory(of: wire, maxTurns: 1,
+                                               includeThinking: true)
+            }.value
+            guard token == runToken else { return }
+            var sawPrompt = false
+            for item in items {
+                switch item.kind {
+                case .userText where !sawPrompt:
+                    sawPrompt = true
+                case .userText(let t):
+                    events.append(StreamEvent(kind: .userMessage(text: t),
+                                              isSystemNotice: item.isSystemNotice))
+                case .assistantText(let t):
+                    events.append(StreamEvent(kind: .assistantText(text: t)))
+                case .thinking(let t):
+                    events.append(StreamEvent(kind: .thinking(text: t)))
+                    // Placed already, in order — the finalize read
+                    // (`syncKimiThoughts`) must not place it again.
+                    kimiThoughtsPlaced += 1
+                case .toolUse(let id, let name, let input):
+                    events.append(StreamEvent(kind: .toolUse(toolUseId: id, name: name, input: input)))
+                case .toolResult(let id, let content, let isError):
+                    events.append(StreamEvent(kind: .toolResult(toolUseId: id, output: content, isError: isError)))
+                case .compaction, .interrupted:
+                    // Neither is a row this runner writes: a compaction
+                    // row comes off the parsers on the live feeds and
+                    // off the reader on reopen (a first prompt cannot
+                    // compact anyway), and the interrupted marker is
+                    // derived at load time.
+                    break
+                }
+            }
+            trimLiveEventsIfNeeded()
+        }
+        if idle {
+            finalizeTurn(token: token, exitCode: 0, errorMessage: nil)
+        } else if Task.isCancelled {
+            // Stopped: the prompt is aborted, the server is down and the
+            // policy file is back — the turn `cancel()` held open for
+            // exactly that ends now (its interrupted row is already on
+            // the transcript).
+            finalizeTurn(token: token, exitCode: 0, errorMessage: nil)
+        } else {
+            fail(String(localized: "\(agentDisplayName)'s local server stopped answering before the turn finished.",
+                        comment: "Runner error when kimi web went silent during a Chat only turn; placeholder is the agent label"))
+        }
+    }
+
+    private static func kimiWebFailureText(_ failure: KimiWebTurn.Failure,
+                                           agent: String) -> String {
+        switch failure {
+        case .unavailable(let why):
+            return String(localized: "\(agent)'s local server did not answer: \(why)",
+                          comment: "Runner error when kimi web failed a Chat only request; placeholders are the agent label and the reason")
+        case .refused(let why):
+            return String(localized: "\(agent) refused the Chat only turn: \(why)",
+                          comment: "Runner error when kimi web refused a Chat only prompt; placeholders are the agent label and kimi's own sentence")
         }
     }
 
@@ -1814,17 +2683,21 @@ final class AgentRunner: ObservableObject {
     /// a draft runner onto its permanent key, injects the sidebar row,
     /// flips AppState's routing and — most consequentially — lets every
     /// later send pass `--session <id>` and CONTINUE the conversation.
-    /// Kimi's documented stream-json is plain chat messages and carries
-    /// no id at all, so without this each send would silently start a
-    /// brand-new session and the agent would have no memory of the
-    /// turn before.
+    /// Kimi names its session only with the turn's final answer, so
+    /// without this a draft would stay a draft for the whole of its
+    /// first turn, and a turn that died before its last line would
+    /// leave the next send starting a brand-new session.
     ///
-    /// The lookup is deliberately narrow: an id absent from the
+    /// The lookup is deliberately narrow — an id absent from the
     /// pre-spawn snapshot, in a directory younger than the send, whose
-    /// recorded cwd (when it has one) is ours. Everything else is left
-    /// alone, so a second kimi running elsewhere cannot be adopted.
+    /// recorded cwd (when it has one) is ours, whose first message is
+    /// the text this turn sent, and the ONLY one that is all four
+    /// (`KimiSessionScanner.discoverSession`) — so a second kimi started
+    /// in the same folder at the same moment is never adopted in its
+    /// place.
     private func startKimiSessionDiscovery(excluding known: Set<String>,
-                                           since: Date) {
+                                           since: Date,
+                                           prompt: String) {
         kimiDiscoveryTask?.cancel()
         let token = runToken
         let dir = cwd
@@ -1836,7 +2709,8 @@ final class AgentRunner: ObservableObject {
                       self.sessionId == nil else { return }
                 let found = await Task.detached(priority: .utility) {
                     KimiSessionScanner.discoverSession(
-                        cwd: dir, excluding: known, since: since)
+                        cwd: dir, excluding: known, since: since,
+                        prompt: prompt)
                 }.value
                 if Task.isCancelled || self.runToken != token { return }
                 if let found {
@@ -1864,10 +2738,10 @@ final class AgentRunner: ObservableObject {
     /// conversation and the agent appears to have forgotten everything.
     /// If it ever happens, this log line is the whole diagnosis.
     private func logKimiDiscoveryGaveUp(_ why: String) {
-        NSLog("%@", "SipAI: no kimi session directory appeared under "
-              + "\(KimiSessionScanner.sessionRoot.path) for the turn in "
-              + "\(cwd.path) (\(why)) — the next send will start a new "
-              + "session.")
+        NSLog("%@", "SipAI: could not single out this turn's kimi session "
+              + "under \(KimiSessionScanner.sessionRoot.path) for "
+              + "\(cwd.path) (\(why)), and kimi did not name it — the next "
+              + "send will start a new session.")
     }
 
     /// Adopt an id discovered off the store, taking the same route a
@@ -1890,20 +2764,67 @@ final class AgentRunner: ObservableObject {
     /// says it to nobody: a hung child never reaches EOF.
     private func readStderr(handle: FileHandle) async {
         stderrBuffer = ""
-        do {
-            for try await line in handle.bytes.lines {
-                if Task.isCancelled { break }
-                if !stderrBuffer.isEmpty { stderrBuffer += "\n" }
-                stderrBuffer += line
-                // Cap at ~2kB to avoid unbounded growth.
-                if stderrBuffer.count > 2048 {
-                    stderrBuffer = String(stderrBuffer.suffix(2048))
+        let fd = handle.fileDescriptor
+        guard fd >= 0 else {
+            publishStderrTail()
+            return
+        }
+        let flags = fcntl(fd, F_GETFL, 0)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        // The same draining source as stdout, over the pipe's read
+        // end. It ends at EOF and nowhere else — `killChild` guarantees
+        // that EOF, and `finalizeTurn` never waits on a reader — so
+        // there is no cancel path here, and there must not be one.
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            let source = Self.makeDrainingLineSource(
+                fd: fd,
+                label: "sipai.runner.stderr.\(UUID().uuidString)",
+                owner: self,
+                onLine: { [weak self] line in
+                    Task { @MainActor [weak self] in
+                        self?.appendStderrLine(line)
+                    }
+                },
+                onEnd: { [weak self] leftover in
+                    // A fatal message is routinely the last thing a
+                    // child writes, and routinely without a newline.
+                    // It is the line the error row exists to show.
+                    // The continuation is resumed from INSIDE the hop
+                    // that appends it, so `publishStderrTail()` below
+                    // cannot run before the tail is in the buffer —
+                    // ordering by construction, not by relying on two
+                    // separately enqueued MainActor jobs staying FIFO.
+                    let tail = leftover.isEmpty
+                        ? nil : String(data: leftover, encoding: .utf8)
+                    Task { @MainActor [weak self] in
+                        if let tail { self?.appendStderrLine(tail) }
+                        cont.resume()
+                    }
                 }
-            }
-        } catch {
-            // Expected on cancellation / EOF.
+            )
+            source.resume()
         }
         publishStderrTail()
+    }
+
+    /// One stderr line (as the drain split it, on `\n`) into the plain
+    /// buffer. The line iterator this replaced also broke lines on a
+    /// bare CR, NEL, LS and PS and swallowed the CR of a CRLF; a
+    /// progress bar redrawing itself with `\r` therefore arrived as
+    /// separate lines, and keeps doing so. Capped at ~2kB so a child
+    /// that narrates forever cannot grow it without bound.
+    private func appendStderrLine(_ rawLine: String) {
+        var line = Substring(rawLine)
+        if line.hasSuffix("\r") { line.removeLast() }
+        let separators: Set<Character> = ["\r", "\u{85}", "\u{2028}", "\u{2029}"]
+        for piece in line.split(omittingEmptySubsequences: false,
+                                whereSeparator: { separators.contains($0) }) {
+            if !stderrBuffer.isEmpty { stderrBuffer += "\n" }
+            stderrBuffer += piece
+        }
+        if stderrBuffer.count > 2048 {
+            stderrBuffer = String(stderrBuffer.suffix(2048))
+        }
     }
 
     // MARK: Wait-for-exit
@@ -2078,7 +2999,7 @@ final class AgentRunner: ObservableObject {
     /// How the child's stdout is wired up. Prefers a PTY so Node's
     /// stdio flushes per line; falls back to a plain pipe if openpty()
     /// fails (extremely rare on macOS).
-    private struct ChildStdoutSource {
+    struct ChildStdoutSource {
         /// FileHandle handed to Process.standardOutput. For the PTY
         /// path this is the slave side; for the pipe fallback, the
         /// write end.
@@ -2124,7 +3045,8 @@ final class AgentRunner: ObservableObject {
     }
 
     /// Try openpty() first; fall back to Pipe() if that fails.
-    private static func makeChildStdoutSource() -> ChildStdoutSource {
+    /// Internal for the same reason as `makeDrainingLineSource`.
+    nonisolated static func makeChildStdoutSource() -> ChildStdoutSource {
         var masterFD: Int32 = 0
         var slaveFD: Int32 = 0
         if openpty(&masterFD, &slaveFD, nil, nil, nil) == 0 {
@@ -2165,17 +3087,32 @@ final class AgentRunner: ObservableObject {
     /// `externalInProgress` flag both live there).
     private func startTailer(at url: URL, initialOffset: UInt64) {
         guard tailer == nil else { return }
-        // The tailer decodes claude's session JSONL. A codex rollout —
-        // and a kimi wire file — are different schemas entirely (see
-        // CodexEventParsing.swift / KimiEventParsing.swift), so
-        // pointing it at one costs an fd and two timers per browsed
-        // session to produce no events at all. Our OWN codex and kimi
-        // turns stream over stdout and never need this; an external
-        // codex or kimi turn is not watched live.
-        guard isClaude else { return }
+        // Each CLI's transcript is its own schema, and each leaves its
+        // own sign of a live writer — the tailer is told which
+        // (`AgentSessionTailer.Format`). Our OWN turns stream over stdout
+        // whatever the agent; this is for the turn another process runs
+        // on the session: a terminal, another app, a turn this app
+        // orphaned by relaunching.
+        let format: AgentSessionTailer.Format
+        switch agentKey {
+        case "codex":
+            // The writer lock is named for the thread; the session id IS
+            // the thread id, and so is the rollout file name's tail.
+            let threadId = sessionId.flatMap { $0.isEmpty ? nil : $0 }
+                ?? Self.rolloutThreadId(url)
+            format = .codex(threadId: threadId,
+                            sessionRoot: CodexSessionScanner.sessionRoot)
+        case "kimi":
+            // The folder a live kimi process reports is a real path, as
+            // is the one kimi records for the session.
+            format = .kimi(workDir: KimiWebTurn.resolvedPath(cwd))
+        default:
+            format = .claude
+        }
         let t = AgentSessionTailer(
             fileURL: url,
             fallbackCwd: cwd,
+            format: format,
             onEvents: { [weak self] batch in
                 self?.appendTailedEvents(batch)
             },
@@ -2190,6 +3127,17 @@ final class AgentRunner: ObservableObject {
         )
         t.start(initialOffset: initialOffset)
         tailer = t
+    }
+
+    /// The thread id a codex rollout is named for: `rollout-<stamp>-<id>
+    /// .jsonl`, the id being the last 36 characters. Empty when the name
+    /// is not that shape — the lock test then answers "no writer", and the
+    /// turn is left to the staleness guard.
+    nonisolated static func rolloutThreadId(_ url: URL) -> String {
+        let name = url.deletingPathExtension().lastPathComponent
+        guard name.count >= 36 else { return "" }
+        let id = String(name.suffix(36))
+        return UUID(uuidString: id) != nil ? id.lowercased() : ""
     }
 
     /// Live-buffer cap. An external watch can stream for hours; without
@@ -2214,13 +3162,39 @@ final class AgentRunner: ObservableObject {
                 break
             }
         }
+        // The speed the newest call ran at, whoever sent the turn — the
+        // chip states it only while this session's own switch asks for
+        // fast mode.
+        if let speed = batch.last(where: { $0.callSpeed != nil })?.callSpeed {
+            updateFastModeReport { $0.lastSpeed = speed }
+        }
+        // Codex and kimi carry no usage on the rows themselves; their
+        // stores record it per call, and the same throttled reads our
+        // own turns use keep the chip moving through one another process
+        // runs.
+        refreshCodexContextTokens(throttled: true)
+        refreshKimiContextTokens(throttled: true)
         trimLiveEventsIfNeeded()
     }
 
     private func trimLiveEventsIfNeeded() {
         if events.count > Self.liveEventCap + 200 {
-            events.removeFirst(events.count - Self.liveEventCap)
+            let cut = events.count - Self.liveEventCap
+            // The newest turn opened inside the cut is the one the buffer
+            // now opens in. None there: it still opens inside the turn it
+            // opened in before, and the flag already says what that was.
+            if let opener = events[..<cut].last(where: Self.opensTurn) {
+                trimmedHeadChatOnly = opener.chatOnlyTurn
+            }
+            events.removeFirst(cut)
         }
+    }
+
+    /// A message the user sent — the event a turn opens with. A notice
+    /// in the user column opens none.
+    private static func opensTurn(_ event: StreamEvent) -> Bool {
+        if case .userMessage = event.kind { return !event.isSystemNotice }
+        return false
     }
 
     /// The transcript file a newly-discovered session id belongs to.
@@ -2233,7 +3207,7 @@ final class AgentRunner: ObservableObject {
     nonisolated static func locateSessionFile(id: String,
                                               agentKey: String) -> URL? {
         switch agentKey {
-        case "codex": return locateCodexRollout(id: id)
+        case "codex": return CodexSessionScanner.rolloutFile(namedForId: id)
         case "kimi":  return locateKimiWireFile(id: id)
         default:      return locateSessionFile(id: id)
         }
@@ -2263,35 +3237,6 @@ final class AgentRunner: ObservableObject {
             }
         }
         return nil
-    }
-
-    /// Newest rollout whose FILENAME carries this thread id.
-    ///
-    /// Filename-only on purpose. `CodexSessionScanner.rolloutFiles`
-    /// answers the same question authoritatively, but falls back to
-    /// reading a 512 KB head from every rollout that doesn't match —
-    /// hundreds of files, on the MainActor, at the end of every turn.
-    /// Codex always embeds the id in the name
-    /// (`rollout-<stamp>-<uuid>.jsonl`), so the cheap check is the
-    /// right one here; the authoritative walk stays where deletion
-    /// needs it.
-    nonisolated private static func locateCodexRollout(id: String) -> URL? {
-        guard !id.isEmpty,
-              let walker = FileManager.default.enumerator(
-                at: CodexSessionScanner.sessionRoot,
-                includingPropertiesForKeys: [.contentModificationDateKey],
-                options: [.skipsHiddenFiles])
-        else { return nil }
-        var newest: (url: URL, at: Date)? = nil
-        for case let url as URL in walker {
-            let name = url.lastPathComponent
-            guard name.hasPrefix("rollout-"), name.hasSuffix(".jsonl"),
-                  name.contains(id) else { continue }
-            let at = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate ?? .distantPast
-            if newest == nil || at > newest!.at { newest = (url, at) }
-        }
-        return newest?.url
     }
 
     /// Glob `~/.claude/projects/*/<id>.jsonl` for the JSONL file that

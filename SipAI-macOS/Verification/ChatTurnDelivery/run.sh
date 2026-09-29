@@ -20,8 +20,17 @@ set -e
 here="$(cd "$(dirname "$0")" && pwd)"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
+# The sidebar's tiers, which ChatManager orders its chats by — the
+# REAL enum, extracted from the grouping file, which needs far more of
+# the app than this harness compiles.
+awk '/^enum SidebarTier: Int, Comparable \{/{f=1} f{print} f&&/^\}/{exit}' \
+  "$here/../../SipAI/Models/AgentSessionGrouping.swift" > "$out/Tier.swift"
+if ! grep -q "static func placed" "$out/Tier.swift"; then
+  echo "could not extract SidebarTier from AgentSessionGrouping.swift" >&2
+  exit 1
+fi
 swiftc -O -o "$out/chatturnharness" \
-  "$here/Stubs.swift" "$here/main.swift" \
+  "$here/Stubs.swift" "$here/main.swift" "$out/Tier.swift" \
   "$here/../../SipAI/Models/ChatManager.swift"
 # An explicit source root overrides, so the structural pass can be
 # pointed at an older checkout to confirm it still catches the bug.

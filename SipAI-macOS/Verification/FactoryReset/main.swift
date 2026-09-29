@@ -183,6 +183,21 @@ MainActor.assumeIsolated {
     for m in ["projects.reload", "chats.reload", "notes.reload"] {
         check("\(m) called", CallLog.index(of: m) != nil)
     }
+    // The update switches and the badge's seen versions are read into
+    // memory at launch. Their keys go with the wipe; an automatic-update
+    // switch left on in memory would keep updating tools after a reset
+    // that promised every setting.
+    check("the update switches in memory are dropped after the wipe",
+          CallLog.index(of: "cliUpdates.forgetSwitches").map { i in
+              CallLog.index(of: "config.reload").map { $0 < i } ?? false } == true)
+    check("the badge's seen versions in memory are dropped",
+          CallLog.index(of: "badge.forgetSeen") != nil)
+    for key in ["cliUpdateChecksEnabled", "cliAutoUpdateEnabled", "updateBadgeSeen",
+                "sipaiAvailableUpdate", "sipaiLastLaunchedBuilds", "sipaiLastLaunchedBuild",
+                "cliUpdateDismissed"] {
+        check("\(key) is among the keys a reset clears",
+              FactoryReset.userDefaultsKeys.contains(key))
+    }
     // The wipe erased the learned model names ("Opus 5") along with the
     // rest of config, so the launch-scoped latch saying "already
     // harvested" is now claiming knowledge nothing holds. Left armed, it

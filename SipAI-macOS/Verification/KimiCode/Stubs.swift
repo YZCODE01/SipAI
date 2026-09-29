@@ -21,18 +21,33 @@ struct StreamEvent: Identifiable {
     let kind: StreamEventKind
     let contextTokens: Int?
     var isSystemNotice: Bool = false
-    /// The real one carries claude's `fast_mode_state`; the parser
-    /// passes it on every init/result event, so the stub must take it.
+    /// The real one carries claude's `fast_mode_state` and the reason
+    /// beside it on every init/result event, and each main-loop call's
+    /// `usage.speed` — the parser passes all three, so the stub must
+    /// take them.
     var fastModeState: String? = nil
+    var fastModeDisabledReason: String? = nil
+    var callSpeed: String? = nil
     /// Likewise claude's own per-model context windows, which its
     /// `result` event carries.
     var modelContextWindows: [String: Int]? = nil
+    /// And the tailer hands a codex or kimi user row's attachment names
+    /// through; the Chat only flag rides the same initializer.
+    var attachedFiles: [String] = []
+    var chatOnlyTurn: Bool = false
 
     init(kind: StreamEventKind, contextTokens: Int? = nil,
          isSystemNotice: Bool = false, fastModeState: String? = nil,
-         modelContextWindows: [String: Int]? = nil) {
+         fastModeDisabledReason: String? = nil, callSpeed: String? = nil,
+         modelContextWindows: [String: Int]? = nil,
+         attachedFiles: [String] = [],
+         chatOnlyTurn: Bool = false) {
+        self.attachedFiles = attachedFiles
+        self.chatOnlyTurn = chatOnlyTurn
         self.isSystemNotice = isSystemNotice
         self.fastModeState = fastModeState
+        self.fastModeDisabledReason = fastModeDisabledReason
+        self.callSpeed = callSpeed
         self.modelContextWindows = modelContextWindows
         self.id = UUID()
         self.timestamp = Date()
@@ -44,6 +59,7 @@ struct StreamEvent: Identifiable {
 enum StreamEventKind {
     case userMessage(text: String)
     case assistantText(text: String)
+    case thinking(text: String)
     case toolUse(toolUseId: String, name: String, input: [String: Any])
     case toolResult(toolUseId: String, output: String, isError: Bool)
     case systemInit(sessionId: String, model: String, cwd: String)
@@ -117,4 +133,25 @@ enum ShellEnvironment {
 /// here anyway, so the catalog never reaches it.
 enum CodexModelListRefresh {
     static func run(binary: String) async -> Bool { false }
+    static func answer(binary: String) async -> [String: Any]? { nil }
+}
+
+/// The config write `CodexCatalog.setContextWindow` runs — also a
+/// process spawn, also unreachable here since `binaryPath` is nil.
+enum CodexConfigWrite {
+    enum Outcome: Equatable {
+        case written(version: String?, filePath: String?, overriddenBy: String?)
+        case refused(code: String?, message: String)
+        case unavailable
+    }
+    static func run(binary: String, keyPath: String, value: Int?) async -> Outcome {
+        .unavailable
+    }
+}
+
+/// The folder read `CodexCatalog.refreshSpeedSettings` sends — a spawn
+/// as well, and unreachable for the same reason. The request builder
+/// and the answer's parse are the real ones, in AgentLaunchOptions.swift.
+extension CodexConfigRead {
+    static func run(binary: String, cwd: String) async -> [String: Any]? { nil }
 }

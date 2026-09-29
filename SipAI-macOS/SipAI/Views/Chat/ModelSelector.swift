@@ -19,10 +19,10 @@ struct ModelSelector: View {
         } label: {
             HStack(spacing: 6) {
                 Text(currentModelDisplayName())
-                    .font(.system(size: 13, weight: .medium))
+                    .sipFont(13, weight: .medium)
                     .foregroundColor(SipDesign.textPrimary)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
+                    .sipFont(9, weight: .semibold)
                     .foregroundColor(SipDesign.textHint)
             }
             .padding(.horizontal, 8)
@@ -40,7 +40,7 @@ struct ModelSelector: View {
             VStack(alignment: .leading, spacing: 0) {
                 if config.models.isEmpty {
                     Text("No models configured.", comment: "Model selector empty state")
-                        .font(.system(size: 13))
+                        .sipFont(13)
                         .foregroundColor(SipDesign.textSecondary)
                         .padding(12)
                 } else {
@@ -52,11 +52,11 @@ struct ModelSelector: View {
                             } label: {
                                 HStack {
                                     Text(model.name)
-                                        .font(.system(size: 13))
+                                        .sipFont(13)
                                         .foregroundColor(SipDesign.textPrimary)
                                     if model.id == config.defaultModel {
                                         Text("default", comment: "Chip marking the default model")
-                                            .font(.system(size: 10))
+                                            .sipFont(10)
                                             .foregroundColor(SipDesign.blue)
                                             .padding(.horizontal, 6)
                                             .padding(.vertical, 1)
@@ -66,7 +66,7 @@ struct ModelSelector: View {
                                     Spacer()
                                     if appState.activeModel == model.id {
                                         Image(systemName: "checkmark")
-                                            .font(.system(size: 11, weight: .semibold))
+                                            .sipFont(11, weight: .semibold)
                                             .foregroundColor(SipDesign.blue)
                                     }
                                 }
@@ -102,7 +102,7 @@ struct ModelSelector: View {
                         Image(systemName: "plus.circle")
                             .foregroundColor(SipDesign.blue)
                         Text("Add Model", comment: "Model picker: open the model setup window")
-                            .font(.system(size: 13))
+                            .sipFont(13)
                             .foregroundColor(SipDesign.textPrimary)
                         Spacer()
                     }
@@ -175,11 +175,11 @@ private struct SelectorChip: View {
     var body: some View {
         HStack(spacing: 6) {
             Text(title)
-                .font(.system(size: 13, weight: .medium))
+                .sipFont(13, weight: .medium)
                 .foregroundColor(SipDesign.textPrimary)
                 .lineLimit(1)
             Image(systemName: "chevron.down")
-                .font(.system(size: 9, weight: .semibold))
+                .sipFont(9, weight: .semibold)
                 .foregroundColor(SipDesign.textHint)
         }
         .padding(.horizontal, 8)
@@ -205,13 +205,13 @@ struct SelectorPopoverRow: View {
         Button(action: action) {
             HStack {
                 Text(title)
-                    .font(.system(size: 13))
+                    .sipFont(13)
                     .foregroundColor(SipDesign.textPrimary)
                     .lineLimit(1)
                 Spacer()
                 if selected {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 11, weight: .semibold))
+                        .sipFont(11, weight: .semibold)
                         .foregroundColor(SipDesign.blue)
                 }
             }

@@ -47,5 +47,15 @@
 	     which overrides this default. -->
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
+
+	<!-- Sparkle's update window offers "Automatically download and
+	     install updates in the future" whenever this key is ABSENT and
+	     automatic checks are on. SipAI never downloads an update by
+	     itself — UpdateController pins that off at every launch, the
+	     README's promise — so a tick in that box was silently undone at
+	     the next relaunch. Off, Sparkle hides the box and refuses the
+	     setting. -->
+	<key>SUAllowsAutomaticUpdates</key>
+	<false/>
 </dict>
 </plist>

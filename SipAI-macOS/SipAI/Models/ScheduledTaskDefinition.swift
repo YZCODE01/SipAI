@@ -1,6 +1,7 @@
 // ScheduledTaskDefinition.swift
 // The complete, self-contained definition of a scheduled task, plus the
-// cron parser that decides when it is due.
+// parsers that decide when it is due: cron for a recurring schedule,
+// an ISO 8601 instant for a one-time run (`TaskSchedule`).
 //
 // WHY THE SCHEDULE LIVES HERE AND NOT IN THE CRONTAB
 //
@@ -16,8 +17,8 @@
 // schedule sits in one place the user can also see and edit by hand.
 //
 // Frontmatter keys this app owns:
-//     name, description, schedule, cwd, mode, model, effort, agent,
-//     enabled, catchup
+//     name, description, schedule, cwd, mode, model, effort, fast_mode,
+//     service_tier, agent, enabled, catchup
 // Any OTHER key found in an existing file is preserved verbatim on
 // rewrite — Claude Desktop writes its own task files into the same
 // directory and must not lose fields it cares about just because we
@@ -334,6 +335,158 @@ struct CronSchedule: Equatable, Hashable {
     }
 }
 
+// MARK: - Schedule
+
+/// What a task's `schedule:` value says: a recurring 5-field cron
+/// expression, or ONE moment.
+///
+/// Both forms live in the same key, so the task directory stays the
+/// whole truth. Cron has no year field — no 5-field expression can say
+/// "this date, once" — so the one-time form is its own spelling:
+/// `once 2026-09-30T17:00:00-07:00`, an ISO 8601 instant written in
+/// the local time zone so a person reading the file sees their own
+/// clock. The leading word is one no cron field can start with, so the
+/// two forms can never read as each other, and a reader that does not
+/// know the form sees an unparseable schedule and fires nothing.
+enum TaskSchedule: Equatable {
+    case cron(CronSchedule)
+    case once(Date)
+
+    static let oncePrefix = "once"
+
+    static func parse(_ raw: String) -> TaskSchedule? {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        if let date = onceDate(in: trimmed) { return .once(date) }
+        return CronSchedule.parse(trimmed).map(TaskSchedule.cron)
+    }
+
+    /// The `schedule:` value for a single run at `date`.
+    static func onceExpression(for date: Date,
+                               timeZone: TimeZone = .current) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = timeZone
+        return "\(oncePrefix) \(formatter.string(from: date))"
+    }
+
+    /// The instant a one-time value names, or nil for anything else.
+    /// Takes what `onceExpression` writes, plus the two shapes a hand
+    /// edit is likely to produce — `2026-09-30T17:00` and
+    /// `2026-09-30 17:00`, read in the local time zone.
+    static func onceDate(in raw: String) -> Date? {
+        let parts = raw.trimmingCharacters(in: .whitespaces)
+            .split(maxSplits: 1, whereSeparator: \.isWhitespace)
+            .map(String.init)
+        guard parts.count == 2, parts[0].lowercased() == oncePrefix else { return nil }
+        let value = parts[1].trimmingCharacters(in: .whitespaces)
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime]
+        if let date = iso.date(from: value) { return date }
+        let local = DateFormatter()
+        local.locale = Locale(identifier: "en_US_POSIX")
+        local.timeZone = .current
+        for format in ["yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd HH:mm",
+                       "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss"] {
+            local.dateFormat = format
+            if let date = local.date(from: value) { return date }
+        }
+        return nil
+    }
+
+    var isOneTime: Bool {
+        if case .once = self { return true }
+        return false
+    }
+
+    /// One spelling per schedule, for telling whether the schedule in
+    /// force has CHANGED — spelled from what the schedule fires on, not
+    /// from how it was written. A cron expression is its five parsed
+    /// sets and the two day-restriction flags, so `*/15` and
+    /// `0,15,30,45`, `1-5` and `1,2,3,4,5`, `mon` and `1` are one
+    /// schedule (the fire-date search reads nothing else). A one-time
+    /// moment is its instant in UTC, so one moment written from two
+    /// time zones, or by hand, is one schedule too. A respelling that
+    /// read as a change would count the schedule's newest slot as
+    /// already accounted for — and swallow a slot owed under it.
+    var canonicalText: String {
+        switch self {
+        case .cron(let cron):
+            func list(_ set: Set<Int>) -> String {
+                set.sorted().map(String.init).joined(separator: ",")
+            }
+            return "cron m=\(list(cron.minutes)) h=\(list(cron.hours))"
+                + " dom=\(list(cron.daysOfMonth))\(cron.dayOfMonthRestricted ? "!" : "")"
+                + " mon=\(list(cron.months))"
+                + " dow=\(list(cron.daysOfWeek))\(cron.dayOfWeekRestricted ? "!" : "")"
+        case .once(let at):
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            formatter.timeZone = TimeZone(identifier: "UTC")
+            return "\(Self.oncePrefix) \(formatter.string(from: at))"
+        }
+    }
+
+    /// The first fire time strictly after `date`; nil once a one-time
+    /// run's moment has passed.
+    func nextFireDate(after date: Date, calendar: Calendar = .current) -> Date? {
+        switch self {
+        case .cron(let cron):
+            return cron.nextFireDate(after: date, calendar: calendar)
+        case .once(let at):
+            return at > date ? at : nil
+        }
+    }
+
+    /// The most recent fire time at or before `date` — the scheduler's
+    /// one question (see `ScheduledTaskScheduler.decide`). A one-time
+    /// schedule has a slot only once its moment has come.
+    func previousFireDate(onOrBefore date: Date,
+                          calendar: Calendar = .current) -> Date? {
+        switch self {
+        case .cron(let cron):
+            return cron.previousFireDate(onOrBefore: date, calendar: calendar)
+        case .once(let at):
+            return at <= date ? at : nil
+        }
+    }
+
+    /// Plain-language rendering, same voice as a cron summary
+    /// ("every day at 9:00 AM" / "once, tomorrow at 9:00 AM").
+    var localizedDescriptionText: String {
+        switch self {
+        case .cron(let cron):
+            return cron.localizedDescriptionText
+        case .once(let at):
+            return String(localized: "once, \(Self.momentText(at))",
+                          comment: "Schedule summary for a task that runs a single time; placeholder is a date and time such as “tomorrow at 9:00 AM”")
+        }
+    }
+
+    /// A one-time run's moment as the middle of a sentence: "today at
+    /// 5:00 PM", "tomorrow at 9:00 AM", "Mon, Oct 5 at 5:00 PM", with
+    /// the year only when it is not this one. Locale-aware throughout —
+    /// the system formatter supplies the words and their order.
+    static func momentText(_ date: Date, now: Date = Date(),
+                           calendar: Calendar = .current) -> String {
+        if calendar.isDateInToday(date) || calendar.isDateInTomorrow(date)
+            || calendar.isDateInYesterday(date) {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            formatter.timeStyle = .short
+            formatter.doesRelativeDateFormatting = true
+            formatter.formattingContext = .middleOfSentence
+            return formatter.string(from: date)
+        }
+        var style = Date.FormatStyle.dateTime
+            .weekday(.abbreviated).month(.abbreviated).day()
+            .hour().minute()
+        if !calendar.isDate(date, equalTo: now, toGranularity: .year) {
+            style = style.year()
+        }
+        return date.formatted(style)
+    }
+}
+
 // MARK: - Definition
 
 /// Everything a scheduled task is configured to do — the parsed form of
@@ -343,13 +496,25 @@ struct ScheduledTaskDefinition: Equatable {
     /// renaming edits `description` only, exactly as before.
     var name: String
     var description: String
-    /// Raw `schedule:` text. Empty means the task has no schedule and
-    /// only ever runs when the user presses Run now.
+    /// Raw `schedule:` text — a 5-field cron expression, or a one-time
+    /// `once <instant>` (see `TaskSchedule`). Empty means the task has
+    /// no schedule and only ever runs when the user presses Run now.
     var scheduleExpression: String = ""
     var workingDirectory: URL?
     var mode: String?
     var model: String?
     var effort: String?
+    /// Claude Code's fast mode for the unattended run, written
+    /// `fast_mode: true` and only when on. Codex and kimi runs ignore it.
+    var fastMode: Bool = false
+    /// Codex's speed for the unattended run: nil follows what `codex
+    /// exec` resolves by itself (the config's tier in the task's folder,
+    /// never a model's catalog default), `default` is codex's explicit
+    /// standard, and anything else a tier id the model advertises
+    /// ("priority" is the one codex names Fast). Written `service_tier:`;
+    /// claude and kimi runs ignore it. See
+    /// `AgentLaunchOptions.scheduledRun`.
+    var serviceTier: String?
     var agent: String = "claude_code"
     /// `enabled: false` pauses firing without losing the schedule.
     var enabled: Bool = true
@@ -363,8 +528,18 @@ struct ScheduledTaskDefinition: Equatable {
     /// edit), preserved in order across our rewrites.
     var passthroughFields: [(key: String, value: String)] = []
 
-    var schedule: CronSchedule? {
-        CronSchedule.parse(scheduleExpression)
+    var schedule: TaskSchedule? {
+        TaskSchedule.parse(scheduleExpression)
+    }
+
+    /// The schedule this task actually fires on, as one comparable
+    /// string — "" when nothing fires it (paused, no schedule, or one
+    /// that does not parse). The scheduler keeps it beside its record of
+    /// the last slot, so an edit, a pause or a resume reads as the
+    /// schedule CHANGING, never as slots the task missed.
+    var scheduleInForce: String {
+        guard enabled, let schedule else { return "" }
+        return schedule.canonicalText
     }
 
     /// True when a schedule is set but unparseable — the UI says so
@@ -382,6 +557,8 @@ struct ScheduledTaskDefinition: Equatable {
             && lhs.mode == rhs.mode
             && lhs.model == rhs.model
             && lhs.effort == rhs.effort
+            && lhs.fastMode == rhs.fastMode
+            && lhs.serviceTier == rhs.serviceTier
             && lhs.agent == rhs.agent
             && lhs.enabled == rhs.enabled
             && lhs.catchUpMissed == rhs.catchUpMissed
@@ -396,7 +573,7 @@ struct ScheduledTaskDefinition: Equatable {
     /// `passthroughFields`.
     private static let ownedKeys: Set<String> = [
         "name", "description", "schedule", "cwd", "mode", "model",
-        "effort", "agent", "enabled", "catchup",
+        "effort", "fast_mode", "service_tier", "agent", "enabled", "catchup",
     ]
 
     /// Parse a task directory's SKILL.md. Returns nil when the file is
@@ -434,6 +611,10 @@ struct ScheduledTaskDefinition: Equatable {
             case "mode":        def.mode = value.isEmpty ? nil : value
             case "model":       def.model = value.isEmpty ? nil : value
             case "effort":      def.effort = value.isEmpty ? nil : value
+            // On only when the file says so — the opposite default to
+            // `enabled`, since fast mode spends usage credits.
+            case "fast_mode":   def.fastMode = isTrue(value)
+            case "service_tier": def.serviceTier = value.isEmpty ? nil : value
             case "agent":       if !value.isEmpty { def.agent = value }
             case "enabled":     def.enabled = !isFalse(value)
             case "catchup":     def.catchUpMissed = !isFalse(value)
@@ -451,6 +632,10 @@ struct ScheduledTaskDefinition: Equatable {
 
     private static func isFalse(_ value: String) -> Bool {
         ["false", "no", "0", "off"].contains(value.lowercased())
+    }
+
+    private static func isTrue(_ value: String) -> Bool {
+        ["true", "yes", "1", "on"].contains(value.lowercased())
     }
 
     private static func unquoted(_ value: String) -> String {
@@ -486,9 +671,15 @@ struct ScheduledTaskDefinition: Equatable {
 
     /// The full SKILL.md text for this definition.
     func fileContents() -> String {
+        // A blank description — empty, or whitespace `frontmatterSafe`
+        // trims to nothing — is written as the name, which is what
+        // `read` hands back for an empty `description:` line. So a form
+        // whose name was cleared writes the same file it reads, and the
+        // panel's "unsaved" test (`writesSameFile`) settles after a save.
+        let description = Self.frontmatterSafe(description)
         var fields: [String] = [
             "name: \(Self.frontmatterSafe(name))",
-            "description: \(Self.frontmatterSafe(description.isEmpty ? name : description))",
+            "description: \(description.isEmpty ? Self.frontmatterSafe(name) : description)",
         ]
         let schedule = Self.frontmatterSafe(scheduleExpression)
         if !schedule.isEmpty { fields.append("schedule: \(schedule)") }
@@ -503,6 +694,10 @@ struct ScheduledTaskDefinition: Equatable {
         }
         if let effort = effort.map(Self.frontmatterSafe), !effort.isEmpty {
             fields.append("effort: \(effort)")
+        }
+        if fastMode { fields.append("fast_mode: true") }
+        if let tier = serviceTier.map(Self.frontmatterSafe), !tier.isEmpty {
+            fields.append("service_tier: \(tier)")
         }
         if agent != "claude_code" {
             fields.append("agent: \(Self.frontmatterSafe(agent))")

@@ -19,6 +19,7 @@ out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 swiftc -O -o "$out/kimiharness" \
   "$here/Stubs.swift" \
+  "$here/../../SipAI/Models/AttachmentInline.swift" \
   "$here/../../SipAI/Models/AgentSession.swift" \
   "$here/../../SipAI/Models/AgentSessionTailer.swift" \
   "$here/../../SipAI/Models/AgentEventParsing.swift" \

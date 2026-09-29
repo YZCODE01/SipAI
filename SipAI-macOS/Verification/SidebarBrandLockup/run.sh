@@ -18,9 +18,15 @@
 #     when the appearance changes.
 #   * An opaque background plate reads as a tight crop, because there is
 #     no transparency left to measure.
+#   * The line that takes the wordmark's place after a background update
+#     ("Claude Code just updated to …") must end on the glass's base like
+#     the wordmark does, and must not change the header's height. An
+#     overlay aligned on its BOTTOM instead of its last baseline hangs the
+#     line a descender's depth below the cup (measured: 3.25 pt).
 #
 # Run after: re-rendering the logo, changing a rendition's height, or
-# touching the brand header's alignment or insets in LeftSidebar.
+# touching the brand header's alignment, insets or update line in
+# LeftSidebar.
 #
 # Offline and non-destructive: it reads the asset catalog and builds the
 # app into its normal DerivedData.

@@ -82,12 +82,24 @@ enum AgentRendering {
         case "TodoWrite":
             let todos = (inp["todos"] as? [Any]) ?? []
             return "\(todos.count) todos"
-        case "WebFetch":
+        case "WebFetch", "FetchURL":
             return truncate((inp["url"] as? String) ?? "", 60)
         case "WebSearch":
             return truncate((inp["query"] as? String) ?? "", 60)
         case "Task":
             return truncate((inp["description"] as? String) ?? "", 60)
+        case "ExitPlanMode":
+            // The plan's own title — its first heading or line. A bounded
+            // split: this runs per visible row per render pass, and the
+            // plan is the whole document.
+            let plan = (inp["plan"] as? String) ?? ""
+            for raw in plan.split(separator: "\n", maxSplits: 8,
+                                  omittingEmptySubsequences: true) {
+                let line = raw.drop(while: { $0 == "#" || $0 == " " })
+                    .trimmingCharacters(in: .whitespaces)
+                if !line.isEmpty { return truncate(line, 60) }
+            }
+            return ""
         default:
             // Unknown tools (MCP tools, codex tool calls): the value is
             // what tells the reader something — a bare key list doesn't.
@@ -133,7 +145,7 @@ enum AgentRendering {
         case "Write": return "square.and.pencil"
         case "Read": return "doc.text"
         case "Grep", "Glob": return "magnifyingglass"
-        case "WebFetch", "WebSearch": return "globe"
+        case "WebFetch", "WebSearch", "FetchURL": return "globe"
         case "Task", "Agent": return "person.2"
         case "TodoWrite": return "checklist"
         case "ExitPlanMode", "EnterPlanMode": return "map"
@@ -210,10 +222,12 @@ enum AgentRendering {
             rows = renderTodoWrite(input)
         case "WebSearch":
             rows = []
-        case "WebFetch":
+        case "WebFetch", "FetchURL":
             rows = renderWebFetch(input)
         case "Task":
             rows = renderTaskInput(input)
+        case "ExitPlanMode":
+            rows = renderPlanInput(input)
         default:
             rows = renderGenericInput(input)
         }
@@ -408,6 +422,34 @@ enum AgentRendering {
         if allLines.count > cap {
             let extra = allLines.count - cap
             rows.append(ToolBodyRow(text: "… (\(extra) more lines)",
+                                     style: .dim, monospaced: false))
+        }
+        return rows
+    }
+
+    /// ExitPlanMode carries the whole plan: claude reads its plan file
+    /// back into the tool's input (`plan`, `planFilePath`). The generic
+    /// body clips every string over 200 characters, which would leave an
+    /// approved plan unreadable in the transcript — so it is drawn as
+    /// text, capped like any tool body, under the file it was saved to.
+    private static func renderPlanInput(_ ti: [String: Any]) -> [ToolBodyRow] {
+        let plan = ((ti["plan"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var rows: [ToolBodyRow] = []
+        if let path = ti["planFilePath"] as? String, !path.isEmpty {
+            rows.append(ToolBodyRow(text: shortenPath(path), style: .dim, monospaced: true))
+            if !plan.isEmpty {
+                rows.append(ToolBodyRow(text: "", style: .dim, monospaced: false))
+            }
+        }
+        guard !plan.isEmpty else { return rows }
+        let allLines = plan.components(separatedBy: "\n")
+        let cap = AgentRenderingLimits.fullToolLines
+        rows += allLines.prefix(cap).map {
+            ToolBodyRow(text: $0, style: .plain, monospaced: false)
+        }
+        if allLines.count > cap {
+            rows.append(ToolBodyRow(text: "… (\(allLines.count - cap) more lines)",
                                      style: .dim, monospaced: false))
         }
         return rows

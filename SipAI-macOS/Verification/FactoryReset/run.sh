@@ -6,8 +6,10 @@
 # SipAI/, so these files are never compiled into the product.
 #
 # It compiles the REAL FactoryReset.swift against recording stand-ins
-# for the managers, and runs it over a throwaway data directory under
-# $TMPDIR. It never touches ~/Library/Application Support/SipAI.
+# for the managers — and the real UpdaterAvailability.swift, whose
+# launch record's key the reset names — and runs it over a throwaway
+# data directory under $TMPDIR. It never touches
+# ~/Library/Application Support/SipAI.
 #
 # Run it after any change to FactoryReset.swift, and whenever a new
 # @AppStorage key or a new file under the data directory is added —
@@ -20,5 +22,6 @@ out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 swiftc -O -o "$out/resetharness" \
   "$here/Stubs.swift" "$here/main.swift" \
-  "$here/../../SipAI/Models/FactoryReset.swift"
+  "$here/../../SipAI/Models/FactoryReset.swift" \
+  "$here/../../SipAI/Utilities/UpdaterAvailability.swift"
 "$out/resetharness" "$@"

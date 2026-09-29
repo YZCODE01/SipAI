@@ -24,6 +24,7 @@ out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 swiftc -O -o "$out/attachmentharness" \
   "$here/Stubs.swift" \
+  "$here/../../SipAI/Models/AttachmentInline.swift" \
   "$here/../../SipAI/Models/ChatAttachment.swift" \
   "$here/../../SipAI/Models/APIClient.swift" \
   "$here/main.swift"

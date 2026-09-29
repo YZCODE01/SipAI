@@ -23,14 +23,22 @@
 //     turn is spawned. Never a composed npm/brew/installer line: those
 //     need a node/npm context this app has no business guessing at, and
 //     a wrong guess damages an install the user did not ask us to
-//     touch.
+//     touch. Started by the row's Update button or — once the user has
+//     switched automatic updates on — by itself, and never while a turn
+//     of that tool is running. A turn sent while one runs waits for it.
 //
 // The rule that shapes all of it: **never claim, never nag, without
 // evidence.** A check that failed downgrades nothing and says nothing;
 // an agent nobody has measured a release endpoint for shows its version
 // and no verdict at all. Absence of a claim is the honest state, and it
-// is a different thing from "up to date".
+// is a different thing from "up to date". A tool that is behind is told
+// by the Settings badge (`UpdateBadge`), which asks for nothing until
+// the user looks; one that has been updated — by the button, by itself,
+// or from a terminal — is told once, beside the sidebar's logo
+// (`UpdateAnnouncer`).
 
+import AppKit
+import Combine
 import Foundation
 
 // MARK: - CLIVersion
@@ -129,12 +137,22 @@ enum CLIUpdateStatus: Equatable {
     /// is the command's own output, which is the only thing that can
     /// explain why.
     case updateFailed(outputTail: String)
+    /// Installed by a package manager the CLI's own updater leaves the
+    /// update to — Homebrew, for claude and kimi (`AgentInstallSource
+    /// .managedBy`): `claude update` prints "Claude is managed by
+    /// Homebrew." and exits without updating; `kimi upgrade` names
+    /// `brew upgrade kimi-code` and stops. SipAI never runs Homebrew, so
+    /// the row states the version and who manages it: no claim (the
+    /// `claude-code` cask tracks npm's `stable` tag, so a comparison
+    /// against `latest` is against the wrong channel), no button (it
+    /// could never move the version) and no badge.
+    case managedElsewhere(installed: CLIVersion, manager: String)
 
     /// Whether an Update button belongs on this row at all.
     var offersUpdate: Bool {
         switch self {
         case .updateAvailable, .updateFailed: return true
-        case .unknown, .versionOnly, .upToDate, .updating: return false
+        case .unknown, .versionOnly, .upToDate, .updating, .managedElsewhere: return false
         }
     }
 }
@@ -158,10 +176,18 @@ enum AgentCLIUpdateRules {
     /// standing (with its own timestamp, which is what the tooltip
     /// shows), and a `versionOnly` stays `versionOnly`. There is no
     /// path here that turns a failed network call into a claim.
+    ///
+    /// `managedBy` names the package manager the CLI's own updater
+    /// leaves this install to (`AgentInstallSource.managedBy`); set, it
+    /// outranks whatever a check found — the updater would not apply
+    /// it here, and for claude's stable cask the comparison itself is
+    /// against the wrong channel.
     static func decideStatus(installed: CLIVersion?,
                              latestKnown: CLIVersion?,
-                             lastCheckSucceeded: Date?) -> CLIUpdateStatus {
+                             lastCheckSucceeded: Date?,
+                             managedBy: String? = nil) -> CLIUpdateStatus {
         guard let installed else { return .unknown }
+        if let managedBy { return .managedElsewhere(installed: installed, manager: managedBy) }
         guard let latestKnown, let lastCheckSucceeded else {
             return .versionOnly(installed: installed)
         }
@@ -230,18 +256,65 @@ enum AgentCLIUpdateRules {
         return after == before ? .alreadyCurrent(after) : .didNotUpdate
     }
 
-    /// Whether a banner is owed for this agent, given what the user has
-    /// already closed.
+    /// The version a tool puts on the Settings badge, or nil for none.
     ///
-    /// Keyed on the VERSION, not on the agent: closing the banner
-    /// suppresses that release and nothing else, so the next one
-    /// raises it again. A status that is no longer `updateAvailable`
-    /// simply produces no banner — which is how a CLI that updated
-    /// itself clears the notice without anything being written down.
-    static func bannerIsOwed(status: CLIUpdateStatus,
-                             dismissedVersion: String?) -> Bool {
-        guard case .updateAvailable(_, let latest) = status else { return false }
-        return dismissedVersion != latest.text
+    /// A tool that is behind is on offer — unless it is updated
+    /// automatically, in which case there is nothing for the user to do
+    /// and nothing to announce until an attempt fails. A FAILED update
+    /// is on offer either way: with automatic updates on, the badge is
+    /// then the only thing that says the update did not land. A status
+    /// that is no longer behind produces nothing, which is how a tool
+    /// that became current — by any route — takes its badge down with
+    /// nothing written anywhere.
+    static func badgeVersion(status: CLIUpdateStatus,
+                             latest: CLIVersion?,
+                             autoUpdate: Bool) -> String? {
+        switch status {
+        case .updateAvailable(_, let latest):
+            return autoUpdate ? nil : latest.text
+        case .updateFailed:
+            return latest?.text
+        case .unknown, .versionOnly, .upToDate, .updating, .managedElsewhere:
+            return nil
+        }
+    }
+
+    /// Whether the tool's own update should start by itself, now.
+    ///
+    /// Never while a turn of that tool is in flight — the same rule the
+    /// Update button follows, since replacing a binary under a running
+    /// child is not something to do quietly — and never while another
+    /// action holds the tool (an update, an install, a delete). ONE
+    /// attempt per version: `attemptedVersion` is the version already
+    /// tried, and an attempt that failed is reported through the badge
+    /// rather than retried in a loop. A newer release is a new attempt.
+    static func autoUpdateIsDue(enabled: Bool,
+                                status: CLIUpdateStatus,
+                                latest: CLIVersion?,
+                                actionInFlight: Bool,
+                                turnInFlight: Bool,
+                                attemptedVersion: String?) -> Bool {
+        guard enabled, !actionInFlight, !turnInFlight,
+              status.offersUpdate, let latest else { return false }
+        return attemptedVersion != latest.text
+    }
+
+    /// Whether a tool counts as installed — for its Updates row, and
+    /// for everything presence gates: the sidebar section, an open
+    /// page, the scheduler.
+    ///
+    /// The binary being on disk, OR SipAI's own update of it being in
+    /// progress. An npm update moves the tool's link aside for the whole
+    /// download: `npm install -g @openai/codex` retired
+    /// `/opt/homebrew/bin/codex` to `.codex-<random>` at the start and
+    /// linked the new one 3 min 35 s later (measured; the platform
+    /// binary is 238 MB). Judged on the binary alone, the tool vanished
+    /// for exactly as long as it was being updated, taking with it the
+    /// row that showed the update and its Cancel. A missing binary
+    /// mid-update is not an uninstall, and nothing spawns it meanwhile:
+    /// a turn sent then waits for the update (`waitForUpdate`).
+    static func countsAsInstalled(binaryFound: Bool, updating: Bool) -> Bool {
+        binaryFound || updating
     }
 }
 
@@ -272,22 +345,32 @@ struct AgentCLIRelease {
     /// The CLI's own update subcommand. Argv only — nothing is ever
     /// routed through a shell.
     let updateArguments: [String]
-    /// The vendor's own installer, for an agent whose update command
-    /// DECLINES on some install source and names this script as the
-    /// manual route instead (kimi on a native install, measured). Run
+    /// The vendor's own installers, for an agent whose update command
+    /// DECLINES on some install source and names one of these scripts as
+    /// the manual route instead (kimi on a native install, measured). Run
     /// only when the decline is recognised — see
-    /// `declinedToNativeInstaller(in:)`. nil for everyone else.
-    var nativeInstaller: URL? = nil
+    /// `declinedToNativeInstaller(in:)`. Empty for everyone else.
+    ///
+    /// Kimi has TWO, one per site — `code.kimi.com` for mainland China,
+    /// `code.kimi.ai` for everywhere else — and kimi's updater names the
+    /// one of the region it is on: a login's saved host, else the
+    /// marker its installer wrote (read out of kimi's own
+    /// `kimiCodeInstallShUrl`). The first entry is the fallback of
+    /// `nativeInstallerAfterFailedCheck`.
+    var nativeInstallers: [URL] = []
 
     /// The installer kimi's updater names when it declines a native
     /// install — measured text: "A newer version … is available … /
     /// Detected install source: native installer / To update manually,
     /// run: curl -fsSL https://code.kimi.com/kimi-code/install.sh |
-    /// bash". Returns the installer only when the URL in that sentence
-    /// is EXACTLY the measured one: kimi's words are trusted to say it
-    /// declined, never to name an arbitrary script to run.
+    /// bash" (and `code.kimi.ai` on a kimi on the global region).
+    /// Returns the installer only when the URL in that sentence is
+    /// EXACTLY one of the measured ones: kimi's words are trusted to say
+    /// it declined and on which site, never to name an arbitrary script
+    /// to run. Matching the mainland URL alone would fail every update of
+    /// a kimi on the global site.
     func declinedToNativeInstaller(in output: String) -> URL? {
-        guard let installer = nativeInstaller,
+        guard !nativeInstallers.isEmpty,
               let regex = try? NSRegularExpression(
                 pattern: #"To update manually, run:\s*curl\s+-fsSL\s+(\S+)\s*\|\s*bash"#)
         else { return nil }
@@ -295,9 +378,9 @@ struct AgentCLIRelease {
         guard let match = regex.firstMatch(in: output, range: range),
               match.numberOfRanges > 1,
               let found = Range(match.range(at: 1), in: output),
-              URL(string: String(output[found])) == installer
+              let named = URL(string: String(output[found]))
         else { return nil }
-        return installer
+        return nativeInstallers.first { $0 == named }
     }
 
     /// kimi's updater could not reach its update endpoint. Measured
@@ -309,7 +392,7 @@ struct AgentCLIRelease {
     /// did not share (its own fetch of the same endpoint had just
     /// succeeded, which is why the button was offered at all).
     func updaterCheckFailed(in output: String) -> Bool {
-        nativeInstaller != nil
+        !nativeInstallers.isEmpty
             && output.contains("failed to check for updates")
     }
 
@@ -325,10 +408,13 @@ struct AgentCLIRelease {
     /// parsed from anywhere. Without this, a transient stall on the
     /// route kimi's fetch takes leaves the row on an error sentence
     /// while everything the installer needs — the version, the
-    /// directory, the script — is already known.
+    /// directory, the script — is already known. Kimi named no site
+    /// here, so it is the first (mainland) channel: both serve the same
+    /// checksummed binaries, and the installer never rewrites the site
+    /// marker of an existing install.
     func nativeInstallerAfterFailedCheck(in output: String,
                                          installRecord: Data?) -> URL? {
-        guard let installer = nativeInstaller,
+        guard let installer = nativeInstallers.first,
               updaterCheckFailed(in: output),
               let record = installRecord,
               Self.installSource(fromRecord: record) == "native"
@@ -360,14 +446,21 @@ struct AgentCLIRelease {
 
     /// Where a native install lives, from the binary SipAI spawns: the
     /// installer's `KIMI_INSTALL_DIR` is the directory whose `bin/`
-    /// holds it (`~/.kimi-code/bin/kimi` → `~/.kimi-code`). nil for any
-    /// other layout — the installer is never pointed anywhere it did
-    /// not put the binary itself.
-    static func nativeInstallDirectory(binaryPath: String) -> String? {
+    /// holds it (`~/.kimi-code/bin/kimi` → `~/.kimi-code`), and ONLY
+    /// kimi's own home (`kimiHome`: `~/.kimi-code`, or `KIMI_CODE_HOME`).
+    /// nil for any other layout — the installer is never pointed
+    /// anywhere it did not put the binary itself: a copy of the binary
+    /// in a shared `bin` (`/usr/local/bin`) would otherwise send it to
+    /// `/usr/local`, where it writes its own `fd` and `rg` over the
+    /// user's.
+    static func nativeInstallDirectory(binaryPath: String, kimiHome: String) -> String? {
         let resolved = URL(fileURLWithPath: binaryPath).resolvingSymlinksInPath()
         let bin = resolved.deletingLastPathComponent()
         guard bin.lastPathComponent == "bin" else { return nil }
-        return bin.deletingLastPathComponent().path
+        let directory = bin.deletingLastPathComponent().standardizedFileURL.path
+        guard directory == URL(fileURLWithPath: kimiHome).standardizedFileURL.path
+        else { return nil }
+        return directory
     }
 
     /// The installer's documented non-interactive interface (its own
@@ -395,6 +488,43 @@ struct AgentCLIRelease {
                   let raw = obj["version"] as? String else { return nil }
             return CLIVersion.parse(raw)
         }
+    }
+
+    /// Claude's release channel, as `claude update` follows it on a
+    /// native install: `autoUpdatesChannel` in its settings files, a
+    /// later file winning (the user's `settings.json`, then
+    /// `settings.local.json` — `PlanAccountDetector.claudeSettingsFiles`;
+    /// a project's file is not in hand for a row about the binary), and
+    /// `latest` when unset. Claude's own settings schema allows
+    /// `latest`, `stable` and `rc`, and each is an npm dist-tag of its
+    /// package — `stable` stood at 2.1.274 while `latest` was 2.1.283
+    /// (2026-09-28). Checked against `latest`, a stable-channel install
+    /// read as behind, and its `claude update` answered "up to date" for
+    /// as long as the two tags differed. Anything else reads as claude's
+    /// default. Homebrew installs choose their channel by CASK NAME and
+    /// are never claimed against (`AgentInstallSource.managedBy`).
+    static func claudeChannel(settings: [Data]) -> String {
+        var channel = "latest"
+        for data in settings {
+            guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let value = obj["autoUpdatesChannel"] as? String else { continue }
+            channel = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        }
+        return ["latest", "stable", "rc"].contains(channel) ? channel : "latest"
+    }
+
+    /// The same release read against another npm dist-tag: the registry
+    /// answers `/<package>/<tag>` for every tag the way it answers
+    /// `/latest`, with the same document. Only an npm-backed release has
+    /// a channel, and `latest` is the measured URL itself.
+    func onChannel(_ tag: String) -> AgentCLIRelease {
+        guard payload == .npmLatestJSON, tag != "latest" else { return self }
+        return AgentCLIRelease(agentKey: agentKey,
+                               latestURL: latestURL.deletingLastPathComponent()
+                                   .appendingPathComponent(tag),
+                               payload: payload,
+                               updateArguments: updateArguments,
+                               nativeInstallers: nativeInstallers)
     }
 
     /// The measured table. Anything not named here is version-only.
@@ -436,15 +566,21 @@ struct AgentCLIRelease {
                                    payload: .npmLatestJSON,
                                    updateArguments: ["update"])
         case "kimi":
+            // The release check reads the mainland channel: the global
+            // one is a sync of it, answering the same version. The
+            // installers are both sites' — `KimiSite.installer` spells
+            // the same two, and the Agent Guide harness holds them equal.
             guard let url = URL(string:
                 "https://code.kimi.com/kimi-code/latest"),
-                  let installer = URL(string:
-                "https://code.kimi.com/kimi-code/install.sh")
+                  let mainland = URL(string:
+                "https://code.kimi.com/kimi-code/install.sh"),
+                  let global = URL(string:
+                "https://code.kimi.ai/kimi-code/install.sh")
             else { return nil }
             return AgentCLIRelease(agentKey: agentKey, latestURL: url,
                                    payload: .plainText,
                                    updateArguments: ["upgrade"],
-                                   nativeInstaller: installer)
+                                   nativeInstallers: [mainland, global])
         default:
             return nil
         }
@@ -558,6 +694,20 @@ enum AgentCLIProbe {
         let exitCode: Int32?
         /// stdout and stderr interleaved, tail-bounded.
         let output: String
+        /// The process group the child led. `Process` makes the child the
+        /// leader of a group of its own, and whatever the child starts
+        /// stays in it — npm under `codex update` — so this is what still
+        /// answers after the child is gone (`groupIsAlive`). nil when the
+        /// child never ran, or its group could not be read, or it is
+        /// SipAI's own, which always has a member.
+        var processGroup: pid_t? = nil
+    }
+
+    /// Whether any process of `group` is still alive. A group outlives
+    /// its leader for as long as one member does, and its id is not
+    /// reused while it does.
+    nonisolated static func groupIsAlive(_ group: pid_t) -> Bool {
+        killpg(group, 0) == 0
     }
 
     /// Spawn a CLI and capture what it says, the way an agent turn is
@@ -588,6 +738,7 @@ enum AgentCLIProbe {
                                 ceiling: TimeInterval,
                                 outputCap: Int,
                                 extraEnvironment: [String: String] = [:],
+                                currentDirectory: String? = nil,
                                 onSpawn: @escaping (Process) -> Void) async -> RunResult {
         await ShellEnvironment.prepare()
         var environment = AgentRunner.buildEnvironment()
@@ -600,6 +751,13 @@ enum AgentCLIProbe {
                 p.executableURL = URL(fileURLWithPath: binary)
                 p.arguments = arguments
                 p.environment = environment
+                // Where the child runs matters to a CLI that files
+                // work by cwd — the plan-usage probe runs claude in a
+                // scratch folder so its transcript is scratch too.
+                if let currentDirectory {
+                    p.currentDirectoryURL = URL(fileURLWithPath: currentDirectory,
+                                                isDirectory: true)
+                }
                 p.standardInput = FileHandle.nullDevice
                 let pipe = Pipe()
                 p.standardOutput = pipe
@@ -612,6 +770,10 @@ enum AgentCLIProbe {
                         output: "\(error.localizedDescription)"))
                     return
                 }
+                // Read while the child is surely there: once it has
+                // exited and been reaped, its group can no longer be
+                // asked for.
+                let group = getpgid(p.processIdentifier)
                 onSpawn(p)
 
                 let output = drain(pipe.fileHandleForReading, of: p,
@@ -620,8 +782,10 @@ enum AgentCLIProbe {
                 // Foundation raises. `drain` has waited the child out,
                 // but the guard costs nothing and the rule is absolute.
                 let code: Int32? = p.isRunning ? nil : p.terminationStatus
-                continuation.resume(returning: RunResult(exitCode: code,
-                                                         output: output))
+                continuation.resume(returning: RunResult(
+                    exitCode: code,
+                    output: output,
+                    processGroup: group > 1 && group != getpgrp() ? group : nil))
             }
         }
     }
@@ -724,9 +888,16 @@ enum AgentCLIProbe {
     }
 
     /// Stop a child that is still running: SIGTERM, a grace period,
-    /// then SIGKILL. The pid ONLY, never the process group: Foundation
-    /// cannot put the child in a group of its own, so its group is
-    /// SipAI's, and `kill(-pgid)` would take the app down with it.
+    /// then SIGKILL.
+    ///
+    /// The SIGTERM reaches the child's whole process GROUP: `Process`
+    /// makes the child the leader of a group of its own, and
+    /// `terminate()` signals that group — so an updater's own children
+    /// get it too. `codex update`'s npm does, and on SIGTERM npm lets
+    /// the step in flight (a download of minutes) finish before it rolls
+    /// the install back, so a stopped update leaves the tool missing
+    /// until then — which the monitor waits out (`awaitRestore`). The
+    /// SIGKILL escalation goes to the pid alone.
     /// `isRunning` answers for this `Process` object's own unreaped
     /// child, so a recycled pid can never be signalled.
     nonisolated static func stop(_ p: Process) {
@@ -740,19 +911,16 @@ enum AgentCLIProbe {
     }
 }
 
-// MARK: - Codex model list refresh
+// MARK: - Codex app-server calls
 
-/// The one token-free way to make codex refetch its model catalog.
+/// One request to `codex app-server`, and its answer.
 ///
-/// `codex app-server` speaks JSON-RPC over stdio, and `model/list` is
-/// what fills the TUI's picker at bootstrap: answered from
-/// `models_cache.json` while that is current for the running client,
-/// fetched from the server — and written back to that file — when it is
-/// not. Three lines in, one answer out, and codex decides whether the
-/// network is involved. The answer itself is not what SipAI reads: it
-/// names models but carries no context windows, so the cache file stays
-/// the source and `CodexCatalog`'s fingerprint over it is what moves
-/// the picker.
+/// `codex app-server` speaks JSON-RPC over stdio — the same door
+/// codex's own desktop front-end goes through. The handshake is what
+/// that front-end sends: `initialize` with a client name and version,
+/// then the `initialized` notification; the request follows as a third
+/// line, and the wait ends at the answer carrying its id. No model is
+/// called and nothing is billed by anything sent this way.
 ///
 /// stdin must stay OPEN until the answer arrives. The process exits at
 /// end-of-file before answering anything still queued (measured), so
@@ -761,37 +929,47 @@ enum AgentCLIProbe {
 /// process cleanly. Everything else is the shape of `AgentCLIProbe`:
 /// the environment an agent turn gets, a ceiling, the pid alone ever
 /// signalled.
-enum CodexModelListRefresh {
+enum CodexAppServerCall {
     static let ceiling: TimeInterval = 30
 
-    /// What codex's own front-end sends: `initialize` with a client
-    /// name and version, the `initialized` notification, then the
-    /// request. Static text — nothing user-derived reaches it.
-    static let requests: [String] = [
+    /// Static text — nothing user-derived reaches it.
+    static let handshake: [String] = [
         #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"sipai","title":"SipAI","version":"1"}}}"#,
         #"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
-        #"{"jsonrpc":"2.0","id":2,"method":"model/list","params":{}}"#,
     ]
 
-    /// The request id whose answer ends the wait.
+    /// The request id whose answer ends the wait. Every request handed
+    /// to `run` carries it.
     static let answerId = 2
 
-    /// True when `model/list` answered. False for a codex with no
-    /// app-server, signed out, or offline — none of which changes
-    /// anything on disk.
-    nonisolated static func run(binary: String) async -> Bool {
+    /// The answer object — `result` or `error` under `answerId` — or
+    /// nil for a codex with no app-server, one that exited first, or
+    /// one that never answered inside the ceiling.
+    nonisolated static func run(binary: String, request: String) async -> [String: Any]? {
+        await run(binary: binary, requests: [request], awaiting: [answerId])[answerId]
+    }
+
+    /// Several requests down one process, answered by id. The wait
+    /// ends when every awaited id has answered or at the ceiling;
+    /// whatever answered by then is returned. Empty for a codex with
+    /// no app-server or one that exited first.
+    nonisolated static func run(binary: String, requests: [String],
+                                awaiting: Set<Int>) async -> [Int: [String: Any]] {
         await ShellEnvironment.prepare()
         let environment = AgentRunner.buildEnvironment()
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 continuation.resume(returning: drive(binary: binary,
+                                                     requests: requests,
+                                                     awaiting: awaiting,
                                                      environment: environment))
             }
         }
     }
 
-    nonisolated private static func drive(binary: String,
-                                          environment: [String: String]) -> Bool {
+    nonisolated private static func drive(binary: String, requests: [String],
+                                          awaiting: Set<Int>,
+                                          environment: [String: String]) -> [Int: [String: Any]] {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binary)
         p.arguments = ["app-server"]
@@ -801,13 +979,13 @@ enum CodexModelListRefresh {
         p.standardInput = input
         p.standardOutput = output
         p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return false }
+        do { try p.run() } catch { return [:] }
 
         // A child that exits before reading would make the write
         // SIGPIPE this process; the descriptor is told not to.
         let inFD = input.fileHandleForWriting.fileDescriptor
         _ = fcntl(inFD, F_SETNOSIGPIPE, 1)
-        let payload = Array((requests.joined(separator: "\n") + "\n").utf8)
+        let payload = Array(((handshake + requests).joined(separator: "\n") + "\n").utf8)
         var written = 0
         while written < payload.count {
             let n = payload[written...].withUnsafeBufferPointer { buf in
@@ -821,8 +999,8 @@ enum CodexModelListRefresh {
         let deadline = Date().addingTimeInterval(ceiling)
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         var received = Data()
-        var answered = false
-        while !answered, Date() < deadline {
+        var answered: [Int: [String: Any]] = [:]
+        while !awaiting.isSubset(of: answered.keys), Date() < deadline {
             var pfd = pollfd(fd: outFD, events: Int16(POLLIN), revents: 0)
             let ready = poll(&pfd, 1, 250)
             if ready < 0 {
@@ -846,8 +1024,8 @@ enum CodexModelListRefresh {
             if count == 0 { break }
             received.append(contentsOf: buffer[0..<count])
             // Notifications stream on the same channel; only the
-            // answer is awaited, and nothing after it is needed.
-            answered = containsAnswer(received)
+            // answers are awaited, and nothing after them is needed.
+            answered = answers(in: received, ids: awaiting)
             if received.count > 4 * 1024 * 1024 {
                 received.removeFirst(received.count - 1024 * 1024)
             }
@@ -866,44 +1044,159 @@ enum CodexModelListRefresh {
         return answered
     }
 
-    /// Whether a complete line so far is the answer to `answerId` — a
-    /// JSON object carrying that id and a result or an error.
-    nonisolated static func containsAnswer(_ data: Data) -> Bool {
+    /// The first complete line so far that is the answer to `answerId`
+    /// — a JSON object carrying that id and a result or an error.
+    nonisolated static func answer(in data: Data) -> [String: Any]? {
+        answers(in: data, ids: [answerId])[answerId]
+    }
+
+    /// The answers so far to each of `ids`, first complete line wins.
+    nonisolated static func answers(in data: Data, ids: Set<Int>) -> [Int: [String: Any]] {
+        var out: [Int: [String: Any]] = [:]
         for line in data.split(separator: UInt8(ascii: "\n")) {
             guard let obj = (try? JSONSerialization.jsonObject(with: Data(line)))
                     as? [String: Any],
-                  (obj["id"] as? NSNumber)?.intValue == answerId,
+                  let id = (obj["id"] as? NSNumber)?.intValue,
+                  ids.contains(id), out[id] == nil,
                   obj["result"] != nil || obj["error"] != nil
             else { continue }
-            return true
+            out[id] = obj
         }
-        return false
+        return out
+    }
+
+    nonisolated static func containsAnswer(_ data: Data) -> Bool {
+        answer(in: data) != nil
+    }
+}
+
+// MARK: - Codex model list refresh
+
+/// The one token-free way to make codex refetch its model catalog.
+///
+/// `model/list` is what fills the TUI's picker at bootstrap: answered
+/// from `models_cache.json` while that is current for the running
+/// client, fetched from the server — and written back to that file —
+/// when it is not. One request in, one answer out, and codex decides
+/// whether the network is involved. The answer names models but
+/// carries no context windows, so the cache file stays the source for
+/// those, and `CodexCatalog`'s fingerprint over it is what moves the
+/// picker. What the answer IS read for is each model's service tiers
+/// and their default (`CodexCatalog.listedTiers(fromAnswer:)`): it is
+/// the installed binary's own view, where the cache may be another
+/// codex client's.
+enum CodexModelListRefresh {
+    static let request =
+        #"{"jsonrpc":"2.0","id":2,"method":"model/list","params":{}}"#
+
+    /// True when `model/list` answered. False for a codex with no
+    /// app-server, signed out, or offline — none of which changes
+    /// anything on disk.
+    nonisolated static func run(binary: String) async -> Bool {
+        await answer(binary: binary) != nil
+    }
+
+    /// The answer object itself, or nil when there was none.
+    nonisolated static func answer(binary: String) async -> [String: Any]? {
+        await CodexAppServerCall.run(binary: binary, request: request)
+    }
+}
+
+// MARK: - Codex config write
+
+/// One key of the user's `~/.codex/config.toml`, written BY CODEX.
+///
+/// `config/value/write` is how codex's own front-end edits that file:
+/// codex parses the file, sets or removes the key, validates the value
+/// against its schema, and writes the rest back byte for byte. That is
+/// the whole reason this app never edits the file itself — it is a
+/// file three other clients read, in a format only codex has a parser
+/// for. A JSON `null` value REMOVES the key (measured: the file came
+/// back byte-identical to what it was before the key was added), which
+/// is what makes "Back to default" a real absence rather than a second
+/// number of ours.
+///
+/// `keyPath` is always a literal from the caller; the value is an
+/// integer or nil. Nothing typed by a user is ever serialised into the
+/// request.
+enum CodexConfigWrite {
+    enum Outcome: Equatable {
+        /// Written. `overriddenBy` names a higher layer (a managed or
+        /// project config) when codex reports the value will not take
+        /// effect despite landing in the file.
+        case written(version: String?, filePath: String?, overriddenBy: String?)
+        /// Codex answered and declined, in its own words.
+        case refused(code: String?, message: String)
+        /// No codex, no app-server, or no answer inside the ceiling.
+        case unavailable
+    }
+
+    /// The request line, built through `JSONSerialization` so the value
+    /// is a JSON number or `null` and never text.
+    nonisolated static func request(keyPath: String, value: Int?) -> String? {
+        let params: [String: Any] = [
+            "keyPath": keyPath,
+            "value": value.map { NSNumber(value: $0) } ?? NSNull(),
+            "mergeStrategy": "replace",
+        ]
+        let body: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": CodexAppServerCall.answerId,
+            "method": "config/value/write",
+            "params": params,
+        ]
+        guard JSONSerialization.isValidJSONObject(body),
+              let data = try? JSONSerialization.data(withJSONObject: body)
+        else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    nonisolated static func run(binary: String, keyPath: String, value: Int?) async -> Outcome {
+        guard let line = request(keyPath: keyPath, value: value) else { return .unavailable }
+        return outcome(from: await CodexAppServerCall.run(binary: binary, request: line))
+    }
+
+    /// The answer, read the way the protocol spells it: a `result` with
+    /// `status`, `version`, `filePath` and an optional
+    /// `overriddenMetadata`, or an `error` whose `data` carries
+    /// `config_write_error_code` beside the message.
+    nonisolated static func outcome(from answer: [String: Any]?) -> Outcome {
+        guard let answer else { return .unavailable }
+        if let result = answer["result"] as? [String: Any] {
+            let overridden = (result["overriddenMetadata"] as? [String: Any])
+                .flatMap { $0["message"] as? String }
+            return .written(version: result["version"] as? String,
+                            filePath: result["filePath"] as? String,
+                            overriddenBy: overridden)
+        }
+        if let error = answer["error"] as? [String: Any] {
+            let code = (error["data"] as? [String: Any])?["config_write_error_code"] as? String
+            let message = (error["message"] as? String)
+                .flatMap { $0.isEmpty ? nil : $0 } ?? "config/value/write failed"
+            return .refused(code: code, message: message)
+        }
+        return .unavailable
+    }
+}
+
+// MARK: - Codex config read
+
+extension CodexConfigRead {
+    /// Codex's merged config for a turn in `cwd`, or nil for a codex
+    /// with no app-server, one that refused, or no answer inside the
+    /// ceiling.
+    nonisolated static func run(binary: String, cwd: String) async -> [String: Any]? {
+        guard let line = request(cwd: cwd, id: CodexAppServerCall.answerId) else { return nil }
+        return config(fromAnswer: await CodexAppServerCall.run(binary: binary, request: line))
     }
 }
 
 // MARK: - The monitor
 
-/// One banner row: an installed CLI that is behind, and has not been
-/// closed at this version.
-struct CLIUpdateBannerItem: Identifiable, Equatable {
-    let agentKey: String
-    /// The registry name, for `config.agentLabel(for:defaultName:)`.
-    /// No user-visible sentence in this app names an agent outright.
-    let defaultName: String
-    let latest: CLIVersion
-    var id: String { agentKey }
-}
-
 @MainActor
 final class AgentCLIUpdateMonitor: ObservableObject {
 
     static let shared = AgentCLIUpdateMonitor()
-
-    /// Dismissed banners, agent key → the version that was closed.
-    /// Mac-only UI state, so UserDefaults rather than config.json —
-    /// the CLI shares that file and has no use for this. Registered in
-    /// `FactoryReset.userDefaultsKeys`.
-    static let dismissalsDefaultsKey = "cliUpdateDismissed"
 
     /// How often the release endpoints are asked. Deliberately coarse:
     /// nothing here is urgent, and a CLI release is a once-a-day event
@@ -915,18 +1208,27 @@ final class AgentCLIUpdateMonitor: ObservableObject {
     /// would be a network request per click.
     static let paneOpenFreshness: TimeInterval = 60 * 60
 
-    /// How often the installed binaries are re-STATTED (not spawned).
-    /// This is what notices a CLI that updated itself and takes the
-    /// banner down without anyone pressing anything.
-    static let localInterval: TimeInterval = 10 * 60
+    /// How often the installed binaries are re-STATTED (not spawned —
+    /// four stats per tool). This is what notices a CLI that updated
+    /// itself, takes its badge down, and says "just updated" while that
+    /// is still true; SipAI coming to the front re-stats too, which is
+    /// what catches a `claude update` typed in a terminal at the moment
+    /// the user comes back.
+    static let localInterval: TimeInterval = 60
 
     /// Whether the release endpoints are asked at all. Off means this
     /// feature makes NO network request: the rows keep stating the
     /// installed version, which is a local read, and make no claim.
     /// Mac-only UI state, so UserDefaults rather than the config file
-    /// the CLI shares — the same home as the dismissals — and absent
-    /// means on. Registered in `FactoryReset.userDefaultsKeys`.
+    /// the CLI shares, and absent means on. Registered in
+    /// `FactoryReset.userDefaultsKeys`.
     static let remoteChecksDefaultsKey = "cliUpdateChecksEnabled"
+
+    /// Whether a tool that is behind is updated without asking. Absent
+    /// means OFF: running an updater changes a tool the user's own
+    /// terminal runs too, so it happens only once they have said so.
+    /// Same home and same registration as the switch above.
+    static let autoUpdateDefaultsKey = "cliAutoUpdateEnabled"
 
     /// A `/latest` packument is tens of kilobytes and a plain-text
     /// version is a few bytes. Anything larger is not a version, and is
@@ -943,6 +1245,11 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         (UserDefaults.standard.object(forKey: AgentCLIUpdateMonitor.remoteChecksDefaultsKey)
             as? Bool) ?? true
 
+    /// The automatic-update switch, for the pane's toggle.
+    @Published private(set) var autoUpdateEnabled: Bool =
+        (UserDefaults.standard.object(forKey: AgentCLIUpdateMonitor.autoUpdateDefaultsKey)
+            as? Bool) ?? false
+
     /// The row's claim, per agent key.
     @Published private(set) var statuses: [String: CLIUpdateStatus] = [:]
 
@@ -951,9 +1258,6 @@ final class AgentCLIUpdateMonitor: ObservableObject {
     /// the ones that make no claim about it.
     @Published private(set) var installed: [String: CLIVersion] = [:]
 
-    /// Outdated CLIs the user has not closed at this version.
-    @Published private(set) var bannerItems: [CLIUpdateBannerItem] = []
-
     /// Agents whose CLI is installed, in registry order. The rows.
     @Published private(set) var installedAgents: [AgentInfo] = []
 
@@ -961,6 +1265,24 @@ final class AgentCLIUpdateMonitor: ObservableObject {
     /// Published so the row can say "Cancelling…" while the child winds
     /// down — the status stays `.updating` for exactly that long.
     @Published private(set) var cancelling: Set<String> = []
+
+    /// Agents the user unticked in Settings → Agent Guide. Nothing
+    /// about a hidden tool is shown, asked or run: no badge, no release
+    /// check, no automatic update. The installed VERSION is still read
+    /// (a stat), because the Guide's dimmed row names it. Fed by
+    /// `AgentManager` whenever presence is recomputed — the monitor
+    /// never reads config itself.
+    @Published private(set) var hiddenAgents: Set<String> = []
+
+    func setHiddenAgents(_ keys: Set<String>) {
+        guard keys != hiddenAgents else { return }
+        hiddenAgents = keys
+        // A tool just hidden drops its claim and badge at once; one
+        // just unhidden is asked again if its last answer is stale.
+        for key in keys { state[key]?.latest = nil; state[key]?.checkedAt = nil }
+        publish()
+        Task { await self.refreshRemote(force: false) }
+    }
 
     private struct AgentState {
         var fingerprint: CLIBinaryFingerprint?
@@ -987,6 +1309,14 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         /// out a recycled pid before the signal goes out.
         var updateProcess: Process?
         var checking = false
+        /// Who has to update this install when the CLI's own updater
+        /// declines to (`AgentInstallSource.managedBy`), read beside
+        /// the version; nil for the ordinary case.
+        var managedBy: String?
+        /// Cancel for work that is no child process — the Guide's codex
+        /// package download — handed in through
+        /// `adoptExternalCancellation`, run by `cancelUpdate`.
+        var cancelHook: (() -> Void)?
         /// The last time the endpoint was ASKED, success or not. Only
         /// the first-ever attempt is keyed on it: a CLI that detection
         /// finds late (kimi lives on the login shell's PATH, which is
@@ -1000,6 +1330,15 @@ final class AgentCLIUpdateMonitor: ObservableObject {
     private var remoteTimer: Timer?
     private var localTimer: Timer?
     private weak var config: ConfigManager?
+    /// Whose turns are in flight — what an automatic update waits for.
+    private weak var agents: AgentManager?
+    private var turnWatch: AnyCancellable?
+    private var activationWatch: AnyCancellable?
+    /// Turns sent while their tool was being updated, resumed when that
+    /// update ends (`waitForUpdate`).
+    private let updateWaiters = UpdateWaitList()
+    /// The version each tool's automatic update last tried, this launch.
+    private var autoAttempted: [String: String] = [:]
     private var started = false
 
     private init() {}
@@ -1007,10 +1346,27 @@ final class AgentCLIUpdateMonitor: ObservableObject {
     // MARK: Lifecycle
 
     /// Called once from `SipAIApp` after `agentManager.reload(config:)`.
-    func start(config: ConfigManager) {
+    func start(config: ConfigManager, agents: AgentManager) {
         self.config = config
+        self.agents = agents
         guard !started else { return }
         started = true
+        // A turn ending is what an automatic update that is waiting
+        // waits for. ASYNCHRONOUS on purpose: `@Published` emits from
+        // `willSet`, so a synchronous sink would read the set before
+        // the change it is being told about.
+        turnWatch = agents.$inFlightSends.map { _ in () }
+            .merge(with: agents.$externalInFlightSessions.map { _ in () })
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.autoUpdateIfDue() }
+        // Coming back to SipAI is the moment a terminal `claude update`
+        // is worth noticing: the user is looking, and "just updated" is
+        // still true.
+        activationWatch = NotificationCenter.default
+            .publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in await self?.refreshLocal() }
+            }
         refreshInstalledAgents()
         Task { await self.refreshLocal() }
         Task { await self.refreshRemote(force: true) }
@@ -1038,10 +1394,12 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         Task { await self.refreshRemote(force: false) }
     }
 
-    /// The banner appeared. Local only — the version it names may have
-    /// been made current by a terminal in the meantime, and that is
-    /// answerable without the network.
-    func bannerAppeared() {
+    /// Settings → Agent Guide appeared. Local only, and deliberately:
+    /// that pane prints the installed version and offers Install, Sign
+    /// In, Sign out and Delete — no sentence on it rests on a release
+    /// endpoint, so opening it must not send a request the user
+    /// declined next door.
+    func guideAppeared() {
         Task { await self.refreshLocal() }
     }
 
@@ -1049,11 +1407,15 @@ final class AgentCLIUpdateMonitor: ObservableObject {
     ///
     /// Off also drops every claim the checks earned. A row keeps its
     /// installed version, but "new version available" rests on a
-    /// request the user has just declined to make, and a banner raised
+    /// request the user has just declined to make, and a badge raised
     /// by one would keep pointing at it. On asks at once rather than at
     /// the next 8-hour tick, so the toggle answers immediately.
     func setRemoteChecksEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: Self.remoteChecksDefaultsKey)
+        applyRemoteChecks(enabled)
+    }
+
+    private func applyRemoteChecks(_ enabled: Bool) {
         guard enabled != remoteChecksEnabled else { return }
         remoteChecksEnabled = enabled
         if enabled {
@@ -1067,14 +1429,48 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         }
     }
 
+    /// Switch automatic updates on or off.
+    ///
+    /// On acts at once on anything already known to be behind, rather
+    /// than at the next check. Either way the badge is recomputed: a
+    /// tool that updates itself is not something the user has to look
+    /// at, and one that no longer does is.
+    func setAutoUpdateEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: Self.autoUpdateDefaultsKey)
+        applyAutoUpdate(enabled)
+    }
+
+    private func applyAutoUpdate(_ enabled: Bool) {
+        guard enabled != autoUpdateEnabled else { return }
+        autoUpdateEnabled = enabled
+        publish()
+        autoUpdateIfDue()
+    }
+
+    /// A factory reset removed both switches' keys. The copies in memory
+    /// follow — without writing the keys back — or the pane would keep
+    /// showing the erased choices, and an automatic update would keep
+    /// running on one, until a relaunch.
+    func forgetSwitches() {
+        applyRemoteChecks((UserDefaults.standard.object(forKey: Self.remoteChecksDefaultsKey)
+                            as? Bool) ?? true)
+        applyAutoUpdate((UserDefaults.standard.object(forKey: Self.autoUpdateDefaultsKey)
+                          as? Bool) ?? false)
+    }
+
     // MARK: Local layer
 
     /// `binaryPath(for:) != nil` is the same question
     /// `AgentManager.isInstalled` asks — same `searchPaths`, same
-    /// executable test — and this needs the path anyway.
+    /// executable test — and this needs the path anyway. A tool this
+    /// monitor is updating keeps its row while its binary is briefly
+    /// missing (`AgentCLIUpdateRules.countsAsInstalled`), the same rule
+    /// `AgentManager.reload` applies to its section.
     private func refreshInstalledAgents() {
         let found = AgentManager.registry.filter {
-            AgentManager.binaryPath(for: $0.key) != nil
+            AgentCLIUpdateRules.countsAsInstalled(
+                binaryFound: AgentManager.binaryPath(for: $0.key) != nil,
+                updating: isUpdating($0.key))
         }
         if installedAgents != found { installedAgents = found }
     }
@@ -1082,9 +1478,9 @@ final class AgentCLIUpdateMonitor: ObservableObject {
     /// Re-stat every installed CLI, and re-read the version only where
     /// the fingerprint moved.
     ///
-    /// Idempotent by construction, which is what lets the banner's own
+    /// Idempotent by construction, which is what lets a pane's own
     /// appearance drive it: an unchanged fingerprint publishes nothing,
-    /// so there is no path from "banner rendered" back to "banner
+    /// so there is no path from "pane rendered" back to "pane
     /// re-rendered".
     func refreshLocal() async {
         refreshInstalledAgents()
@@ -1095,29 +1491,62 @@ final class AgentCLIUpdateMonitor: ObservableObject {
             let current = await Task.detached(priority: .utility) {
                 AgentCLIProbe.fingerprint(agentKey: key)
             }.value
+            // A tool SipAI is updating, caught while npm has its link
+            // moved aside: there is nothing to read, and a binary that is
+            // missing for now has not moved. Read here, its version would
+            // blank the row and its "move" would relearn every catalog
+            // from a file that is not there; the update reads the new
+            // binary itself when it ends.
+            if current == nil, isUpdating(key) { continue }
             // Re-checked after the await: two of these can be in flight
-            // (timer, pane, banner), and the one that suspended second
+            // (timer, pane, Guide), and the one that suspended second
             // would otherwise spawn a second `--version`.
             if state[key]?.readingVersion == true { continue }
             guard current != previous || state[key]?.installed == nil else { continue }
             state[key, default: AgentState()].readingVersion = true
-            let version = await Task.detached(priority: .utility) {
-                await AgentCLIProbe.installedVersion(agentKey: key,
-                                                     fingerprint: current)
+            let (version, managedBy) = await Task.detached(priority: .utility) {
+                let version = await AgentCLIProbe.installedVersion(agentKey: key,
+                                                                   fingerprint: current)
+                return (version, Self.managedBy(key))
             }.value
             var s = state[key] ?? AgentState()
+            let versionBefore = s.installed
             s.readingVersion = false
             s.fingerprint = current
             s.installed = version
+            s.managedBy = managedBy
             state[key] = s
             publish()
+            // The binary MOVED under a running app — a terminal
+            // `claude update`, the CLI's own auto-updater — and every
+            // catalog latched on the old one is describing a file that
+            // is gone. The same relearn the Update button runs, so
+            // nothing can be forgotten here that it remembers there.
+            // Gated on a previous sighting: the first stat of a launch
+            // is not a move, and the launch already scrapes.
+            if previous != nil, current != previous {
+                relearnAfterUpdate(agentKey: key)
+                // And said, the way SipAI's own update is — only for a
+                // version that went UP (a reinstall or a touch moves the
+                // fingerprint too), for a tool that is shown, and never
+                // for an update SipAI is running itself: its finish
+                // announces it, once.
+                if let before = versionBefore, let after = version, after > before,
+                   !hiddenAgents.contains(key), state[key]?.updateInFlight != true {
+                    announceUpdate(agentKey: key, version: after)
+                }
+            }
         }
         // An agent whose CLI went away stops having a row, and stops
         // having remembered state to bring back if it returns at a
         // different version.
+        // — but never while an action holds the slot. A tool the Guide
+        // is INSTALLING has no binary yet, so it is not "live" here, and
+        // pruning its state would take its Cancel with it: the download
+        // would run to the end with nothing able to reach the child.
         let live = Set(installedAgents.map(\.key))
         for key in state.keys where !live.contains(key) {
-            if state[key]?.updating == true { continue }
+            if state[key]?.updating == true || state[key]?.updateInFlight == true { continue }
             state.removeValue(forKey: key)
         }
         publish()
@@ -1132,6 +1561,7 @@ final class AgentCLIUpdateMonitor: ObservableObject {
                 && state[agent.key]?.checking != true
         }
         if unasked { Task { await self.refreshRemote(force: false) } }
+        autoUpdateIfDue()
     }
 
     /// Version read that BYPASSES the fingerprint cache. The button's
@@ -1140,15 +1570,25 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         let fingerprint = await Task.detached(priority: .utility) {
             AgentCLIProbe.fingerprint(agentKey: key)
         }.value
-        let version = await Task.detached(priority: .utility) {
-            await AgentCLIProbe.installedVersion(agentKey: key,
-                                                 fingerprint: fingerprint)
+        let (version, managedBy) = await Task.detached(priority: .utility) {
+            let version = await AgentCLIProbe.installedVersion(agentKey: key,
+                                                               fingerprint: fingerprint)
+            return (version, Self.managedBy(key))
         }.value
         var s = state[key] ?? AgentState()
         s.fingerprint = fingerprint
         s.installed = version
+        s.managedBy = managedBy
         state[key] = s
         return version
+    }
+
+    /// Who has to update this install when the CLI's own updater
+    /// declines to (`AgentInstallSource.managedBy`) — read beside the
+    /// version, off the MainActor: it stats the link and its target and
+    /// reads kimi's install record.
+    nonisolated private static func managedBy(_ key: String) -> String? {
+        AgentInstallSource.current(agentKey: key)?.managedBy(agentKey: key)
     }
 
     // MARK: Remote layer
@@ -1156,7 +1596,7 @@ final class AgentCLIUpdateMonitor: ObservableObject {
     /// Ask each measured endpoint what the latest release is.
     ///
     /// A failure is silence. It does not clear `latest`, does not stamp
-    /// `checkedAt`, and does not produce a row, a banner or an error —
+    /// `checkedAt`, and does not produce a row, a badge or an error —
     /// a machine that is merely offline must not be told anything about
     /// its tools, and must not be nagged about the network by an app
     /// whose job is elsewhere.
@@ -1168,14 +1608,23 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         // The one gate on every request this feature makes. The timers
         // keep firing; they find this and go back to sleep.
         guard remoteChecksEnabled else { return }
-        for agent in installedAgents {
+        for agent in installedAgents where !hiddenAgents.contains(agent.key) {
             let key = agent.key
-            guard let release = AgentCLIRelease.measured(agentKey: key) else { continue }
+            guard var release = AgentCLIRelease.measured(agentKey: key) else { continue }
             if state[key]?.checking == true { continue }
             if !force, let last = state[key]?.checkedAt,
                Date().timeIntervalSince(last) < Self.paneOpenFreshness { continue }
             state[key, default: AgentState()].checking = true
             state[key]?.attemptedAt = Date()
+            // Claude's native updater follows the channel its settings
+            // name; the check reads the same tag, or a stable-channel
+            // install reads as behind for as long as the tags differ.
+            if key == "claude_code" {
+                let settings = await Task.detached(priority: .utility) {
+                    PlanAccountDetector.claudeSettingsFiles.compactMap { try? Data(contentsOf: $0) }
+                }.value
+                release = release.onChannel(AgentCLIRelease.claudeChannel(settings: settings))
+            }
             var request = URLRequest(url: release.latestURL,
                                      cachePolicy: .reloadIgnoringLocalCacheData,
                                      timeoutInterval: 15)
@@ -1190,13 +1639,17 @@ final class AgentCLIUpdateMonitor: ObservableObject {
             }()
             var s = state[key] ?? AgentState()
             s.checking = false
-            if let found {
+            // The switch can have gone off while the request was in
+            // flight; an answer landing then would show the claim and
+            // the badge the switch says are not made.
+            if let found, remoteChecksEnabled {
                 s.latest = found
                 s.checkedAt = Date()
             }
             state[key] = s
             publish()
         }
+        autoUpdateIfDue()
     }
 
     // MARK: Action layer
@@ -1210,23 +1663,95 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         state[key]?.updateInFlight ?? false
     }
 
+    /// Update a tool — the one road for the row's Update button and the
+    /// automatic update alike. A codex SipAI installed is updated by
+    /// SipAI, since `codex update` declines that layout (measured);
+    /// every other tool runs its own updater. Keyed on the latest
+    /// release KNOWN, not on the row's status: a retry after a failed
+    /// update would otherwise send an owned codex to `codex update`.
+    /// True when an update actually started — false when the slot was
+    /// already held (an update, or the Guide's probe, install, sign-in
+    /// or delete on that tool).
+    @discardableResult
+    func startUpdate(agentKey key: String) -> Bool {
+        if key == "codex",
+           AgentInstallSource.current(agentKey: key)?.isOwnedBySipAI == true,
+           let latest = state[key]?.latest {
+            return AgentGuideActions.shared.updateOwnedCodex(latest: latest)
+        } else {
+            return update(agentKey: key)
+        }
+    }
+
+    /// Start the automatic update of every tool that is behind, if the
+    /// user asked for that — called after every check, every re-stat,
+    /// every turn that starts or ends, and the switch itself. Each call
+    /// is cheap and decides nothing twice: a tool with an action in
+    /// flight, a turn in flight, or this version already tried is left
+    /// alone (`AgentCLIUpdateRules.autoUpdateIsDue`).
+    private func autoUpdateIfDue() {
+        guard autoUpdateEnabled, remoteChecksEnabled else { return }
+        for agent in installedAgents where !hiddenAgents.contains(agent.key) {
+            let key = agent.key
+            guard AgentCLIRelease.measured(agentKey: key) != nil,
+                  let latest = state[key]?.latest else { continue }
+            let due = AgentCLIUpdateRules.autoUpdateIsDue(
+                enabled: true,
+                status: statuses[key] ?? .unknown,
+                latest: latest,
+                actionInFlight: state[key]?.updateInFlight == true,
+                // Unknowable without the manager, and never guessed:
+                // an update that cannot see the turns does not start.
+                turnInFlight: agents?.hasTurnInFlight(agentKey: key) ?? true,
+                attemptedVersion: autoAttempted[key])
+            guard due else { continue }
+            // The one attempt per version is spent only once an update
+            // has actually started: a start refused — the Guide holds
+            // the tool for a probe or a sign-in at that moment — leaves
+            // the version to be tried at the next call, rather than
+            // forfeited with nothing on the badge to say so.
+            if startUpdate(agentKey: key) { autoAttempted[key] = latest.text }
+        }
+    }
+
+    /// Whether this tool's update starts by itself once no turn of it is
+    /// running — what the row's disabled Update button says on hover.
+    /// The same rule as `autoUpdateIfDue`, with the turn left out.
+    func updatesAutomaticallyWhenIdle(_ key: String) -> Bool {
+        guard autoUpdateEnabled, remoteChecksEnabled,
+              !hiddenAgents.contains(key),
+              AgentCLIRelease.measured(agentKey: key) != nil else { return false }
+        return AgentCLIUpdateRules.autoUpdateIsDue(
+            enabled: true,
+            status: statuses[key] ?? .unknown,
+            latest: state[key]?.latest,
+            actionInFlight: state[key]?.updateInFlight == true,
+            turnInFlight: false,
+            attemptedVersion: autoAttempted[key])
+    }
+
     /// Run the CLI's own updater.
     ///
     /// The race rule, in order: re-read the installed version FIRST and
     /// run nothing if it is already current; spawn; re-read again on
     /// exit and let the two readings decide the verdict.
-    func update(agentKey key: String) {
-        guard state[key]?.updateInFlight != true else { return }
-        guard let release = AgentCLIRelease.measured(agentKey: key) else { return }
+    ///
+    /// The slot is claimed HERE, before anything suspends, so a press
+    /// and an automatic start in the same moment cannot both pass the
+    /// guard and put two updaters on one tool — and so a turn sent from
+    /// this moment on already sees the update and waits for it.
+    @discardableResult
+    func update(agentKey key: String) -> Bool {
+        guard state[key]?.updateInFlight != true else { return false }
+        guard let release = AgentCLIRelease.measured(agentKey: key) else { return false }
+        var claim = state[key] ?? AgentState()
+        claim.updateInFlight = true
+        claim.updating = true
+        claim.failureTail = nil
+        claim.cancelRequested = false
+        state[key] = claim
+        publish()
         Task { @MainActor in
-            var s = state[key] ?? AgentState()
-            s.updateInFlight = true
-            s.updating = true
-            s.failureTail = nil
-            s.cancelRequested = false
-            state[key] = s
-            publish()
-
             let before = await readInstalledNow(key)
             // Cancel may have landed during that read. Nothing has been
             // spawned, so there is nothing to stop — the action simply
@@ -1252,6 +1777,7 @@ final class AgentCLIUpdateMonitor: ObservableObject {
                              exitCode: nil)
                 return
             }
+            let startedAt = Date()
             let result = await AgentCLIProbe.run(
                 binary: binary,
                 arguments: release.updateArguments,
@@ -1270,6 +1796,8 @@ final class AgentCLIUpdateMonitor: ObservableObject {
                     }
                 })
             state[key]?.updateProcess = nil
+            await awaitRestore(of: key, byGroup: result.processGroup,
+                               until: startedAt.addingTimeInterval(AgentCLIProbe.updateCeiling))
             let after = await readInstalledNow(key)
             let verdict = AgentCLIUpdateRules.updateVerdict(
                 before: before, after: after, latestKnown: state[key]?.latest)
@@ -1292,7 +1820,8 @@ final class AgentCLIUpdateMonitor: ObservableObject {
                let latest = state[key]?.latest,
                let installer = installerRoute,
                let installDirectory = AgentCLIRelease
-                    .nativeInstallDirectory(binaryPath: binary) {
+                    .nativeInstallDirectory(binaryPath: binary,
+                                            kimiHome: KimiSessionScanner.home.path) {
                 let installerOutput = await runNativeInstaller(
                     installer, installDirectory: installDirectory,
                     version: latest, key: key)
@@ -1307,6 +1836,34 @@ final class AgentCLIUpdateMonitor: ObservableObject {
             }
             finishUpdate(key: key, verdict: verdict, tail: result.output,
                          exitCode: result.exitCode)
+        }
+        return true
+    }
+
+    /// The updater has exited; wait while what it started is still putting
+    /// the tool back.
+    ///
+    /// Stopping an update SIGTERMs the updater's whole process group
+    /// (`AgentCLIProbe.stop`), npm under `codex update` with it, and npm
+    /// answers SIGTERM by letting the step in flight — a download of
+    /// minutes — run to its end, then rolling the install back. The
+    /// updater itself is gone within a second, and until npm is done the
+    /// tool's binary is missing. So the update is not over while the
+    /// binary is missing and anything of that group is still alive: the
+    /// row keeps its spinner ("Cancelling…"), the tool stays listed, and
+    /// a send keeps waiting. It ends when the binary is back, when
+    /// nothing of the group is left to bring it back, or at the update's
+    /// own ceiling. A binary that is present ends it at once, so a
+    /// long-lived helper the updater leaves behind never holds the row.
+    private func awaitRestore(of key: String, byGroup group: pid_t?,
+                              until deadline: Date) async {
+        guard let group else { return }
+        while Date() < deadline {
+            let present = await Task.detached(priority: .utility) {
+                AgentManager.binaryPath(for: key) != nil
+            }.value
+            if present || !AgentCLIProbe.groupIsAlive(group) { return }
+            try? await Task.sleep(nanoseconds: 500_000_000)
         }
     }
 
@@ -1324,6 +1881,28 @@ final class AgentCLIUpdateMonitor: ObservableObject {
                                     installDirectory: String,
                                     version: CLIVersion,
                                     key: String) async -> String {
+        await runInstallerScript(
+            installer,
+            arguments: { script in
+                AgentCLIRelease.nativeInstallerArguments(script: script, version: version.text)
+            },
+            environment: AgentCLIRelease.nativeInstallerEnvironment(installDirectory: installDirectory),
+            key: key)
+    }
+
+    /// The vendor's installer script, fetched over SipAI's own
+    /// connection and run non-interactively — the route kimi's native
+    /// UPDATE takes, and the route a fresh INSTALL of claude or kimi
+    /// takes from the Agent Guide (`AgentGuideActions`), which is why
+    /// it is not private. `arguments` is handed the staged script's
+    /// path; `environment` rides on top of the agent-turn environment.
+    /// Returns the script's output tail, or a sentence saying why it
+    /// never ran. Cancel goes through `state[key].updateProcess`, the
+    /// same handle the update route uses.
+    func runInstallerScript(_ installer: URL,
+                            arguments: (String) -> [String],
+                            environment: [String: String],
+                            key: String) async -> String {
         let request = URLRequest(url: installer,
                                  cachePolicy: .reloadIgnoringLocalCacheData,
                                  timeoutInterval: 30)
@@ -1356,12 +1935,10 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         defer { try? fm.removeItem(at: dir) }
         let result = await AgentCLIProbe.run(
             binary: "/bin/bash",
-            arguments: AgentCLIRelease.nativeInstallerArguments(
-                script: script.path, version: version.text),
+            arguments: arguments(script.path),
             ceiling: AgentCLIProbe.updateCeiling,
             outputCap: AgentCLIProbe.outputTailCap,
-            extraEnvironment: AgentCLIRelease.nativeInstallerEnvironment(
-                installDirectory: installDirectory),
+            extraEnvironment: environment,
             onSpawn: { [weak self] process in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
@@ -1375,8 +1952,101 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         return result.output
     }
 
+    /// The Agent Guide's install and delete run their children through
+    /// this monitor's process slot so their Cancel is the same
+    /// SIGTERM-then-SIGKILL the update route has. `begin` claims the
+    /// slot (false if an update or another action already holds it);
+    /// `end` releases it.
+    func beginExternalAction(agentKey key: String) -> Bool {
+        guard state[key]?.updateInFlight != true else { return false }
+        var s = state[key] ?? AgentState()
+        s.updateInFlight = true
+        s.cancelRequested = false
+        s.updateProcess = nil
+        state[key] = s
+        return true
+    }
+
+    func endExternalAction(agentKey key: String) {
+        state[key]?.updateInFlight = false
+        state[key]?.updateProcess = nil
+        state[key]?.cancelHook = nil
+        state[key]?.cancelRequested = false
+        cancelling.remove(key)
+        publish()
+    }
+
+    /// The Guide's owned-codex route is an UPDATE — the row's Update
+    /// button is what starts it — so it holds the slot as one: the
+    /// spinner goes up where the button was, Cancel reaches it through
+    /// `cancelUpdate`, and its verdict lands through `finishUpdate`,
+    /// where the row reads. `beginExternalAction` alone claims the slot
+    /// SILENTLY, which is right for an install or a delete (the Guide
+    /// draws those) and wrong here: nothing is published, so the row
+    /// keeps offering a button the slot then refuses, and the outcome
+    /// lands in a pane the click did not happen in — or nowhere.
+    func beginExternalUpdate(agentKey key: String) -> Bool {
+        guard beginExternalAction(agentKey: key) else { return false }
+        state[key]?.updating = true
+        state[key]?.failureTail = nil
+        publish()
+        return true
+    }
+
+    /// The end of an external update: the same rule the CLI's own
+    /// updater is judged by — the version MOVING, never an exit code —
+    /// and the same finish, so a stop is not a failure and a failure is
+    /// reported where the button is.
+    func finishExternalUpdate(agentKey key: String,
+                              before: CLIVersion?,
+                              after: CLIVersion?,
+                              tail: String) {
+        let verdict = AgentCLIUpdateRules.updateVerdict(
+            before: before, after: after, latestKnown: state[key]?.latest)
+        finishUpdate(key: key, verdict: verdict, tail: tail, exitCode: nil)
+    }
+
+    /// Whether Cancel was pressed during an external action.
+    func externalActionCancelled(agentKey key: String) -> Bool {
+        state[key]?.cancelRequested == true
+    }
+
+    /// Hand a spawned child to the slot so Cancel can reach it; a
+    /// Cancel that already landed stops it at once.
+    func adoptExternalProcess(_ process: Process, agentKey key: String) {
+        guard state[key]?.cancelRequested != true else {
+            Self.stopLater(process)
+            return
+        }
+        state[key]?.updateProcess = process
+    }
+
+    /// Hand the slot a way to stop work that is no child process — the
+    /// Guide's codex package download, a `URLSession` task — so Cancel
+    /// reaches it the way `adoptExternalProcess` lets it reach a child.
+    /// A Cancel that already landed runs it at once. One hook per slot:
+    /// the route hands in the transfer in flight, and a stale hook on a
+    /// finished task is a no-op.
+    func adoptExternalCancellation(agentKey key: String, _ cancel: @escaping () -> Void) {
+        guard state[key]?.cancelRequested != true else {
+            cancel()
+            return
+        }
+        state[key]?.cancelHook = cancel
+    }
+
+    /// The monitor's own state for an agent whose binary the Guide
+    /// removed: nothing about it is known any more.
+    func forgetAgent(agentKey key: String) {
+        state[key] = nil
+        refreshInstalledAgents()
+        publish()
+        resumeUpdateWaiters(key)
+    }
+
     /// Stop the updater. The spinner stays until `finishUpdate` confirms
-    /// the child is gone — only the row's label changes — because a row
+    /// the child is gone, and whatever it started has put the tool back
+    /// (`awaitRestore`) — only the row's label changes — because a row
     /// that has gone back to offering Update over a process still
     /// winding down invites the click the re-entrancy guard would then
     /// swallow. If nothing has been spawned yet, the action sees the
@@ -1386,12 +2056,16 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         state[key]?.cancelRequested = true
         cancelling.insert(key)
         if let process = state[key]?.updateProcess { Self.stopLater(process) }
+        if let hook = state[key]?.cancelHook {
+            state[key]?.cancelHook = nil
+            hook()
+        }
     }
 
     /// SIGTERM now, SIGKILL after the grace if it is ignored — off the
-    /// MainActor, which must not sleep through the grace. The pid only,
-    /// see `AgentCLIProbe.stop`; `isRunning` on this `Process` object
-    /// rules out a recycled pid.
+    /// MainActor, which must not sleep through the grace. What each
+    /// signal reaches is `AgentCLIProbe.stop`'s rule; `isRunning` on this
+    /// `Process` object rules out a recycled pid.
     private static func stopLater(_ process: Process) {
         guard process.isRunning else { return }
         process.terminate()
@@ -1410,6 +2084,7 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         s.updating = false
         s.updateInFlight = false
         s.updateProcess = nil
+        s.cancelHook = nil
         let cancelled = s.cancelRequested
         s.cancelRequested = false
         cancelling.remove(key)
@@ -1436,9 +2111,54 @@ final class AgentCLIUpdateMonitor: ObservableObject {
                 : trimmed
         }
         state[key] = s
+        // The rows follow the binary again now that the update no longer
+        // holds them — at once, rather than at the next re-stat: the new
+        // version shows the moment it landed, and a tool whose binary is
+        // still missing (an updater stopped half way) goes.
+        refreshInstalledAgents()
         publish()
+        // The binary is settled, whatever the verdict: a turn sent
+        // during the update runs now, on whichever version is there.
+        resumeUpdateWaiters(key)
 
-        if case .updated = verdict { relearnAfterUpdate(agentKey: key) }
+        if case .updated(let version) = verdict {
+            relearnAfterUpdate(agentKey: key)
+            // Said for every update that landed — pressed or automatic
+            // alike. A failure is not announced: the row says why, and
+            // the badge carries it.
+            announceUpdate(agentKey: key, version: version)
+        }
+    }
+
+    // MARK: A turn sent during an update
+
+    /// Whether SipAI is updating this tool right now — from the claim
+    /// until the finish, the stretch in which a turn must not start: an
+    /// npm install removes and rewrites the package in place, and a
+    /// spawn in the middle finds half a tool.
+    func isUpdating(_ key: String) -> Bool {
+        state[key]?.updating == true
+    }
+
+    /// Returns once SipAI's update of this tool has finished — at once
+    /// when none is running. A Stop meanwhile is the caller's to notice
+    /// when this returns.
+    func waitForUpdate(agentKey key: String) async {
+        await updateWaiters.wait(for: key) { self.isUpdating(key) }
+    }
+
+    private func resumeUpdateWaiters(_ key: String) {
+        updateWaiters.release(key)
+    }
+
+    /// "Claude Code just updated to 2.1.290", beside the sidebar's logo.
+    /// Through the label, like every sentence that names an agent.
+    private func announceUpdate(agentKey key: String, version: CLIVersion) {
+        let name = AgentManager.registry.first { $0.key == key }?.name ?? key
+        let label = config?.agentLabel(for: key, defaultName: name) ?? name
+        UpdateAnnouncer.shared.announce(
+            String(localized: "\(label) just updated to \(version.text)",
+                   comment: "Sidebar, in place of the SipAI wordmark for a few seconds: a command-line tool (or SipAI itself) has just been updated; placeholders are the tool's label and the new version number"))
     }
 
     private static func silentUpdaterExplanation(exitCode: Int32?) -> String {
@@ -1450,11 +2170,19 @@ final class AgentCLIUpdateMonitor: ObservableObject {
                       comment: "Updates pane detail: the CLI's updater produced no output, was stopped or could not be started, and the installed version did not change")
     }
 
-    /// A new binary knows different modes, models and aliases. The
-    /// catalogs that read those are latched once per launch, so without
-    /// this a successful update leaves every picker describing the
-    /// binary that was just replaced until the app is relaunched.
-    private func relearnAfterUpdate(agentKey key: String) {
+    /// A new binary knows different modes, models and aliases — and
+    /// resolves each alias to a different model. The catalogs that
+    /// read those are latched on the binary they read, so without this
+    /// an update leaves every picker describing the binary that was
+    /// just replaced until something re-reads it. Called for the
+    /// button's own update and for any fingerprint move the passive
+    /// tick notices.
+    /// Internal: the Agent Guide's install and its owned-codex update
+    /// relearn the same way.
+    func relearnAfterUpdate(agentKey key: String) {
+        // The plan-usage verdict was measured against the old binary;
+        // the file layer answers until the window next opens.
+        UsageMonitor.shared.noteBinaryChanged(agentKey: key)
         switch key {
         case "claude_code":
             ClaudeCapabilities.shared.reloadAfterBinaryChange()
@@ -1472,25 +2200,10 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         }
     }
 
-    // MARK: Banner dismissal
-
-    private var dismissals: [String: String] {
-        UserDefaults.standard
-            .dictionary(forKey: Self.dismissalsDefaultsKey) as? [String: String] ?? [:]
-    }
-
-    func dismissBanner(agentKey key: String) {
-        guard case .updateAvailable(_, let latest)? = statuses[key] else { return }
-        var d = dismissals
-        d[key] = latest.text
-        UserDefaults.standard.set(d, forKey: Self.dismissalsDefaultsKey)
-        publish()
-    }
-
     // MARK: Derivation
 
     /// One place where state becomes what the UI reads, so a status and
-    /// the banner beside it can never describe different moments.
+    /// the badge it raises can never describe different moments.
     /// Assign-only-on-change: this runs from two timers and every
     /// probe, and identical reassignment would re-render the window for
     /// nothing.
@@ -1510,7 +2223,8 @@ final class AgentCLIUpdateMonitor: ObservableObject {
                 base = AgentCLIUpdateRules.decideStatus(
                     installed: s?.installed,
                     latestKnown: s?.latest,
-                    lastCheckSucceeded: s?.checkedAt)
+                    lastCheckSucceeded: s?.checkedAt,
+                    managedBy: s?.managedBy)
             }
             if s?.updating == true {
                 newStatuses[agent.key] = .updating
@@ -1525,19 +2239,20 @@ final class AgentCLIUpdateMonitor: ObservableObject {
                 newStatuses[agent.key] = base
             }
         }
-        let d = dismissals
-        let banners: [CLIUpdateBannerItem] = installedAgents.compactMap { agent in
-            guard let status = newStatuses[agent.key],
-                  AgentCLIUpdateRules.bannerIsOwed(status: status,
-                                                   dismissedVersion: d[agent.key]),
-                  case .updateAvailable(_, let latest) = status
+        // What the Settings badge counts: a hidden tool is on offer to
+        // nobody, and a tool that updates itself only once its update
+        // has failed.
+        let badge: [UpdateBadgeItem] = installedAgents.compactMap { agent in
+            guard !hiddenAgents.contains(agent.key),
+                  let status = newStatuses[agent.key],
+                  let version = AgentCLIUpdateRules.badgeVersion(
+                    status: status, latest: state[agent.key]?.latest,
+                    autoUpdate: autoUpdateEnabled)
             else { return nil }
-            return CLIUpdateBannerItem(agentKey: agent.key,
-                                       defaultName: agent.name,
-                                       latest: latest)
+            return .cli(agentKey: agent.key, version: version)
         }
         if statuses != newStatuses { statuses = newStatuses }
         if installed != newInstalled { installed = newInstalled }
-        if bannerItems != banners { bannerItems = banners }
+        UpdateBadge.shared.setCLIItems(badge)
     }
 }

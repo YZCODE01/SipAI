@@ -10,9 +10,9 @@ release note is ever written twice.
 Usage:  changelog_to_html.py CHANGELOG.md 1.0.0 > SipAI-1.0.0.html
 
 Handles the subset the changelog actually uses: ``###`` headings, ``-``
-bullets with wrapped continuation lines, ``**bold**``, ``` `code` ``` and
-``[text](url)``. Anything richer would be a changelog that has outgrown
-being read inside a 400-point dialog.
+bullets with wrapped continuation lines, ``**bold**``, ``*italic*``,
+``` `code` ``` and ``[text](url)``. Anything richer would be a changelog
+that has outgrown being read inside a 400-point dialog.
 """
 
 from __future__ import annotations
@@ -27,6 +27,17 @@ import sys
 _CODE_SHIELD = "\x00CODE{}\x00"
 
 
+def _link(match: re.Match[str]) -> str:
+    """A link, only to a scheme a release note has reason to name, with
+    its destination escaped for the attribute it sits in: the text has
+    been escaped for element content, which leaves a quote free to end
+    the attribute early."""
+    label, url = match.group(1), html.unescape(match.group(2))
+    if not re.match(r"^(https?:|mailto:)", url, re.IGNORECASE):
+        return label
+    return f'<a href="{html.escape(url, quote=True)}">{label}</a>'
+
+
 def _inline(text: str) -> str:
     shielded: list[str] = []
 
@@ -36,8 +47,13 @@ def _inline(text: str) -> str:
 
     text = re.sub(r"`([^`]+)`", stash, text)
     text = html.escape(text, quote=False)
-    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r'<a href="\2">\1</a>', text)
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", _link, text)
     text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
+    # Single-asterisk emphasis, once the double pairs are gone: the
+    # opening * must be followed by a non-space and the closing one
+    # preceded by one, so "5 * 3 * 2" stays arithmetic. Without this pass
+    # a *Runs as* reached the update dialog as two literal asterisks.
+    text = re.sub(r"\*(?!\s)([^*]+?)(?<!\s)\*", r"<em>\1</em>", text)
 
     for i, code in enumerate(shielded):
         text = text.replace(
@@ -75,12 +91,23 @@ def render(body: list[str]) -> str:
     # A bullet's continuation lines are indented, and joining them is what
     # keeps a wrapped sentence one sentence rather than several stray ones.
     pending: str | None = None
+    # A paragraph is wrapped the same way — the highlights paragraph that
+    # opens a section runs to several lines — and ends at a blank line, a
+    # heading or a bullet. One <p> per LINE put each line of it in a
+    # paragraph of its own.
+    paragraph: list[str] = []
 
     def flush() -> None:
         nonlocal pending
         if pending is not None:
             out.append(f"    <li>{_inline(pending)}</li>")
             pending = None
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph
+        if paragraph:
+            out.append(f"  <p>{_inline(' '.join(paragraph))}</p>")
+            paragraph = []
 
     def close_list() -> None:
         nonlocal in_list
@@ -94,15 +121,18 @@ def render(body: list[str]) -> str:
 
         if not stripped:
             flush()
+            flush_paragraph()
             continue
 
         if stripped.startswith("### "):
             close_list()
+            flush_paragraph()
             out.append(f"  <h3>{_inline(stripped[4:])}</h3>")
             continue
 
         if stripped.startswith("- "):
             flush()
+            flush_paragraph()
             if not in_list:
                 out.append("  <ul>")
                 in_list = True
@@ -114,9 +144,10 @@ def render(body: list[str]) -> str:
             continue
 
         close_list()
-        out.append(f"  <p>{_inline(stripped)}</p>")
+        paragraph.append(stripped)
 
     close_list()
+    flush_paragraph()
     return "\n".join(out)
 
 

@@ -5,7 +5,7 @@
 // Only the members those files actually touch are kept. `SipDesign`
 // and the two environment keys come from the real DesignSystem.swift,
 // which the harness compiles; `ChatDesign` lives in ChatView.swift and
-// would drag a whole view in, so its two used colours are stubbed here.
+// would drag a whole view in, so its three used colours are stubbed here.
 //
 // Nothing in this directory is part of the app target.
 
@@ -15,4 +15,5 @@ import AppKit
 enum ChatDesign {
     static let blue = Color.blue
     static let textPrimary = Color.primary
+    static let textSecondary = Color.secondary
 }

@@ -31,15 +31,22 @@ struct MultilineTextField: NSViewRepresentable {
     /// area. Without it the border tint dies over the one part of the
     /// card most drops are aimed at.
     var onDropTargeted: ((Bool) -> Void)? = nil
+    /// The tier-scaled point size and the spacing between wrapped
+    /// lines, in POINTS, passed by the owning view — which alone knows
+    /// whether it sits under the tier scale or a transcript's content
+    /// scale. No defaults, the `spellChecking` rule: a text view cannot
+    /// fall out of the tier by omission.
+    var fontSize: CGFloat
+    var lineSpacing: CGFloat
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = Self.makeScrollableTextView()
+        let scroll = DropForwardingTextView.makeForwardingScrollView()
         let tv = scroll.documentView as! NSTextView
         tv.delegate = context.coordinator
         applyDropHandlers(to: tv)
-        tv.font = NSFont.systemFont(ofSize: 14)
+        TextInputTypography.apply(pointSize: fontSize, lineSpacing: lineSpacing, to: tv)
         tv.isRichText = false
         tv.allowsUndo = true
         tv.drawsBackground = false
@@ -84,30 +91,10 @@ struct MultilineTextField: NSViewRepresentable {
         if tv.string != text {
             tv.string = text
         }
+        // Both hooks, like the spell-check switch: the tier is changed
+        // behind a sheet that leaves this view standing.
+        TextInputTypography.apply(pointSize: fontSize, lineSpacing: lineSpacing, to: tv)
         TextInputSpellChecking.apply(spellChecking, to: tv)
-    }
-
-    /// `NSTextView.scrollableTextView()` builds the scroll view, the
-    /// TextKit stack and a dozen layout properties at once. Hand-rolling
-    /// that to get a subclass in drifts from it — measured, seven
-    /// properties out, the text container's size among them. Build the
-    /// stock stack and swap ONLY the document view, inheriting the
-    /// configuration AppKit just made.
-    private static func makeScrollableTextView() -> NSScrollView {
-        let scroll = NSTextView.scrollableTextView()
-        guard let stock = scroll.documentView as? NSTextView,
-              let container = stock.textContainer else { return scroll }
-        let tv = DropForwardingTextView(frame: stock.frame,
-                                        textContainer: container)
-        tv.autoresizingMask = stock.autoresizingMask
-        tv.isVerticallyResizable = stock.isVerticallyResizable
-        tv.isHorizontallyResizable = stock.isHorizontallyResizable
-        tv.minSize = stock.minSize
-        tv.maxSize = stock.maxSize
-        tv.isRichText = stock.isRichText
-        tv.usesFontPanel = stock.usesFontPanel
-        scroll.documentView = tv
-        return scroll
     }
 
     private func applyDropHandlers(to textView: NSTextView) {
@@ -165,11 +152,146 @@ struct MultilineTextField: NSViewRepresentable {
 /// URL falls through to `super` untouched, so dragging TEXT keeps working;
 /// and with `onDropFiles` nil this is a stock NSTextView, which is what
 /// the inline editors want — there, a dragged path is the point.
+///
+/// It also draws the agent composer's session-id tokens
+/// (`sessionIdTokens`) — off, and free, in every box that leaves the set
+/// empty.
 final class DropForwardingTextView: NSTextView {
     /// Set = this view stages files. nil = leave file drags to AppKit.
     var onDropFiles: (([URL]) -> Void)?
     /// Reports a file drag entering and leaving, for the host's highlight.
     var onDropTargeted: ((Bool) -> Void)?
+
+    // MARK: Session-id tokens
+
+    /// The ids this box draws on a grey token (`SessionIdTokens`): every
+    /// session the app lists, handed down by the agent composer. Empty —
+    /// as the chat cards and the inline editors leave it — draws nothing.
+    var sessionIdTokens: Set<String> = [] {
+        didSet {
+            guard sessionIdTokens != oldValue else { return }
+            tokenCache = nil
+            needsDisplay = true
+        }
+    }
+    private var tokenCache: (text: String, ranges: [NSRange])?
+
+    /// Where the tokens are in the text, re-read only when the text moved.
+    var sessionIdTokenRanges: [NSRange] {
+        guard !sessionIdTokens.isEmpty else { return [] }
+        let text = string
+        if let cache = tokenCache, cache.text == text { return cache.ranges }
+        let ranges = SessionIdTokens.ranges(in: text, known: sessionIdTokens)
+        tokenCache = (text, ranges)
+        return ranges
+    }
+
+    /// One rect per line a token runs on, in view coordinates: the glyph
+    /// box — ascender to descender about the baseline — with a margin on
+    /// every side, so the grey clears the id evenly at every tier. Built
+    /// from the baseline, not taken from the segment's frame: that frame
+    /// is only the line's type (measured: 17 pt at Default, 22 at Large
+    /// text mode — the tier's line spacing sits between frames), flush
+    /// with the glyphs, and would leave the grey no margin.
+    ///
+    /// Through `textLayoutManager`, never `layoutManager` — reading the
+    /// latter drops the view into TextKit 1 for good (see
+    /// `GrowingTextField.Coordinator.reportHeight`). A token that ENDS the
+    /// text — an id just pasted — has its segment reported twice, the
+    /// same frame again (measured); it is kept once.
+    func sessionIdTokenRects() -> [NSRect] {
+        let ranges = sessionIdTokenRanges
+        guard !ranges.isEmpty,
+              let tlm = textLayoutManager,
+              let content = tlm.textContentManager else { return [] }
+        let font = self.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let outsetX = font.pointSize * 0.18
+        let outsetY = font.pointSize * 0.06
+        let origin = textContainerOrigin
+        var rects: [NSRect] = []
+        for range in ranges {
+            guard let start = content.location(content.documentRange.location,
+                                               offsetBy: range.location),
+                  let end = content.location(start, offsetBy: range.length),
+                  let textRange = NSTextRange(location: start, end: end)
+            else { continue }
+            tlm.ensureLayout(for: textRange)
+            tlm.enumerateTextSegments(in: textRange, type: .standard,
+                                      options: []) { _, frame, baseline, _ in
+                let top = frame.minY + baseline - font.ascender
+                let rect = NSRect(
+                    x: frame.minX + origin.x - outsetX,
+                    y: top + origin.y - outsetY,
+                    width: frame.width + outsetX * 2,
+                    height: font.ascender - font.descender + outsetY * 2)
+                if !rects.contains(rect) { rects.append(rect) }
+                return true
+            }
+        }
+        return rects
+    }
+
+    /// Under the text, in the view's own background pass: the glyphs,
+    /// the selection and the caret all draw above it.
+    ///
+    /// Every token goes into ONE path, filled once. The grey is a tint,
+    /// and two ids a space apart overlap by their margins — filled one by
+    /// one, the overlap would take the tint twice and show as a lighter
+    /// band between them.
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        guard !sessionIdTokens.isEmpty else { return }
+        let path = NSBezierPath()
+        for token in sessionIdTokenRects() where token.intersects(rect) {
+            let radius = token.height * 0.28
+            path.append(NSBezierPath(roundedRect: token, xRadius: radius, yRadius: radius))
+        }
+        guard !path.isEmpty else { return }
+        SipDesign.sessionIdTokenFill.setFill()
+        path.fill()
+    }
+
+    // A token moves with every edit before it and every re-wrap, and
+    // nothing promises that the text's own re-layout repaints this
+    // view's background pass — so each of those asks for the whole view.
+    override func didChangeText() {
+        super.didChangeText()
+        if !sessionIdTokens.isEmpty { needsDisplay = true }
+    }
+
+    override var string: String {
+        didSet { if !sessionIdTokens.isEmpty { needsDisplay = true } }
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if !sessionIdTokens.isEmpty { needsDisplay = true }
+    }
+
+    /// `NSTextView.scrollableTextView()` builds the scroll view, the
+    /// TextKit stack and a dozen layout properties at once. Hand-rolling
+    /// that to get a subclass in drifts from it — measured, seven
+    /// properties out, the text container's size among them. Build the
+    /// stock stack and swap ONLY the document view, inheriting the
+    /// configuration AppKit just made. Shared by the chat cards'
+    /// `MultilineTextField` and the agent composer's `GrowingTextField`,
+    /// which forwards drops only while its host says so (Chat only).
+    static func makeForwardingScrollView() -> NSScrollView {
+        let scroll = NSTextView.scrollableTextView()
+        guard let stock = scroll.documentView as? NSTextView,
+              let container = stock.textContainer else { return scroll }
+        let tv = DropForwardingTextView(frame: stock.frame,
+                                        textContainer: container)
+        tv.autoresizingMask = stock.autoresizingMask
+        tv.isVerticallyResizable = stock.isVerticallyResizable
+        tv.isHorizontallyResizable = stock.isHorizontallyResizable
+        tv.minSize = stock.minSize
+        tv.maxSize = stock.maxSize
+        tv.isRichText = stock.isRichText
+        tv.usesFontPanel = stock.usesFontPanel
+        scroll.documentView = tv
+        return scroll
+    }
 
     /// File URLs on the drag's pasteboard, or empty for every other drag.
     /// `urlReadingFileURLsOnly` is what keeps a link dragged out of a
@@ -240,6 +362,10 @@ final class DropForwardingTextView: NSTextView {
 struct AttachmentChipRow: View {
     let attachments: [ChatAttachment]
     let onRemove: (UUID) -> Void
+    /// `SipFont.ratio` of the card's tier scale: the strip's pinned
+    /// height bounds chips whose text is tier-scaled, so it grows with
+    /// them or clips them.
+    var frameRatio: CGFloat = 1
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -252,7 +378,7 @@ struct AttachmentChipRow: View {
         }
         // The row must never grow the card: a long list scrolls
         // sideways rather than pushing the text field down the screen.
-        .frame(height: 26)
+        .frame(height: 26 * frameRatio)
     }
 }
 
@@ -290,20 +416,20 @@ private struct AttachmentChip: View {
     var body: some View {
         HStack(spacing: 5) {
             Image(systemName: icon)
-                .font(.system(size: 11))
+                .sipFont(11)
                 .foregroundColor(SipDesign.textSecondary)
             Text(verbatim: attachment.name)
-                .font(.system(size: 11))
+                .sipFont(11)
                 .foregroundColor(SipDesign.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .frame(maxWidth: 160, alignment: .leading)
             Text(verbatim: attachment.sizeLabel)
-                .font(.system(size: 10))
+                .sipFont(10)
                 .foregroundColor(SipDesign.textHint)
             Button(action: onRemove) {
                 Image(systemName: "xmark")
-                    .font(.system(size: 9, weight: .bold))
+                    .sipFont(9, weight: .bold)
                     .foregroundColor(hovering ? SipDesign.textPrimary : SipDesign.textHint)
                     .frame(width: 14, height: 14)
                     .contentShape(Rectangle())

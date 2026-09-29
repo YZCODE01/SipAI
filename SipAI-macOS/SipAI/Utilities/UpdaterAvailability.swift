@@ -62,8 +62,9 @@ enum UpdaterAvailability {
         case enabled
         /// Enabled by the environment override; harness only.
         case forcedForTesting
-        /// Built locally or by someone else. No updater, no UI beyond a
-        /// sentence explaining why.
+        /// Built locally or by someone else. No updater: Settings draws
+        /// the same controls a release copy does, greyed out, with the
+        /// reason on hover.
         case notDistributionSigned
 
         var allowsUpdates: Bool { self != .notDistributionSigned }
@@ -127,5 +128,75 @@ enum UpdaterAvailability {
               let info = information as? [String: Any] else { return nil }
 
         return info[kSecCodeInfoTeamIdentifier as String] as? String
+    }
+
+    // MARK: - The checkbox, with no updater behind it
+
+    /// Sparkle's name for the automatic-check setting: the key in
+    /// Info.plist (the default this app ships with) and in user defaults
+    /// (the user's choice) alike.
+    static let automaticChecksKey = "SUEnableAutomaticChecks"
+
+    /// Whether automatic checks are on — the user's choice, else
+    /// Info.plist's default, the order Sparkle reads them in — WITHOUT
+    /// starting an updater.
+    ///
+    /// For a copy that may not update itself, which runs none: Settings
+    /// still draws the checkbox a release copy draws, greyed out, and
+    /// this is the value it shows. Every copy of SipAI on a Mac shares one
+    /// defaults domain, so the choice read here is the installed copy's.
+    /// Such a copy only ever READS it — a write would switch the other
+    /// copy's daily check.
+    static func automaticChecksSetting(defaults: UserDefaults,
+                                       infoDictionary: [String: Any]?) -> Bool {
+        if defaults.object(forKey: automaticChecksKey) != nil {
+            return defaults.bool(forKey: automaticChecksKey)
+        }
+        return (infoDictionary?[automaticChecksKey] as? Bool) ?? false
+    }
+}
+
+// MARK: - Was THIS copy just updated?
+
+/// The rule behind "SipAI just updated to …" beside the sidebar's logo:
+/// a launch is an update when its build is newer than the one THIS copy
+/// last launched as.
+///
+/// "This copy" is its location on disk, because every copy of SipAI on a
+/// Mac shares one defaults domain — the copy from the release page, a
+/// build made in Xcode, a harness's staged copy. One record for all of
+/// them lets each speak for the others: an Xcode build at the next
+/// version, launched first, records that build, and the installed copy's
+/// update to it then reads as the same build again and says nothing. An
+/// update replaces the bundle in place, so the location survives it; a
+/// copy that is no longer on disk drops out of the record.
+///
+/// Pure — the comparison and the file check are handed in — so the
+/// harness can ask it everything with no bundle and no defaults.
+enum CopyLaunchRecord {
+
+    /// UserDefaults: a copy's location → the build it last launched as.
+    static let defaultsKey = "sipaiLastLaunchedBuilds"
+
+    struct Outcome: Equatable {
+        /// This copy launched before, at an older build.
+        let updated: Bool
+        /// The record to store.
+        let records: [String: String]
+    }
+
+    /// `isNewer(a, b)` answers whether build `a` is newer than build `b`.
+    /// A first launch at a location says nothing, and neither does a
+    /// downgrade.
+    static func note(records: [String: String],
+                     copy: String,
+                     build: String,
+                     isNewer: (String, String) -> Bool,
+                     exists: (String) -> Bool) -> Outcome {
+        var next = records.filter { $0.key == copy || exists($0.key) }
+        let previous = next[copy]
+        next[copy] = build
+        let updated = previous.map { isNewer(build, $0) } ?? false
+        return Outcome(updated: updated, records: next)
     }
 }

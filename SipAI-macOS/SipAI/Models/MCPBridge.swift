@@ -66,6 +66,18 @@ final class MCPApprovalRequest: Identifiable, @unchecked Sendable {
     /// covers the "listener shutdown before resolution" case.
     fileprivate var verdict: MCPVerdict = .deny
 
+    /// A deny's own words, handed to claude as the tool's result (the
+    /// one channel a deny has). nil sends the generic "Denied by SipAI."
+    fileprivate var denyMessage: String?
+
+    /// On allow: a permission mode claude switches the session to as it
+    /// runs the tool (`updatedPermissions` setMode). Measured: an
+    /// ExitPlanMode allowed with `acceptEdits` leaves plan mode straight
+    /// into accept-edits, and the turn's next edit runs without asking. nil leaves the mode to claude — after an
+    /// ExitPlanMode, the mode it was in before planning (Default for a
+    /// session launched on Plan).
+    fileprivate var modeOnAllow: String?
+
     init(id: String, sessionId: String?, taskUuid: String?,
          toolName: String, toolInput: [String: Any]) {
         self.id = id
@@ -144,6 +156,12 @@ final class MCPBridge: ObservableObject {
     private var listenerSocket: Int32 = -1
     private var shuttingDown = false
 
+    /// The socket file this process bound, by device and inode. Every
+    /// copy of SipAI on a Mac shares `mcp/` — the installed copy, a build
+    /// run from Xcode, a harness's staged copy — so the path alone does
+    /// not say whose socket is there.
+    private var boundSocket: SocketFileIdentity?
+
     /// Canonical MCP server name / tool name, must match the approver.py
     /// constants and the `--permission-prompt-tool mcp__<server>__<tool>`
     /// argument format Claude Code expects.
@@ -203,8 +221,17 @@ final class MCPBridge: ObservableObject {
             _ = Darwin.close(listenerSocket)
             listenerSocket = -1
         }
-        // Remove stale socket file.
-        try? FileManager.default.removeItem(at: socketPath)
+        // Remove the socket file only if it is still the one THIS process
+        // bound. A copy that never ran an agent turn bound nothing, and a
+        // copy whose socket another copy has since replaced no longer
+        // owns the path; deleting it anyway cuts the other copy's
+        // approval cards off until that copy is relaunched — a Sparkle
+        // relaunch, or `end-to-end.sh`'s staged copy quitting, does that
+        // to whichever SipAI is left running.
+        if let ours = boundSocket, SocketFileIdentity(path: socketPath.path) == ours {
+            try? FileManager.default.removeItem(at: socketPath)
+        }
+        boundSocket = nil
     }
 
     // MARK: - Runtime installation
@@ -315,6 +342,7 @@ final class MCPBridge: ObservableObject {
         }
 
         listenerSocket = fd
+        boundSocket = SocketFileIdentity(path: socketPath.path)
         let queue = DispatchQueue(label: "sipai.mcp.listener",
                                   qos: .userInitiated)
         queue.async { [weak self] in
@@ -463,12 +491,42 @@ final class MCPBridge: ObservableObject {
         // Send the response.
         let wireVerdict = req.verdict.wireVerdict
         let updatedInput: [String: Any]? = wireVerdict == "allow" ? toolInput : nil
-        let message: String? = wireVerdict == "deny" ? "Denied by SipAI." : nil
+        let message: String? = wireVerdict == "deny"
+            ? (req.denyMessage ?? "Denied by SipAI.") : nil
+        let updatedPermissions: [[String: Any]]? = wireVerdict == "allow"
+            ? req.modeOnAllow.map { [Self.setModePermission($0)] } : nil
         sendResponse(fd: fd, requestId: requestId,
                      verdict: wireVerdict,
                      updatedInput: updatedInput,
-                     message: message)
+                     message: message,
+                     updatedPermissions: updatedPermissions)
     }
+
+    /// Claude's own shape for "switch this session to `mode`", as its
+    /// permission-prompt result carries it in `updatedPermissions`.
+    nonisolated static func setModePermission(_ mode: String) -> [String: Any] {
+        ["type": "setMode", "mode": mode, "destination": "session"]
+    }
+
+    // MARK: - Plan approval (ExitPlanMode)
+
+    /// The tool a planning turn ends on. Under `claude -p` it arrives on
+    /// this socket like any other tool, carrying the whole plan
+    /// (`plan`, the markdown claude read back from its plan file, and
+    /// `planFilePath`); the transcript answers it with a plan card
+    /// rather than a generic permission card.
+    nonisolated static let planApprovalTool = "ExitPlanMode"
+
+    /// What "Keep planning" tells the model. A deny's message is handed
+    /// to claude verbatim as the tool's result (measured), so this is
+    /// the whole instruction: stop, stay in plan mode, and let the user
+    /// say what to change in the composer. One English constant, not a
+    /// catalog key — it is read by the model, never shown in the UI.
+    nonisolated static let keepPlanningMessage =
+        "The user has not approved this plan and wants to keep planning. "
+        + "End your turn now with a short reply — they will say what to "
+        + "change in their next message. Stay in plan mode, and do not "
+        + "call ExitPlanMode again until they ask for it."
 
     // MARK: - UI callback — resolve a pending request
 
@@ -478,12 +536,19 @@ final class MCPBridge: ObservableObject {
     /// wire response. For the Always variants, also writes the
     /// `(toolName, signature)` → verdict mapping into the cache under
     /// the approval's scope so future matching requests short-circuit.
-    func resolve(requestId: String, verdict: MCPVerdict) {
+    ///
+    /// `message` replaces a deny's generic words; `setMode` rides an
+    /// allow as the mode claude switches the session to. Both exist for
+    /// the plan card, and neither is ever cached.
+    func resolve(requestId: String, verdict: MCPVerdict,
+                 message: String? = nil, setMode: String? = nil) {
         guard let idx = pending.firstIndex(where: { $0.id == requestId }) else {
             return
         }
         let req = pending[idx]
         req.verdict = verdict
+        req.denyMessage = message
+        req.modeOnAllow = setMode
         pending.remove(at: idx)
         req.semaphore.signal()
 
@@ -494,6 +559,66 @@ final class MCPBridge: ObservableObject {
 
         // Dismiss the notification we posted for this request (if any).
         dismissNotification(for: req.id)
+    }
+
+    // MARK: - Which session a request belongs to
+
+    /// Whether a request tagged (`requestSessionId`, `requestTaskUuid`)
+    /// belongs to the runner identified by (`sessionId`, `taskUuid`).
+    /// ONE rule, for everything that matches a request to a session:
+    /// the transcript's card filter, Stop's cleanup (`cancelPending`),
+    /// the notification hook and the notification click.
+    ///
+    /// A request carries whatever `SIPAI_SESSION_ID` its child was
+    /// spawned with, and a child's environment never changes. A new
+    /// session's FIRST turn is spawned from a draft, so every approval of
+    /// that turn arrives tagged with the draft's task uuid, although
+    /// claude's `system.init` names the real session id in its first
+    /// second and the runner adopts it. Matching on the session id alone
+    /// would hide every first-turn card: nothing would draw it, the turn
+    /// would wait on it forever, and Stop would be the only way out.
+    /// Plan mode would meet that almost every time, because its one
+    /// approval (ExitPlanMode) ends a planning turn that is usually the
+    /// session's first.
+    nonisolated static func request(sessionId requestSessionId: String?,
+                                    taskUuid requestTaskUuid: String?,
+                                    belongsToSession sessionId: String?,
+                                    taskUuid: String?,
+                                    alias: [String: String]) -> Bool {
+        let reqSid = requestSessionId ?? ""
+        let reqTuid = requestTaskUuid ?? ""
+        let sid = sessionId ?? ""
+        let tuid = taskUuid ?? ""
+        if !sid.isEmpty, reqSid == sid { return true }
+        if !tuid.isEmpty, reqTuid == tuid { return true }
+        // A request filed under a draft's task uuid belongs to the
+        // session that uuid migrated to — for a caller that knows the
+        // session but not the uuid (a notification, another runner).
+        if !sid.isEmpty, !reqTuid.isEmpty, alias[reqTuid] == sid { return true }
+        return false
+    }
+
+    /// `request(sessionId:taskUuid:belongsToSession:taskUuid:alias:)`
+    /// against this bridge's alias map.
+    func belongs(_ req: MCPApprovalRequest, toSession sessionId: String?,
+                 taskUuid: String?) -> Bool {
+        Self.request(sessionId: req.sessionId, taskUuid: req.taskUuid,
+                     belongsToSession: sessionId, taskUuid: taskUuid,
+                     alias: alias)
+    }
+
+    /// The pending requests one runner's transcript draws.
+    func pending(forSession sessionId: String?, taskUuid: String?) -> [MCPApprovalRequest] {
+        pending.filter { belongs($0, toSession: sessionId, taskUuid: taskUuid) }
+    }
+
+    /// The session a request belongs to, when it is known: its own id,
+    /// or the session its task uuid migrated to. nil for a request whose
+    /// draft has not announced a session yet.
+    func owningSessionId(of req: MCPApprovalRequest) -> String? {
+        if let sid = req.sessionId, !sid.isEmpty { return sid }
+        if let tuid = req.taskUuid, !tuid.isEmpty, let sid = alias[tuid] { return sid }
+        return nil
     }
 
     /// Force-deny every pending approval belonging to one session (or,
@@ -510,14 +635,7 @@ final class MCPBridge: ObservableObject {
         var kept: [MCPApprovalRequest] = []
         var removed = false
         for req in pending {
-            let reqSid = req.sessionId ?? ""
-            let reqTuid = req.taskUuid ?? ""
-            let matches = (!sid.isEmpty && reqSid == sid)
-                || (!tuid.isEmpty && reqTuid == tuid)
-                // A request filed under a draft's task_uuid belongs to
-                // the session that uuid migrated to.
-                || (!sid.isEmpty && !reqTuid.isEmpty && alias[reqTuid] == sid)
-            if matches {
+            if belongs(req, toSession: sessionId, taskUuid: taskUuid) {
                 req.verdict = .deny
                 req.semaphore.signal()
                 dismissNotification(for: req.id)
@@ -727,7 +845,8 @@ final class MCPBridge: ObservableObject {
     nonisolated private func sendResponse(fd: Int32, requestId: String,
                                           verdict: String,
                                           updatedInput: [String: Any]?,
-                                          message: String?) {
+                                          message: String?,
+                                          updatedPermissions: [[String: Any]]? = nil) {
         var body: [String: Any] = [
             "v": 1,
             "request_id": requestId,
@@ -742,6 +861,11 @@ final class MCPBridge: ObservableObject {
             body["message"] = m
         } else {
             body["message"] = NSNull()
+        }
+        // Optional, and only on allow: approver.py passes it through as
+        // claude's `updatedPermissions`. An older approver ignores it.
+        if let p = updatedPermissions, !p.isEmpty {
+            body["updated_permissions"] = p
         }
         guard let data = try? JSONSerialization.data(
             withJSONObject: body, options: [.withoutEscapingSlashes])
@@ -794,9 +918,14 @@ final class MCPBridge: ObservableObject {
         content.title = String(
             localized: "Claude Code permission needed",
             comment: "Notification title for a pending MCP approval")
-        content.body = String(
-            localized: "Allow ‘\(req.toolName)’ · \(notificationPreview(for: req))",
-            comment: "Notification body: tool name + short preview")
+        // A plan is not a tool call to allow: its preview would be the
+        // first characters of a JSON object holding the whole plan.
+        content.body = req.toolName == Self.planApprovalTool
+            ? String(localized: "A plan is ready for your review",
+                     comment: "Notification body: an agent session in plan mode finished its plan and waits for approval")
+            : String(
+                localized: "Allow ‘\(req.toolName)’ · \(notificationPreview(for: req))",
+                comment: "Notification body: tool name + short preview")
         content.sound = .default
         content.userInfo = [
             "kind": "mcp-approval",
@@ -833,6 +962,49 @@ final class MCPBridge: ObservableObject {
             return String(full.prefix(77)) + "…"
         }
         return full
+    }
+}
+
+// MARK: - Plan approval modes
+
+/// The modes the plan card's two approvals leave plan mode into, in the
+/// spelling the installed claude's `--help` lists — the chip's own
+/// vocabulary. Newer builds list `manual` for the mode their transcripts
+/// record as `default`; older builds list `default`.
+enum PlanApprovalModes {
+    /// "Approve and accept edits": the mode claude is switched to as it
+    /// runs ExitPlanMode. nil when the installed claude lists no
+    /// accept-edits mode; the card then offers one plain approval.
+    nonisolated static func acceptEdits(in modes: [String]) -> String? {
+        modes.contains("acceptEdits") ? "acceptEdits" : nil
+    }
+
+    /// "Approve, ask before edits": claude returns to its pre-plan mode by
+    /// itself — Default for a session launched on Plan (measured) — and
+    /// this is that mode as the chip spells it. nil when neither
+    /// spelling is listed, and the chip is then left alone.
+    nonisolated static func askBeforeEdits(in modes: [String]) -> String? {
+        if modes.contains("manual") { return "manual" }
+        if modes.contains("default") { return "default" }
+        return nil
+    }
+}
+
+// MARK: - Whose socket is at the path
+
+/// A file's identity, device and inode, read with `lstat` so the path
+/// itself is judged and never what a link at it points to. A socket
+/// another process bound after ours is a new inode at the same path.
+struct SocketFileIdentity: Equatable {
+    let device: dev_t
+    let inode: ino_t
+
+    /// Nil when nothing is at the path.
+    init?(path: String) {
+        var info = stat()
+        guard lstat(path, &info) == 0 else { return nil }
+        device = info.st_dev
+        inode = info.st_ino
     }
 }
 

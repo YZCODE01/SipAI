@@ -36,6 +36,12 @@ if ! grep -q "static func latestFolder" "$grouping"; then
   exit 1
 fi
 
+# The group-order rule resolves a dragged order through the sidebar's
+# one `SidebarOrdering`, which lives among the views; it is pure, so it
+# is extracted rather than compiling the whole design system.
+awk '/^enum SidebarOrdering \{/{f=1} f{print} f&&/^\}/{exit}' \
+  "$here/../../SipAI/Utilities/DesignSystem.swift" > "$out/Ordering.swift"
+
 swiftc -O -o "$out/groupplus" \
-  "$here/Stubs.swift" "$grouping" "$here/main.swift"
+  "$here/Stubs.swift" "$out/Ordering.swift" "$grouping" "$here/main.swift"
 "$out/groupplus" "${1:-$root}"

@@ -59,10 +59,10 @@ struct AgentSessionsSection: View {
     @State private var revealedKeys: Set<String> = []
     @State private var expandedScheduledTasks: Set<String> = []
 
-    /// The name prompt shared by "New Group…" and "Rename Group…".
+    /// The name prompt shared by "New group…" and "Rename group…".
     private enum GroupPrompt: Identifiable {
         /// Creating a group. The item, when present, is filed into it on
-        /// save — that's the "Add to Group ▸ New Group…" path.
+        /// save — that's the "Add to group ▸ New group…" path.
         case create(AgentListItem?)
         case rename(String)
 
@@ -96,8 +96,10 @@ struct AgentSessionsSection: View {
     @State private var renameFailure: RenameFailure? = nil
     /// Session under the ⋮ Delete confirmation.
     @State private var deletingSession: AgentSession? = nil
-    /// Scheduled task under the ⋮ Delete confirmation.
+    /// Scheduled task under the ⋮ Delete definition confirmation.
     @State private var deletingTask: ScheduledAgentTask? = nil
+    /// Scheduled task under the ⋮ Delete all confirmation.
+    @State private var deletingTaskAndRuns: ScheduledAgentTask? = nil
 
     /// Caps only regular sessions, at the sidebar's shared row limit, to
     /// keep the left column scannable. Whether it counts across the whole
@@ -112,33 +114,17 @@ struct AgentSessionsSection: View {
         return f
     }()
 
-    /// True if this section's agent binary is detected on this machine —
-    /// each agent's section answers its own "am I installed?" question.
-    private var isInstalled: Bool {
-        agents.isAgentInstalled(agentKey)
-    }
-
-    /// Installed AND configured (codex: working auth). Only a ready
-    /// agent earns the "New session" row — an installed-but-unconfigured
-    /// CLI would fail every spawn, so it lists read-only instead.
+    /// This section exists only for a LISTED agent (`AgentPresence`):
+    /// installed, signed in, not hidden. `LeftSidebar` appends it on
+    /// that rule, so the body has one shape — the new-session row and
+    /// the list — and no read-only, not-signed-in or not-installed
+    /// variant; those states live in Settings → Agent Guide.
     private var isReady: Bool {
         agents.isAgentReady(agentKey)
     }
 
-    /// Sessions synced from a desktop app count even without the CLI —
-    /// that's the read-only tier: list, read, rename, group; no sends.
     private var hasAnyRows: Bool {
         !sectionScheduledTasks.isEmpty || !sectionRegularSessions.isEmpty
-    }
-
-    /// What this section can do right now. The header suffix, the body
-    /// and the grouping menu all read this ONE value, so none of them
-    /// can describe a different section than the other two — see
-    /// `AgentSectionTier`.
-    private var tier: AgentSectionTier {
-        AgentSectionTier.resolve(isReady: isReady,
-                                 isInstalled: isInstalled,
-                                 hasRows: hasAnyRows)
     }
 
     private var sectionRegularSessions: [AgentSession] {
@@ -149,15 +135,7 @@ struct AgentSessionsSection: View {
         agents.scheduledTasks(for: agentKey)
     }
 
-    /// The agent's name, plus "(read only)" only when the section
-    /// actually lists sessions it cannot drive. An agent with no CLI
-    /// and no sessions says so in its body row instead.
-    private var sectionTitle: String {
-        guard tier.namesTierInTitle else { return agentName }
-        return agentName + " " + String(
-            localized: "(read only)",
-            comment: "Sidebar section title suffix when the agent's listed sessions cannot be driven")
-    }
+    private var sectionTitle: String { agentName }
 
     private var groupMode: AgentGroupMode {
         config.agentGroupMode(for: agentKey)
@@ -167,25 +145,32 @@ struct AgentSessionsSection: View {
         config.agentCustomGroups(for: agentKey)
     }
 
+    /// Some row in this section is running — what the section header
+    /// draws its dot from while the section is collapsed. The same
+    /// `isActive` every row and every folded group reads.
+    private var sectionLive: Bool {
+        sectionRegularSessions.contains { isActive(.regular($0)) }
+            || sectionScheduledTasks.contains { isActive(.scheduled($0)) }
+    }
+
+    /// Some row in this section finished and has not been opened since —
+    /// the collapsed header's steady dot, through the same `isUnread`
+    /// every row and every folded group reads.
+    private var sectionUnread: Bool {
+        sectionRegularSessions.contains { isUnread(.regular($0)) }
+            || sectionScheduledTasks.contains { isUnread(.scheduled($0)) }
+    }
+
     var body: some View {
         DisclosureSection(
             title: sectionTitle,
             isExpanded: $expanded,
+            live: sectionLive,
+            unread: sectionUnread,
             accessory: { groupMenu }
         ) {
-            switch tier {
-            case .interactive:
-                newSessionButton
-                sessionList
-            case .readOnly:
-                readOnlyHintRow
-                sessionList
-            case .notConfigured:
-                // Binary present, auth missing, nothing synced yet.
-                readOnlyHintRow
-            case .unavailable:
-                notInstalledRow
-            }
+            newSessionButton
+            sessionList
         }
         .alert(groupPromptTitle, isPresented: groupPromptPresented) {
             TextField(
@@ -252,8 +237,8 @@ struct AgentSessionsSection: View {
                         comment: "Body of the session delete confirmation"))
         }
         .alert(
-            String(localized: "Delete scheduled task?",
-                   comment: "Title of the scheduled-task delete confirmation"),
+            String(localized: "Delete this task's definition?",
+                   comment: "Title of the confirmation for a scheduled task's Delete definition — its runs are kept"),
             isPresented: Binding(
                 get: { deletingTask != nil },
                 set: { if !$0 { deletingTask = nil } }
@@ -263,7 +248,8 @@ struct AgentSessionsSection: View {
             Button(role: .destructive) {
                 deleteTask(task)
             } label: {
-                Text("Delete", comment: "Confirm deleting a scheduled task")
+                Text("Delete definition",
+                     comment: "Confirm deleting a scheduled task's definition, keeping its runs")
             }
             Button(role: .cancel) { } label: {
                 Text("Cancel", comment: "Dismiss the scheduled-task delete confirmation")
@@ -271,6 +257,30 @@ struct AgentSessionsSection: View {
         } message: { task in
             Text(String(localized: "“\(task.description)” stops running and its definition is removed. Past run sessions are kept.",
                         comment: "Body of the scheduled-task delete confirmation"))
+        }
+        // Delete all says what goes with the task, the way a session's
+        // Delete does: the runs are sessions like any other, and every
+        // app that reads them loses them.
+        .alert(
+            String(localized: "Delete this task and all its runs?",
+                   comment: "Title of the confirmation for a scheduled task's Delete all — the definition and every run session it made"),
+            isPresented: Binding(
+                get: { deletingTaskAndRuns != nil },
+                set: { if !$0 { deletingTaskAndRuns = nil } }
+            ),
+            presenting: deletingTaskAndRuns
+        ) { task in
+            Button(role: .destructive) {
+                deleteTaskAndRuns(task)
+            } label: {
+                Text("Delete all",
+                     comment: "Confirm deleting a scheduled task's definition and every run session it made")
+            }
+            Button(role: .cancel) { } label: {
+                Text("Cancel", comment: "Dismiss the scheduled-task delete confirmation")
+            }
+        } message: { task in
+            Text(deleteAllMessage(for: task))
         }
         .alert(
             String(localized: "Renamed in SipAI only",
@@ -292,49 +302,47 @@ struct AgentSessionsSection: View {
 
     // MARK: - Group menu (section header accessory)
 
-    @ViewBuilder
     private var groupMenu: some View {
-        // Grouping is a read operation — offered for read-only stores too.
-        if tier.offersGrouping {
-            Menu {
-                Picker(selection: groupModeBinding) {
-                    ForEach(AgentGroupMode.allCases) { mode in
-                        Text(mode.label).tag(mode)
-                    }
-                } label: {
-                    Text("Group by", comment: "Menu section — how to bucket the session list")
-                }
-                .pickerStyle(.inline)
-
-                if groupMode == .custom {
-                    Divider()
-                    Button {
-                        promptForGroup(.create(nil))
-                    } label: {
-                        Text("New Group…",
-                             comment: "Menu item — create an empty custom session group")
-                    }
+        // Offered to every listed agent, sessions or not, so the
+        // choice is already made when the first session lands.
+        Menu {
+            Picker(selection: groupModeBinding) {
+                ForEach(AgentGroupMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
                 }
             } label: {
-                Image(systemName: "line.3.horizontal.decrease")
-                    .font(.system(size: 10, weight: .semibold))
-                    // Tinted while a grouping is on, so the sidebar shows at
-                    // a glance that the list isn't in its default order.
-                    .foregroundStyle(groupMode == .none
-                                     ? AnyShapeStyle(.secondary)
-                                     : AnyShapeStyle(Color.accentColor))
-                    .frame(width: 18, height: 16)
-                    .contentShape(Rectangle())
+                Text("Group by", comment: "Menu section — how to bucket the session list")
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help(groupMode == .none
-                  ? String(localized: "Group sessions",
-                           comment: "Tooltip for the sidebar grouping menu when grouping is off")
-                  : String(localized: "Grouped by \(groupMode.label)",
-                           comment: "Tooltip for the sidebar grouping menu naming the active mode"))
+            .pickerStyle(.inline)
+
+            if groupMode == .custom {
+                Divider()
+                Button {
+                    promptForGroup(.create(nil))
+                } label: {
+                    Text("New group…",
+                         comment: "Menu item — create an empty custom session group")
+                }
+            }
+        } label: {
+            Image(systemName: "line.3.horizontal.decrease")
+                .font(.system(size: 10, weight: .semibold))
+                // Tinted while a grouping is on, so the sidebar shows at
+                // a glance that the list isn't in its default order.
+                .foregroundStyle(groupMode == .none
+                                 ? AnyShapeStyle(.secondary)
+                                 : AnyShapeStyle(Color.accentColor))
+                .frame(width: 18, height: 16)
+                .contentShape(Rectangle())
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(groupMode == .none
+              ? String(localized: "Group sessions",
+                       comment: "Tooltip for the sidebar grouping menu when grouping is off")
+              : String(localized: "Grouped by \(groupMode.label)",
+                       comment: "Tooltip for the sidebar grouping menu naming the active mode"))
     }
 
     private var groupModeBinding: Binding<AgentGroupMode> {
@@ -517,6 +525,15 @@ struct AgentSessionsSection: View {
         /// counts: a header reading "10" above a "Show all (24 more)"
         /// contradicts the button directly underneath it.
         let total: Int
+        /// Some row in the group — ALL of them, taken before the cap —
+        /// is running (`isActive`). A folded header draws the dot for
+        /// it, since none of its rows are on screen to draw their own.
+        let live: Bool
+        /// Some row in the group finished and has not been opened since
+        /// (`isUnread`), over the same untrimmed rows: the folded
+        /// header's steady dot, drawn beside the pulse when `live` is
+        /// true too.
+        let unread: Bool
 
         var id: String { group.key }
     }
@@ -564,21 +581,29 @@ struct AgentSessionsSection: View {
         }
     }
 
-    /// This section's rows as ONE stream, newest first.
+    /// This section's rows as ONE stream: running first, then finished
+    /// and unopened, then the rest (`tier`, `SidebarTier`), newest first
+    /// inside each tier.
     ///
-    /// The order is `AgentListItem.activityDate` — the last user
-    /// message for a session, the newest run's prompt for a task —
-    /// which is also the value each row prints, so the list cannot sort
-    /// on one clock and show another.
+    /// Within a tier the order is `AgentListItem.activityDate` — the
+    /// last user message for a session, the newest run's prompt for a
+    /// task — which is also the value each row prints, so a tier cannot
+    /// sort on one clock and show another.
     ///
     /// Read by `listLayout`, which buckets it, and by the custom
     /// group +, which asks it where that group was last worked in. One
-    /// property so those two can never disagree about which row is the
-    /// newest.
+    /// property so those two can never disagree about which row is on
+    /// top.
     private var sortedListItems: [AgentListItem] {
         var items = sectionScheduledTasks.map(AgentListItem.scheduled)
         items.append(contentsOf: sectionRegularSessions.map(AgentListItem.regular))
+        // Once per row: the comparator runs n log n times.
+        var tiers: [String: SidebarTier] = [:]
+        for item in items { tiers[item.id] = tier(item) }
         items.sort {
+            let lhs = tiers[$0.id] ?? .rest
+            let rhs = tiers[$1.id] ?? .rest
+            if lhs != rhs { return lhs < rhs }
             if $0.sortDate != $1.sortDate {
                 return $0.sortDate > $1.sortDate
             }
@@ -627,6 +652,13 @@ struct AgentSessionsSection: View {
     /// draws no header at all — an empty date group is noise, which is
     /// why `buckets` drops empty groups too.
     ///
+    /// A row with a dot — running, or finished and unopened — is never
+    /// behind the button, and does not spend the cap: the cap is for
+    /// rows with nothing new to show. The tiers already put dotted rows
+    /// first in every group; the exemption is what covers Date's
+    /// section-wide budget, spent bucket by bucket, where an unread row
+    /// in an older bucket would otherwise fall past the tenth row.
+    ///
     /// `folded` is the set of group keys the user has collapsed, and in
     /// the PER-GROUP modes a folded group is NOT trimmed. Its rows are
     /// already hidden — by the user's own choice, and completely — so
@@ -642,12 +674,18 @@ struct AgentSessionsSection: View {
         let sectionRevealed = revealedKeys.contains(
             revealKey(mode, Self.sectionRevealKey))
         let items = sortedListItems
+        // A dotted row is never capped — see above. Read once per row.
+        var dotted: Set<String> = []
+        for item in items where tier(item) < .rest { dotted.insert(item.id) }
 
         // Read off the raw list, so it stands whatever is revealed or
-        // folded. Only regular sessions are ever capped (below).
+        // folded. Only regular sessions without a dot are ever capped
+        // (below).
         let sectionOverflow = perGroup
             ? 0
-            : max(0, sectionRegularSessions.count - Self.defaultLimit)
+            : max(0, sectionRegularSessions
+                .filter { !dotted.contains(AgentListItem.regular($0).id) }
+                .count - Self.defaultLimit)
         let sectionCapped = !perGroup && !sectionRevealed
         var budget = Self.defaultLimit
 
@@ -656,10 +694,13 @@ struct AgentSessionsSection: View {
             items,
             mode: mode,
             state: groupState(for:),
+            tier: tier(_:),
             customGroups: customGroups,
             assignments: config.agentSessionGroupAssignments
         ) {
             let total = group.items.count
+            let live = group.items.contains(where: isActive)
+            let unread = group.items.contains(where: isUnread)
             // Cap only REGULAR sessions, in both branches. Scheduled
             // task parents must survive the trim (the documented
             // invariant at `defaultLimit`): a never-run task sorts
@@ -669,7 +710,8 @@ struct AgentSessionsSection: View {
             if perGroup {
                 guard !folded.contains(group.key) else {
                     groups.append(ListGroup(group: group, overflow: 0,
-                                            revealed: false, total: total))
+                                            revealed: false, total: total,
+                                            live: live, unread: unread))
                     continue
                 }
                 var kept: [AgentListItem] = []
@@ -678,6 +720,8 @@ struct AgentSessionsSection: View {
                 for item in group.items {
                     switch item {
                     case .scheduled:
+                        kept.append(item)
+                    case .regular where dotted.contains(item.id):
                         kept.append(item)
                     case .regular:
                         if regularKept < Self.defaultLimit {
@@ -695,17 +739,23 @@ struct AgentSessionsSection: View {
                         label: group.label,
                         detail: group.detail,
                         tooltip: group.tooltip,
-                        items: kept
+                        items: kept,
+                        newestActivity: group.newestActivity,
+                        tier: group.tier
                     ),
                     overflow: overflow,
                     revealed: revealed,
-                    total: total
+                    total: total,
+                    live: live,
+                    unread: unread
                 ))
             } else if sectionCapped {
                 var kept: [AgentListItem] = []
                 for item in group.items {
                     switch item {
                     case .scheduled:
+                        kept.append(item)
+                    case .regular where dotted.contains(item.id):
                         kept.append(item)
                     case .regular:
                         if budget > 0 {
@@ -721,15 +771,20 @@ struct AgentSessionsSection: View {
                         label: group.label,
                         detail: group.detail,
                         tooltip: group.tooltip,
-                        items: kept
+                        items: kept,
+                        newestActivity: group.newestActivity,
+                        tier: group.tier
                     ),
                     overflow: 0,
                     revealed: false,
-                    total: total
+                    total: total,
+                    live: live,
+                    unread: unread
                 ))
             } else {
                 groups.append(ListGroup(group: group, overflow: 0,
-                                        revealed: sectionRevealed, total: total))
+                                        revealed: sectionRevealed, total: total,
+                                        live: live, unread: unread))
             }
         }
         return ListLayout(groups: groups,
@@ -741,11 +796,10 @@ struct AgentSessionsSection: View {
     private var sessionList: some View {
         // A named group renders while empty, so under Custom the list
         // has something to draw even before the first session exists —
-        // otherwise "New Group…" on a fresh agent produces a group the
+        // otherwise "New group…" on a fresh agent produces a group the
         // empty-state row hides, which is the bug the header + is here
-        // to end. `hasAnyRows` itself is left alone: it feeds
-        // `AgentSectionTier`, where a row means something to READ, and
-        // a group the user named is not that.
+        // to end. `hasAnyRows` itself is left alone: a row means
+        // something to READ, and a group the user named is not that.
         //
         // The scan still wins while it runs. `sessions` is empty until
         // the FIRST scan lands, so without that clause a user grouped
@@ -764,15 +818,21 @@ struct AgentSessionsSection: View {
             let folded = config.agentCollapsedGroups(for: agentKey, mode: mode)
             let layout = listLayout(folded: folded)
             // User-dragged order over the bucketer's own (per mode, per
-            // agent). Each group renders as ONE block — header plus its
-            // rows — so the whole block is a drop target and dragging a
-            // header across a tall unfolded group still reorders live.
+            // agent), with any group a turn has started in since that
+            // drag lifted to the top — see `AgentSessionGrouping
+            // .arranged`. Each group renders as ONE block — header plus
+            // its rows — so the whole block is a drop target and dragging
+            // a header across a tall unfolded group still reorders live.
             // The sub-VStack matches the parent's 2-pt spacing, so the
             // wrapping is invisible.
-            let orderedGroups = SidebarOrdering.apply(
+            let orderedGroups = AgentSessionGrouping.arranged(
                 layout.groups,
-                order: config.agentGroupOrder(for: agentKey, mode: mode),
-                id: \.id)
+                mode: mode,
+                dragged: config.agentGroupOrder(for: agentKey, mode: mode),
+                draggedAt: config.agentGroupOrderDate(for: agentKey, mode: mode),
+                id: \.id,
+                newest: \.group.newestActivity,
+                tier: \.group.tier)
             ForEach(orderedGroups) { entry in
                 let group = entry.group
                 VStack(alignment: .leading, spacing: 2) {
@@ -780,12 +840,17 @@ struct AgentSessionsSection: View {
                         groupHeaderRow(group,
                                        count: entry.total,
                                        folded: folded.contains(group.key),
+                                       live: entry.live,
+                                       unread: entry.unread,
                                        mode: mode)
                             // The header is the drag handle; session and
                             // task rows keep their click behaviour.
                             .onDrag {
-                                NSItemProvider(object:
-                                    (groupDragPrefix(mode) + group.key) as NSString)
+                                let payload = groupDragPrefix(mode) + group.key
+                                #if DEBUG
+                                SidebarDropDiagnostics.dumpDestinations(reason: "drag start " + payload)
+                                #endif
+                                return NSItemProvider(object: payload as NSString)
                             }
                     }
                     if mode == .none || !folded.contains(group.key) {
@@ -871,10 +936,19 @@ struct AgentSessionsSection: View {
     /// .count`: a trimmed group renders fewer rows than it holds, and a
     /// header saying "10" directly above "Show all (24 more)" contradicts
     /// the button it is sitting on top of.
+    ///
+    /// `live` says a row inside is running. While the group is FOLDED
+    /// the header draws the activity dot after its name (see
+    /// `AgentGroupHeaderLabel`); unfolded, the running row's own glyph
+    /// already says it, so the header draws nothing. `unread` is the
+    /// same for a row whose run finished and is unopened — the steady
+    /// dot, right after the pulse when a row is running as well.
     @ViewBuilder
     private func groupHeaderRow(_ group: AgentSessionGroup,
                                 count: Int,
                                 folded: Bool,
+                                live: Bool,
+                                unread: Bool,
                                 mode: AgentGroupMode) -> some View {
         let showsPlus = isReady && {
             switch mode {
@@ -899,38 +973,27 @@ struct AgentSessionsSection: View {
                                                   mode: mode)
                 }
             } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: folded ? "chevron.right" : "chevron.down")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 8)
-                    Text(group.label)
-                        .font(.system(size: SipFont.sidebarRow(fontScale), weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    if !group.detail.isEmpty {
-                        Text(group.detail)
-                            .font(.system(size: 11))
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .layoutPriority(-1)
-                    }
-                    Spacer(minLength: 4)
-                    Text("\(count)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
-                }
-                .padding(.leading, 8)
-                .padding(.trailing, showsPlus ? 2 : 8)
-                .padding(.top, 4)
-                .padding(.bottom, 2)
-                .contentShape(Rectangle())
+                AgentGroupHeaderLabel(label: group.label,
+                                      detail: group.detail,
+                                      count: count,
+                                      folded: folded,
+                                      live: live,
+                                      unread: unread,
+                                      titleSize: SipFont.sidebarRow(fontScale))
+                    .padding(.leading, 8)
+                    .padding(.trailing, showsPlus ? 2 : 8)
+                    .padding(.top, 4)
+                    .padding(.bottom, 2)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(group.label)
+            // The label above replaces the dots' own, so a folded group
+            // says what they say as its value instead: a running row, an
+            // unopened finished one, or both.
+            .accessibilityValue(folded
+                ? GroupActivityDots.accessibilityText(live: live, unread: unread)
+                : "")
             .accessibilityHint(folded
                 ? String(localized: "Expand group",
                          comment: "Accessibility hint for a folded session group")
@@ -966,13 +1029,13 @@ struct AgentSessionsSection: View {
                 Button {
                     promptForGroup(.rename(group.key))
                 } label: {
-                    Text("Rename Group…",
+                    Text("Rename group…",
                          comment: "Context menu item on a custom group header")
                 }
                 Button(role: .destructive) {
                     deletingGroup = group.key
                 } label: {
-                    Text("Delete Group",
+                    Text("Delete group",
                          comment: "Context menu item on a custom group header")
                 }
             }
@@ -981,7 +1044,7 @@ struct AgentSessionsSection: View {
         }
     }
 
-    // MARK: - Empty / not-installed states
+    // MARK: - Empty state
 
     @ViewBuilder
     private var emptyRow: some View {
@@ -1004,109 +1067,56 @@ struct AgentSessionsSection: View {
         .padding(.vertical, 4)
     }
 
-    private var notInstalledRow: some View {
-        HStack(alignment: .top, spacing: 6) {
-            Image(systemName: "info.circle")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-            Text("\(agentName) is not installed on this machine. Install it to start a session.",
-                 comment: "Sidebar hint when an agent CLI binary is missing")
-                .font(.system(size: SipFont.sidebarHint(fontScale)))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-    }
-
-    /// Shown above a read-only list. Two flavours of read-only: the CLI
-    /// is missing entirely, or it is installed but has no working auth
-    /// (codex before `codex login` / a real API key) — the fix differs,
-    /// so the hint says which one applies.
-    private var readOnlyHintRow: some View {
-        HStack(alignment: .top, spacing: 6) {
-            Image(systemName: "lock")
-                .font(.system(size: 10))
-                .foregroundStyle(.secondary)
-            Group {
-                if isInstalled {
-                    Text("\(agentName) CLI is installed but not signed in. Sessions sync read-only — configure it (e.g. codex login or an API key) to start new sessions.",
-                         comment: "Sidebar hint when an agent CLI exists but has no working auth")
-                } else {
-                    Text("Sessions sync read-only. Install the \(agentName) CLI to interact.",
-                         comment: "Sidebar hint when an agent has sessions but no CLI")
-                }
-            }
-            .font(.system(size: SipFont.sidebarHint(fontScale)))
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-    }
-
     // MARK: - Scheduled task rows
+
+    /// Where a run under its task starts: its glyph begins where the
+    /// task's own glyph slot ends — the row's 8 pt pad plus the 14 pt
+    /// slot. One glyph's indent, because the task row carries ONE glyph
+    /// (`ScheduledTaskGlyph` is its icon and shows whether it is open).
+    private static let nestedRunLeading: CGFloat = 8 + 14
 
     private func scheduledTaskRow(_ task: ScheduledAgentTask) -> some View {
         let isExpanded = expandedScheduledTasks.contains(task.id)
-        // `scheduler.isRunning` covers the window a scheduled run spends
-        // as a fresh draft: it has no session id until claude's first
-        // system.init lands, so a per-session check alone leaves the row
-        // inert for the first seconds of every run it fires.
-        let hasActivity = scheduler.isRunning(task.name)
-            || task.sessions.contains { isRunning($0.id) }
+        let hasActivity = isActive(.scheduled(task))
+        let hasUnread = isUnread(.scheduled(task))
         let hasApproval = task.sessions.contains { isAwaitingApproval($0.id) }
 
         return VStack(alignment: .leading, spacing: 0) {
             if renamingTaskId == task.id {
                 inlineRenameRow(
-                    icon: "timer",
                     text: $taskNameDraft,
                     leadingPad: 8,
                     onCommit: { commitTaskRename(task) },
                     onCancel: cancelInlineRename
-                )
+                ) {
+                    ScheduledTaskGlyph(expanded: isExpanded)
+                }
             } else {
             HStack(spacing: 0) {
-                // The chevron is its OWN button, separate from the row
-                // body: the row now opens the task in the centre pane,
-                // and folding a parent open to see its runs must not
-                // also navigate away from whatever is on screen.
+                // The whole row is ONE button, and it folds: a click on a
+                // folded task shows its runs and opens its page, a click
+                // on an open one hides them and leaves the centre pane
+                // alone (`toggleTask`). It never opens a run — a run is
+                // opened from its own row. The glyph's bars turn with it.
                 Button {
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        if isExpanded {
-                            expandedScheduledTasks.remove(task.id)
-                        } else {
-                            expandedScheduledTasks.insert(task.id)
-                        }
-                    }
-                } label: {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 8)
-                        .padding(.leading, 8)
-                        .padding(.vertical, 4)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(isExpanded
-                    ? String(localized: "Collapse scheduled runs",
-                             comment: "Accessibility label for the expanded task chevron")
-                    : String(localized: "Expand scheduled runs",
-                             comment: "Accessibility label for the collapsed task chevron"))
-                Button {
-                    openTask(task)
+                    toggleTask(task)
                 } label: {
                     HStack(spacing: 6) {
-                        leadingGlyph(icon: "timer", size: 11,
-                                     active: hasActivity)
+                        ScheduledTaskGlyph(expanded: isExpanded)
                         Text(task.description)
                             .font(.system(size: SipFont.sidebarRow(fontScale)))
                             .lineLimit(1)
                             .truncationMode(.tail)
+                        // What the task's runs are doing, right after its
+                        // name as on a folded group — the pulse, the
+                        // steady dot, or both — whether the task is folded
+                        // or open: the row speaks for its runs in both.
+                        // Before the status tag: an orange pulse after
+                        // "Active" reads as a light on the tag, which
+                        // describes the schedule, not the runs.
+                        if hasActivity || hasUnread {
+                            GroupActivityDots(live: hasActivity, unread: hasUnread)
+                        }
                         if let status = scheduleStatusLabel(task) {
                             Text(verbatim: status)
                                 .font(.system(size: SipFont.sidebarHint(fontScale),
@@ -1125,10 +1135,16 @@ struct AgentSessionsSection: View {
                         // dot saying it is running now. "Never" goes
                         // with it — a task firing its first run has not
                         // never run.
+                        //
+                        // The column is the last RUN, while the row sorts
+                        // on `lastActive`, which also counts the moment
+                        // the task was scheduled. The two differ only for
+                        // a task that has never run, and "Never" is not a
+                        // time that can read as out of order.
                         if !hasActivity {
-                            if let lastActive = task.lastActive {
+                            if let lastRun = task.lastRunAt {
                                 Text(Self.relativeFormatter.localizedString(
-                                    for: lastActive, relativeTo: Date()))
+                                    for: lastRun, relativeTo: Date()))
                                     .font(.system(size: SipFont.sidebarHint(fontScale)))
                                     .foregroundStyle(.tertiary)
                             } else {
@@ -1139,21 +1155,31 @@ struct AgentSessionsSection: View {
                             }
                         }
                     }
-                    .padding(.leading, 6)
+                    .padding(.leading, 8)
                     .padding(.trailing, 2)
                     .padding(.vertical, 4)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(task.description)
+                // The label above replaces what the row draws after the
+                // name, so its state and its runs' dots are said as the
+                // value, as a folded group's header says its dots.
+                .accessibilityValue([scheduleStatusLabel(task),
+                                     GroupActivityDots.accessibilityText(live: hasActivity,
+                                                                         unread: hasUnread)]
+                    .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: ", "))
+                .accessibilityHint(isExpanded
+                    ? String(localized: "Collapse scheduled runs",
+                             comment: "Accessibility hint for a scheduled task's row while its runs are showing")
+                    : String(localized: "Expand scheduled runs and open the task's page",
+                             comment: "Accessibility hint for a scheduled task's row while its runs are folded away — the click also opens the task's page"))
                 RowEllipsisMenu { taskMenuItems(for: task) }
                     .padding(.trailing, 4)
             }
             .sidebarRowBackground(selected: appState.openScheduledTaskName == task.name
                                   && appState.openAgentSessionId == nil)
             .contextMenu { taskMenuItems(for: task) }
-            .accessibilityLabel(task.description)
-            .accessibilityHint(String(localized: "Open this scheduled task",
-                                      comment: "Accessibility hint for a scheduled task row"))
             }
 
             if isExpanded {
@@ -1165,7 +1191,7 @@ struct AgentSessionsSection: View {
                             .foregroundStyle(.secondary)
                         Spacer()
                     }
-                    .padding(.leading, 36)
+                    .padding(.leading, Self.nestedRunLeading)
                     .padding(.trailing, 8)
                     .padding(.vertical, 4)
                 } else {
@@ -1182,16 +1208,32 @@ struct AgentSessionsSection: View {
     /// "Active" is claimed ONLY when something can actually fire it — a
     /// task that is enabled but carries no schedule never runs on its
     /// own, and labelling that "Active" would be the one lie this row
-    /// can tell. Nil for an orphan, whose definition is gone.
+    /// can tell. A one-time task whose moment has passed will never fire
+    /// again either, so it says how that moment went instead, read off
+    /// the same run record the scheduler writes. Nil for an orphan,
+    /// whose definition is gone.
     private func scheduleStatusLabel(_ task: ScheduledAgentTask) -> String? {
         guard let def = task.definition else { return nil }
         if !def.enabled {
             return String(localized: "Paused",
                           comment: "Sidebar tag on a scheduled task that will not fire")
         }
-        guard def.schedule != nil else {
+        guard let schedule = def.schedule else {
             return String(localized: "No schedule",
                           comment: "Sidebar tag on a scheduled task with no cron expression")
+        }
+        if case .once(let moment) = schedule {
+            switch ScheduledTaskScheduler.oneTimeStatus(
+                at: moment, state: scheduler.states[task.name], now: Date()) {
+            case .ran:
+                return String(localized: "Finished",
+                              comment: "Sidebar tag on a one-time scheduled task that has had its run")
+            case .missed:
+                return String(localized: "Missed",
+                              comment: "Sidebar tag on a one-time scheduled task whose moment passed while SipAI was closed, too long ago to catch up")
+            case .upcoming, .due:
+                break
+            }
         }
         return String(localized: "Active",
                       comment: "Sidebar tag on a scheduled task that will fire")
@@ -1211,12 +1253,14 @@ struct AgentSessionsSection: View {
             inlineRenameRow(
                 icon: sessionIcon(for: session),
                 text: $sessionNameDraft,
-                leadingPad: nested ? 36 : 8,
+                leadingPad: nested ? Self.nestedRunLeading : 8,
                 onCommit: { commitSessionRename(session) },
                 onCancel: cancelInlineRename
             )
         } else {
             let selected = appState.openAgentSessionId == session.id
+            let active = isActive(.regular(session))
+            let unread = isUnread(.regular(session))
             HStack(spacing: 0) {
                 Button {
                     appState.openAgentSessionId = session.id
@@ -1229,7 +1273,8 @@ struct AgentSessionsSection: View {
                     HStack(spacing: 6) {
                         leadingGlyph(icon: sessionIcon(for: session),
                                      size: 10,
-                                     active: isRunning(session.id))
+                                     active: active,
+                                     unread: unread)
                         Text(displayName(for: session, nested: nested))
                             .font(.system(size: SipFont.sidebarRow(fontScale)))
                             .lineLimit(1)
@@ -1247,7 +1292,7 @@ struct AgentSessionsSection: View {
                         // which lives in the composer and not here. It
                         // returns when the turn ends. Same rule in the
                         // chat list, for the same reason.
-                        if !isRunning(session.id) {
+                        if !active {
                             // The same value the row is SORTED by
                             // (`AgentListItem.activityDate`) — printing
                             // mtime here while ordering on something else
@@ -1258,7 +1303,7 @@ struct AgentSessionsSection: View {
                                 .foregroundStyle(.tertiary)
                         }
                     }
-                    .padding(.leading, nested ? 36 : 8)
+                    .padding(.leading, nested ? Self.nestedRunLeading : 8)
                     .padding(.trailing, 2)
                     .padding(.vertical, 4)
                     .contentShape(Rectangle())
@@ -1291,10 +1336,26 @@ struct AgentSessionsSection: View {
                                  leadingPad: CGFloat,
                                  onCommit: @escaping () -> Void,
                                  onCancel: @escaping () -> Void) -> some View {
-        HStack(spacing: 6) {
+        inlineRenameRow(text: text, leadingPad: leadingPad,
+                        onCommit: onCommit, onCancel: onCancel) {
             Image(systemName: icon)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    /// The same, with a glyph of the caller's own — a task keeps its
+    /// fold bars while its name is being edited, rather than dropping
+    /// to a bare clock for the length of the edit.
+    private func inlineRenameRow<Leading: View>(
+        text: Binding<String>,
+        leadingPad: CGFloat,
+        onCommit: @escaping () -> Void,
+        onCancel: @escaping () -> Void,
+        @ViewBuilder leading: () -> Leading
+    ) -> some View {
+        HStack(spacing: 6) {
+            leading()
                 .frame(width: 14)
             TextField("", text: text)
                 .textFieldStyle(.plain)
@@ -1375,8 +1436,10 @@ struct AgentSessionsSection: View {
 
     /// The row's leading glyph. While the session is streaming, the
     /// pulsing dot REPLACES the origin icon rather than trailing the
-    /// title; the icon returns the moment the run finishes. Both states
-    /// share one fixed frame so the title never shifts when they swap.
+    /// title; when the run finishes, the steady dot takes its place
+    /// until the session is opened (`unread`), and then the icon comes
+    /// back. All three states share one fixed frame so the title never
+    /// shifts when they swap.
     ///
     /// The frame is fixed in BOTH axes and the swap is explicitly
     /// unanimated. The glyphs have very different intrinsic sizes — the
@@ -1390,10 +1453,12 @@ struct AgentSessionsSection: View {
     /// title (pinned to the frame, not the glyph) stays put.
     @ViewBuilder
     private func leadingGlyph(icon: String, size: CGFloat,
-                              active: Bool) -> some View {
+                              active: Bool, unread: Bool) -> some View {
         Group {
             if active {
                 ActivityDot()
+            } else if unread {
+                UnreadDot()
             } else {
                 Image(systemName: icon)
                     .font(.system(size: size))
@@ -1404,10 +1469,11 @@ struct AgentSessionsSection: View {
         // No enclosing transaction may animate one glyph into the
         // other: this is a state swap, not a movement.
         .animation(nil, value: active)
+        .animation(nil, value: unread)
     }
 
-    /// Rename / Delete — the ⋮ and right-click menu. No group filing
-    /// here: a session's place is where it ran, not something to move.
+    /// Rename / Add to group / Copy session ID / Delete — the ⋮ and
+    /// right-click menu.
     @ViewBuilder
     private func sessionMenuItems(for session: AgentSession,
                                   nested: Bool) -> some View {
@@ -1419,6 +1485,15 @@ struct AgentSessionsSection: View {
             Text("Rename", comment: "Session row menu item — edits in place")
         }
         groupSubmenu(for: .regular(session))
+        // The agent's OWN id for this session — what `claude --resume`,
+        // `codex resume` and `kimi --session` take — as plain text. The
+        // agent composer draws it on a grey token wherever it is pasted.
+        Button {
+            SessionIdTokens.copy(session.id)
+        } label: {
+            Text("Copy session ID",
+                 comment: "Session row menu item — copies the agent's own id for this session")
+        }
         Divider()
         Button(role: .destructive) {
             deletingSession = session
@@ -1427,8 +1502,8 @@ struct AgentSessionsSection: View {
         }
     }
 
-    /// "Add to Group" submenu — the assignment half of custom grouping.
-    /// Its "New Group…" goes through `commitGroupPrompt`'s
+    /// "Add to group" submenu — the assignment half of custom grouping.
+    /// Its "New group…" goes through `commitGroupPrompt`'s
     /// create-and-file path (see GroupPrompt.create's comment): a group
     /// created from a row without filing the row into it would be an
     /// invisible empty group, and the row would stay Ungrouped.
@@ -1440,7 +1515,7 @@ struct AgentSessionsSection: View {
     /// grouped — filing starts at the section header's Custom mode
     /// instead. Routing: this menu's per-group rows are
     /// `assignToGroup`'s only caller, and the section header's own
-    /// "New Group…" lands in `commitGroupPrompt` with no row to file;
+    /// "New group…" lands in `commitGroupPrompt` with no row to file;
     /// both filing paths still flip the mode to Custom when it isn't,
     /// so an assignment can never appear to do nothing.
     @ViewBuilder
@@ -1463,7 +1538,7 @@ struct AgentSessionsSection: View {
                 Button {
                     promptForGroup(.create(item))
                 } label: {
-                    Text("New Group…",
+                    Text("New group…",
                          comment: "Group submenu item — create a group and file this row into it")
                 }
                 if current != nil {
@@ -1471,12 +1546,12 @@ struct AgentSessionsSection: View {
                     Button {
                         config.setAgentSessionGroup(nil, for: item.groupItemKey)
                     } label: {
-                        Text("Remove from Group",
+                        Text("Remove from group",
                              comment: "Group submenu item — un-file this row")
                     }
                 }
             } label: {
-                Text("Add to Group",
+                Text("Add to group",
                      comment: "Session/task row submenu for custom grouping")
             }
         }
@@ -1569,69 +1644,86 @@ struct AgentSessionsSection: View {
 
     // MARK: - Scheduled task actions (⋮ / right-click)
 
-    /// Open a task in the centre pane: its key-information panel, and
-    /// beneath it the newest run rendered like any other session. A task
-    /// that has never run opens with the panel alone.
-    private func openTask(_ task: ScheduledAgentTask) {
-        // Did this click change what the centre pane shows? Answered
-        // BEFORE the routing fields are written, and used below to decide
-        // whether the click also means "fold this away".
-        let selectionUnchanged = appState.openScheduledTaskName == task.name
-            && appState.openAgentSessionId == task.sessions.first?.id
-        if let newest = task.sessions.first {
-            appState.openAgentSessionId = newest.id
-            appState.openAgentSessionPath = newest.fileURL
-        } else {
-            appState.openAgentSessionId = nil
-            appState.openAgentSessionPath = nil
-        }
-        // Clearing the routing fields above does NOT dismiss an unsent
-        // draft: their `didSet` hooks bail on nil, so only assigning a
-        // NON-nil value pushes the other routes aside. Opening a
-        // never-run task while a draft was pending therefore left the
-        // draft in place, and the centre pane rendered the new-session
-        // hero and its composer with the task's banner on top — exactly
-        // the "page that looks like a new session" symptom.
-        appState.pendingClaudeSessionDraft = nil
-        appState.openScheduledTaskName = task.name
-
-        // The row folds on click like every other expandable row in this
-        // sidebar — the chevron is a shortcut, not the only way in.
-        //
-        // It only COLLAPSES on a click that changed nothing, i.e. a
-        // second click on what is already showing. A click that brings
-        // something new into the centre pane — another task, or this
-        // task's newest run while an older run was open — must not
-        // answer by hiding the runs the user just asked to see.
-        var opened = expandedScheduledTasks
-        if opened.contains(task.id) {
-            if selectionUnchanged { opened.remove(task.id) }
-        } else {
-            opened.insert(task.id)
-        }
+    /// A click on a task's row. On a FOLDED task it shows the runs and
+    /// opens the task's page — its settings, the page a task has before
+    /// its first run — whether or not it has run since. On an UNFOLDED
+    /// task it hides the runs and does nothing else: the centre pane
+    /// stays where it is, so a click meant to fold a task away never
+    /// takes the pane somewhere else.
+    ///
+    /// It never opens a run — a run is opened from its own row — so it
+    /// reads nothing: each run's steady dot goes when that run is opened,
+    /// and the task's row keeps its dot while any of its runs is
+    /// unopened.
+    private func toggleTask(_ task: ScheduledAgentTask) {
+        let unfolding = !expandedScheduledTasks.contains(task.id)
         withAnimation(.easeInOut(duration: 0.16)) {
-            expandedScheduledTasks = opened
+            if unfolding {
+                expandedScheduledTasks.insert(task.id)
+            } else {
+                expandedScheduledTasks.remove(task.id)
+            }
+        }
+        if unfolding {
+            openTaskPage(task)
         }
     }
 
+    /// The centre pane shows the task's page: its settings, with no run
+    /// under them.
+    private func openTaskPage(_ task: ScheduledAgentTask) {
+        appState.openAgentSessionId = nil
+        appState.openAgentSessionPath = nil
+        // Clearing the routing fields above does NOT dismiss an unsent
+        // draft, an open note or an open chat: their `didSet` hooks bail
+        // on nil, so only assigning a NON-nil value pushes the other
+        // routes aside, and this field has no `didSet` of its own. A
+        // pending draft left in place drew the new-session hero and its
+        // composer with the task's banner on top; an open note is drawn
+        // ahead of any task (`ContentView.centerPane`), so the page never
+        // appeared at all. A chat is drawn BEHIND a task, so the page
+        // did appear over one — but the chat stayed open underneath: its
+        // sidebar row stayed selected beside the task's, and a reply
+        // landing in it left no steady dot, since `ChatManager` never
+        // marks the open chat.
+        appState.pendingClaudeSessionDraft = nil
+        appState.openNoteId = nil
+        appState.openChatSlug = nil
+        appState.openChatProject = nil
+        appState.openScheduledTaskName = task.name
+    }
+
     /// Rename (rewrites the SKILL.md description Claude Desktop and the
-    /// CLI both read) and Delete (definition + schedule; run sessions
-    /// are kept).
+    /// CLI both read), Delete definition (the definition and its schedule;
+    /// the runs are kept) and Delete all (the definition and every run).
+    /// A task whose definition is gone — its runs are all it is — offers
+    /// neither of the first two, which would have nothing to act on.
     @ViewBuilder
     private func taskMenuItems(for task: ScheduledAgentTask) -> some View {
-        Button {
-            taskNameDraft = task.description
-            renamingSessionId = nil
-            renamingTaskId = task.id
-        } label: {
-            Text("Rename", comment: "Scheduled task row menu item — edits in place")
+        if task.definition != nil {
+            Button {
+                taskNameDraft = task.description
+                renamingSessionId = nil
+                renamingTaskId = task.id
+            } label: {
+                Text("Rename", comment: "Scheduled task row menu item — edits in place")
+            }
         }
         groupSubmenu(for: .scheduled(task))
         Divider()
+        if task.definition != nil {
+            Button(role: .destructive) {
+                deletingTask = task
+            } label: {
+                Text("Delete definition",
+                     comment: "Scheduled task row menu item — deletes the task's definition and keeps its runs")
+            }
+        }
         Button(role: .destructive) {
-            deletingTask = task
+            deletingTaskAndRuns = task
         } label: {
-            Text("Delete", comment: "Scheduled task row menu item")
+            Text("Delete all",
+                 comment: "Scheduled task row menu item — deletes the task's definition and every run session it made")
         }
     }
 
@@ -1674,6 +1766,47 @@ struct AgentSessionsSection: View {
                                             directory: task.directoryURL)
             await MainActor.run { agents.reloadSessions() }
         }
+    }
+
+    /// What Delete all's confirmation says will go. A task whose
+    /// definition is already gone does not "stop running" — only its
+    /// runs are left to remove.
+    private func deleteAllMessage(for task: ScheduledAgentTask) -> String {
+        if task.definition != nil {
+            return String(localized: "“\(task.description)” stops running, its definition is removed, and every run it made is removed for every app that reads them — SipAI, the CLI, and the desktop app. This cannot be undone.",
+                          comment: "Body of the scheduled-task Delete all confirmation")
+        }
+        return String(localized: "“\(task.description)” and every run it made are removed for every app that reads them — SipAI, the CLI, and the desktop app. This cannot be undone.",
+                      comment: "Body of the Delete all confirmation for a scheduled task whose definition is already gone")
+    }
+
+    /// "Delete all": the definition and every run the task made — the
+    /// task leaves the sidebar with them.
+    private func deleteTaskAndRuns(_ task: ScheduledAgentTask) {
+        deletingTaskAndRuns = nil
+        // The alert held the task as it stood when the menu opened; a
+        // run that started and got its id since is only on the
+        // manager's copy, and must go with the rest.
+        let task = agents.scheduledTasks.first { $0.id == task.id } ?? task
+        // Nothing of the task is left to show: its page, or any run.
+        if let openId = appState.openAgentSessionId,
+           task.sessions.contains(where: { $0.id == openId }) {
+            appState.openAgentSessionId = nil
+            appState.openAgentSessionPath = nil
+        }
+        if appState.openScheduledTaskName == task.name {
+            appState.openScheduledTaskName = nil
+        }
+        // A task made again under this name starts folded.
+        expandedScheduledTasks.remove(task.id)
+        // Read before `forget` drops it: a run fired a moment ago has no
+        // session id yet, so only the scheduler can name it.
+        let startingRun = scheduler.inFlight[task.name]
+        // The scheduler's record goes, as for Delete definition, and so
+        // does its watch on a run in flight — which is stopped below and
+        // must not write a record back for a task that is gone.
+        scheduler.forget(taskName: task.name)
+        agents.deleteScheduledTaskAndRuns(task, startingRun: startingRun)
     }
 
     // MARK: - Group name prompt
@@ -1748,6 +1881,61 @@ struct AgentSessionsSection: View {
             || agents.externalInFlightSessions.contains(sessionId)
     }
 
+    /// Whether a row is running right now — the one test behind every
+    /// activity dot in this section: a session row's leading glyph, a
+    /// task row's dots after its name, a FOLDED group's header, and the
+    /// COLLAPSED section's header (`sectionLive`), each answering for the
+    /// rows it stands for. One spelling, so a header can never say a
+    /// group is idle while a row inside it pulses, or the reverse.
+    ///
+    /// A task counts while it has a run in flight AND while the
+    /// scheduler is firing one: `scheduler.isRunning` covers the window
+    /// a scheduled run spends as a fresh draft, with no session id until
+    /// claude's first system.init lands, so a per-session check alone
+    /// leaves the row inert for the first seconds of every run it fires.
+    private func isActive(_ item: AgentListItem) -> Bool {
+        switch item {
+        case .regular(let session):
+            return isRunning(session.id)
+        case .scheduled(let task):
+            return scheduler.isRunning(task.name)
+                || task.sessions.contains { isRunning($0.id) }
+        }
+    }
+
+    /// Whether a row finished a run nobody has opened since — the one
+    /// test behind every STEADY dot in this section: a session row's
+    /// glyph, a task row's dots, a folded group's header, the collapsed
+    /// section's header. A task counts while any of its runs does. What
+    /// is true NOW: it never reads the place an open row is held at
+    /// (`tier`).
+    private func isUnread(_ item: AgentListItem) -> Bool {
+        switch item {
+        case .regular(let session):
+            return agents.isSessionUnread(session.id)
+        case .scheduled(let task):
+            return task.sessions.contains { agents.isSessionUnread($0.id) }
+        }
+    }
+
+    /// Where a row is PLACED — running, unread, or the rest (see
+    /// `SidebarTier`), with the open row held at its best tier since it
+    /// was opened. Running is `isActive`, the test every pulse reads, so
+    /// a row is never placed as running without pulsing — a task while
+    /// the scheduler fires it included; otherwise a task stands with its
+    /// best run.
+    private func tier(_ item: AgentListItem) -> SidebarTier {
+        if isActive(item) { return .running }
+        switch item {
+        case .regular(let session):
+            return agents.sidebarTier(forSession: session.id)
+        case .scheduled(let task):
+            return task.sessions
+                .map { agents.sidebarTier(forSession: $0.id) }
+                .min() ?? .rest
+        }
+    }
+
     private func isAwaitingApproval(_ sessionId: String) -> Bool {
         mcpBridge.pending.contains(where: { $0.sessionId == sessionId })
     }
@@ -1755,6 +1943,11 @@ struct AgentSessionsSection: View {
     /// Which state bucket a row belongs in. Reads the same signals the row
     /// itself renders, so a row with an approval badge lands under "Waiting
     /// for approval" and one with an activity dot under "Working".
+    ///
+    /// "Unread" asks the PLACED tier, so an unread session opened a moment
+    /// ago stays under it until the user moves on, as it does in every
+    /// other mode. The running groups ask what is true now: a group
+    /// called "Working" makes a claim about the row.
     private func groupState(for item: AgentListItem) -> AgentGroupState {
         switch item {
         case .regular(let session):
@@ -1763,6 +1956,9 @@ struct AgentSessionsSection: View {
             if agents.externalInFlightSessions.contains(session.id) {
                 return .runningElsewhere
             }
+            if agents.sidebarTier(forSession: session.id) == .unread {
+                return .unread
+            }
             return .idle
         case .scheduled(let task):
             if task.sessions.contains(where: { isAwaitingApproval($0.id) }) {
@@ -1770,6 +1966,11 @@ struct AgentSessionsSection: View {
             }
             if task.sessions.contains(where: { isRunning($0.id) }) {
                 return .working
+            }
+            if task.sessions.contains(where: {
+                agents.sidebarTier(forSession: $0.id) == .unread
+            }) {
+                return .unread
             }
             return .scheduled
         }
@@ -1788,5 +1989,148 @@ private struct ApprovalBadge: View {
             .accessibilityLabel(String(
                 localized: "Session is waiting for approval",
                 comment: "Accessibility label for the sidebar approval badge"))
+    }
+}
+
+/// The title line of a session-group header: the fold chevron, the
+/// group's name, the dim parent folder in Folder mode, the dots while
+/// the group is FOLDED over a running or an unopened row, and the row
+/// count at the trailing edge.
+///
+/// The dots are a sibling AFTER the text, never part of it, and the text
+/// is the only thing on the line that gives way. Group names run long —
+/// a folder's, or whatever the user typed — so the text truncates, and
+/// the dots land right after whatever "…" that leaves. They are
+/// `fixedSize`, so the stack gives them their width before the text is
+/// offered anything; the count is `fixedSize` too, so its digits never
+/// wrap or clip to make room. Laid out as part of the text instead, the
+/// dots would be the first thing cut off, on exactly the long names that
+/// hide the most rows.
+///
+/// Two things keep the dot ON the "…", both measured:
+///
+/// * The name and the parent folder are ONE run of text (`title`), so
+///   there is one truncation and one "…". As two views, a long name
+///   left the parent folder a sliver narrower than its own ellipsis:
+///   it drew a stray "…" or half a glyph, or collapsed and left a
+///   double gap before the dot.
+/// * The run truncates at the TAIL, like every other row in the
+///   sidebar. SwiftUI's `.middle` truncation is not stable: text
+///   measured at one width is drawn re-truncated, up to a glyph or two
+///   narrower (247 pt at its own width, 237 when drawn), and the
+///   difference is left as empty space inside the text's frame —
+///   between the name and the dot. `.tail` measures the same at its
+///   own width every time.
+///
+/// A type of its own, taking plain values, so the layout can be
+/// rendered headless (`Verification/SidebarGroupActivity`).
+struct AgentGroupHeaderLabel: View {
+    let label: String
+    /// The parent folder's name in Folder mode; empty elsewhere.
+    let detail: String
+    let count: Int
+    let folded: Bool
+    /// A row in the group is running. Drawn only while folded: an open
+    /// group's running row carries its own dot.
+    let live: Bool
+    /// A row in the group finished and has not been opened since: the
+    /// steady dot, while folded — right after the pulse when a row is
+    /// running too (`GroupActivityDots`).
+    var unread: Bool = false
+    let titleSize: CGFloat
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: folded ? "chevron.right" : "chevron.down")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 8)
+            title
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if folded && (live || unread) {
+                GroupActivityDots(live: live, unread: unread)
+            }
+            Spacer(minLength: 4)
+            Text("\(count)")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .monospacedDigit()
+                .fixedSize()
+        }
+    }
+
+    /// The name, then — in Folder mode — the parent folder, smaller and
+    /// dimmer. The name comes first, so the parent folder is what the
+    /// truncation takes first.
+    private var title: Text {
+        let name = Text(label)
+            .font(.system(size: titleSize, weight: .semibold))
+            .foregroundStyle(.secondary)
+        guard !detail.isEmpty else { return name }
+        return name
+            + Text(verbatim: " ")
+                .font(.system(size: titleSize, weight: .semibold))
+            + Text(detail)
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+    }
+}
+
+/// A scheduled task's glyph, and its fold state: the task's clock
+/// between two short bars. The bars lie above and below the clock while
+/// the task is folded, and turn a quarter turn with the fold — to its
+/// left and right — while its runs are showing. One glyph says both what
+/// the row is and whether it is open; a separate chevron would say the
+/// second at the price of a second glyph of indent for every run under
+/// the task. The fold itself is the whole row's click.
+///
+/// It says nothing about the runs: the clock stays the clock while a run
+/// goes or sits unopened, and the row draws those dots after the task's
+/// name (`GroupActivityDots`), where there is room for both at once — a
+/// dot swapped in for the clock could only ever be one of the two.
+///
+/// Laid out in the row's usual 14 pt slot, so the title keeps every
+/// other row's column and the row is no taller than any other. The
+/// drawing is 16 pt square about the same centre, which puts the bars
+/// just outside the slot and every edge on a whole point in both
+/// positions: 1 pt bars, 16 − 8 even. At 1x each bar is one crisp row
+/// (or column) of pixels; a thicker or off-grid bar is not a heavier line
+/// but a fainter one, and lopsided once turned.
+///
+/// A type of its own, taking plain values, so it can be rendered
+/// headless (`Verification/SidebarGroupActivity`).
+struct ScheduledTaskGlyph: View {
+    /// The task's runs are showing.
+    let expanded: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        ZStack {
+            Image(systemName: "timer")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            bars
+                .rotationEffect(.degrees(expanded ? 90 : 0))
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.16),
+                           value: expanded)
+        }
+        .frame(width: 16, height: 16)
+        .frame(width: 14, height: 14)
+    }
+
+    private var bars: some View {
+        VStack(spacing: 0) {
+            bar
+            Spacer(minLength: 0)
+            bar
+        }
+        .frame(width: 16, height: 16)
+        .foregroundStyle(.secondary)
+    }
+
+    private var bar: some View {
+        RoundedRectangle(cornerRadius: 0.5)
+            .frame(width: 8, height: 1)
     }
 }

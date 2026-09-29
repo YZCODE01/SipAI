@@ -20,18 +20,40 @@
 # driver is what ships, so a test that bypassed it would not be testing
 # the shipping path.
 #
+# SIPAI_E2E_HOLD=<seconds> drives the HOLD as well: the staged app is
+# told (SIPAI_UPDATER_SIMULATE_TURN, honoured only under the harness
+# override) that an agent turn is running for that long after the
+# click, so Sparkle's "Install and Relaunch" has to be answered with a
+# sheet — click "Wait for the Turn" — and the install must land no
+# earlier than the pretend turn's end. Two clicks; the app's stderr
+# lines time it, since the click and the sheet are invisible from here.
+#
 # Nothing here touches the real feed, the real releases, or the repo.
-# Everything lives in a temp directory that is removed on exit. It does
-# launch a real SipAI, which reads your real
-# ~/Library/Application Support/SipAI — it only ever reads config and
-# writes Sparkle's own preferences, but that is worth knowing before
-# you run it.
+# Everything lives in a temp directory that is removed on exit. But the
+# install step LAUNCHES a real SipAI, and it runs on your real data
+# folder, ~/Library/Application Support/SipAI (Foundation ignores $HOME
+# for it — measured): it reads and may write config, its scheduler ticks
+# at once and can fire a task that is due, and its first agent turn
+# would take over the approver socket of any SipAI you have open. Quit
+# SipAI and run this from Terminal. SIPAI_E2E_DRY_RUN=1 launches nothing.
+#
+# SIPAI_SPARKLE_DERIVED_DATA=<dir> builds in a DerivedData of its own,
+# with packages from SIPAI_SPARKLE_PACKAGES (default <dir>-src) and no
+# package resolution — needed when this runs from inside the Xcode build,
+# whose DerivedData (and Xcode's own resolution) must not be raced.
 
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"          # SipAI-macOS
 PROJECT="$ROOT/SipAI.xcodeproj"
+
+DD="${SIPAI_SPARKLE_DERIVED_DATA:-}"
+PKGS="${SIPAI_SPARKLE_PACKAGES:-${DD:+$DD-src}}"
+XCB_LOCATION=()
+[ -n "$DD" ] && XCB_LOCATION=(-derivedDataPath "$DD" -clonedSourcePackagesDirPath "$PKGS" -disableAutomaticPackageResolution)
+# Each xcodebuild spells it ${XCB_LOCATION[@]+"${XCB_LOCATION[@]}"}:
+# /bin/bash 3.2 calls an EMPTY array unbound under `set -u`.
 STAGE="$(mktemp -d)"
 FEED="$STAGE/feed"
 APPS="$STAGE/Applications"
@@ -58,8 +80,12 @@ bad()  { echo "  FAIL  $1"; echo "        → $2"; exit 1; }
 
 mkdir -p "$FEED" "$APPS"
 
-TOOLS="$(find ~/Library/Developer/Xcode/DerivedData/SipAI-*/SourcePackages/artifacts/sparkle/Sparkle/bin \
-          -name sign_update 2>/dev/null | head -1)"
+if [ -n "$DD" ]; then
+    TOOLS="$(find "$PKGS/artifacts/sparkle/Sparkle/bin" -name sign_update 2>/dev/null | head -1)"
+else
+    TOOLS="$(find ~/Library/Developer/Xcode/DerivedData/SipAI-*/SourcePackages/artifacts/sparkle/Sparkle/bin \
+              -name sign_update 2>/dev/null | head -1)"
+fi
 TOOLS="$(dirname "$TOOLS" 2>/dev/null)"
 [ -x "$TOOLS/sign_update" ] || bad "Sparkle tools present" \
     "run: xcodebuild -project SipAI.xcodeproj -scheme SipAI -resolvePackageDependencies"
@@ -108,6 +134,7 @@ say
 # ------------------------------------------------------------------ 1
 say "1. Building $OLD_VERSION (the copy that will update itself)"
 xcodebuild -project "$PROJECT" -scheme SipAI -configuration Debug \
+    ${XCB_LOCATION[@]+"${XCB_LOCATION[@]}"} \
     MARKETING_VERSION="$OLD_VERSION" CURRENT_PROJECT_VERSION="$OLD_BUILD" \
     CONFIGURATION_BUILD_DIR="$STAGE/build-old" \
     build > "$STAGE/build-old.log" 2>&1 \
@@ -144,6 +171,7 @@ say
 # ------------------------------------------------------------------ 2
 say "2. Building $NEW_VERSION (the update)"
 xcodebuild -project "$PROJECT" -scheme SipAI -configuration Debug \
+    ${XCB_LOCATION[@]+"${XCB_LOCATION[@]}"} \
     MARKETING_VERSION="$NEW_VERSION" CURRENT_PROJECT_VERSION="$NEW_BUILD" \
     CONFIGURATION_BUILD_DIR="$STAGE/build-new" \
     build > "$STAGE/build-new.log" 2>&1 \
@@ -249,8 +277,21 @@ say "   │   is launched here with no session open.)                  │"
 say "   └────────────────────────────────────────────────────────────┘"
 say
 
+HOLD="${SIPAI_E2E_HOLD:-}"
+if [ -n "$HOLD" ]; then
+    say "   ┌────────────────────────────────────────────────────────────┐"
+    say "   │  HOLD RUN: a pretend agent turn runs for ${HOLD}s after the   │"
+    say "   │  click. Click  Install and Relaunch, then, in the sheet,    │"
+    say "   │  Wait for the Turn.  The install must land only after the  │"
+    say "   │  pretend turn ends. Meanwhile the sidebar says it will     │"
+    say "   │  install for 5 s, and the Settings badge + Install Now stay.│"
+    say "   └────────────────────────────────────────────────────────────┘"
+    say
+fi
+
 SIPAI_UPDATER_FORCE_ENABLED=1 \
 SIPAI_UPDATER_FEED_URL="http://127.0.0.1:$PORT/appcast.xml" \
+SIPAI_UPDATER_SIMULATE_TURN="$HOLD" \
 no_proxy="127.0.0.1,localhost" \
 NO_PROXY="127.0.0.1,localhost" \
     "$APPS/SipAI.app/Contents/MacOS/SipAI" > "$STAGE/app.log" 2>&1 &
@@ -269,13 +310,61 @@ say "   waiting up to 240s for the bundle on disk to become $NEW_VERSION…"
 
 DEADLINE=$(( $(date +%s) + 240 ))
 INSTALLED=""
+ASK_AT=""          # epoch second of the click — the pretend turn runs from here
+HOLD_BEGAN=""      # epoch second the app reported the hold beginning (Wait clicked)
+LANDED_AT=""
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+    if [ -n "$HOLD" ] && [ -z "$ASK_AT" ] \
+       && grep -q "SIPAI_UPDATER: asking" "$STAGE/app.log" 2>/dev/null; then
+        ASK_AT="$(date +%s)"
+        say "   Install and Relaunch was clicked; the sheet is up — click Wait for the Turn"
+    fi
+    if [ -n "$HOLD" ] && [ -z "$HOLD_BEGAN" ] \
+       && grep -q "SIPAI_UPDATER: hold began" "$STAGE/app.log" 2>/dev/null; then
+        HOLD_BEGAN="$(date +%s)"
+        say "   hold began (the app said so) — waiting for the pretend turn to end"
+    fi
     V="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" \
          "$APPS/SipAI.app/Contents/Info.plist" 2>/dev/null)"
-    if [ "$V" = "$NEW_VERSION" ]; then INSTALLED=yes; break; fi
-    /usr/bin/perl -e 'select(undef,undef,undef,2)'
+    if [ "$V" = "$NEW_VERSION" ]; then INSTALLED=yes; LANDED_AT="$(date +%s)"; break; fi
+    /usr/bin/perl -e 'select(undef,undef,undef,1)'
 done
 say
+
+if [ -n "$HOLD" ]; then
+    # The hold's own evidence, from the lines the controller writes ONLY
+    # under the harness override.
+    if [ -n "$HOLD_BEGAN" ]; then
+        ok "the app reported the hold beginning (the sheet was answered with Wait)"
+    else
+        bad "the app reported the hold beginning" \
+            "no 'SIPAI_UPDATER: hold began' in $STAGE/app.log — was the sheet shown, and was Wait clicked? (Interrupt is the other run.)"
+    fi
+    if grep -q "hid Sparkle's status window: true" "$STAGE/app.log"; then
+        ok "Sparkle's inert 'Ready to Install' window was hidden for the hold"
+    else
+        say "  NOTE  the app could not find Sparkle's status window to hide it — the dead button stayed on screen"
+    fi
+    if grep -q "SIPAI_UPDATER: hold ended — invoking install" "$STAGE/app.log"; then
+        ok "the hold ended by invoking Sparkle's install block"
+    else
+        bad "the hold ended by invoking Sparkle's install block" \
+            "no 'hold ended' line in $STAGE/app.log"
+    fi
+    if [ -n "$INSTALLED" ] && [ -n "$ASK_AT" ]; then
+        # The pretend turn is timed from the CLICK, not from "Wait":
+        # its deadline is set when Sparkle first asks. The poll ticks
+        # every 2 s and the log is polled every 1 s, so a landing up
+        # to 3 s before the nominal end is the hold working, not
+        # failing.
+        if [ $(( LANDED_AT - ASK_AT )) -ge $(( HOLD - 3 )) ]; then
+            ok "the install landed only after the pretend turn ended ($(( LANDED_AT - ASK_AT ))s after the click ≥ ${HOLD}s − 3)"
+        else
+            bad "the install landed only after the pretend turn ended" \
+                "landed $(( LANDED_AT - ASK_AT ))s after the click, with a ${HOLD}s pretend turn — the hold did not hold"
+        fi
+    fi
+fi
 
 if [ -n "$INSTALLED" ]; then
     ok "the app on disk is now $NEW_VERSION — the update installed"

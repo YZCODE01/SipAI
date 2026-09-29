@@ -172,6 +172,10 @@ struct NoteWebView: NSViewRepresentable {
     let markdown: String
     let metadata: NoteHTML.Metadata
     let dark: Bool
+    /// The body size of the on-screen document, 14 at the Default tier.
+    /// Part of the HTML, so a tier change reloads the page through the
+    /// same `loadedHTML` comparison a content change does.
+    let bodyPointSize: CGFloat
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -199,7 +203,8 @@ struct NoteWebView: NSViewRepresentable {
         let html = NoteHTML.document(markdown: markdown,
                                      metadata: metadata,
                                      dark: dark,
-                                     forPrint: false)
+                                     forPrint: false,
+                                     bodyPointSize: bodyPointSize)
         guard coordinator.loadedHTML != html else { return }
         coordinator.loadedHTML = html
         guard let staged = try? KaTeXAssets.write(html: html, name: "preview.html") else {

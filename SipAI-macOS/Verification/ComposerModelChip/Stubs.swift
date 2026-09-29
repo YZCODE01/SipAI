@@ -47,9 +47,16 @@ enum FontTier: String { case compact, standard, large }
 enum AgentGroupMode: String { case none, folder, task }
 
 /// `ClaudeCapabilities.ensureLoaded` scrapes `claude --help` through
-/// this. Nothing here starts a process.
+/// this, and `ClaudeModelCatalog` reads the installed binary's baked
+/// catalog off the path it answers. Nothing here starts a process:
+/// main.swift points `claudeBinaryPath` at a fixture-backed throwaway
+/// file for the sections that need "an installed claude", and leaves
+/// it nil for the rest.
 enum AgentManager {
-    nonisolated static func binaryPath(for key: String) -> String? { nil }
+    nonisolated(unsafe) static var claudeBinaryPath: String? = nil
+    nonisolated static func binaryPath(for key: String) -> String? {
+        key == "claude_code" ? claudeBinaryPath : nil
+    }
 }
 
 /// `ClaudeModelCatalog.harvest` reads a session's newest recorded
@@ -89,4 +96,25 @@ enum CodexSessionScanner {
 /// here anyway, so the catalog never reaches it.
 enum CodexModelListRefresh {
     static func run(binary: String) async -> Bool { false }
+    static func answer(binary: String) async -> [String: Any]? { nil }
+}
+
+/// The config write `CodexCatalog.setContextWindow` runs — also a
+/// process spawn, also unreachable here since `binaryPath` is nil.
+enum CodexConfigWrite {
+    enum Outcome: Equatable {
+        case written(version: String?, filePath: String?, overriddenBy: String?)
+        case refused(code: String?, message: String)
+        case unavailable
+    }
+    static func run(binary: String, keyPath: String, value: Int?) async -> Outcome {
+        .unavailable
+    }
+}
+
+/// The folder read `CodexCatalog.refreshSpeedSettings` sends — a spawn
+/// as well, and unreachable for the same reason. The request builder
+/// and the answer's parse are the real ones, in AgentLaunchOptions.swift.
+extension CodexConfigRead {
+    static func run(binary: String, cwd: String) async -> [String: Any]? { nil }
 }

@@ -26,6 +26,15 @@ enum SipaiPaths {
     static var generalSystemPromptFile: URL { dataDir.appendingPathComponent("system_prompt.txt") }
     static var notesDir: URL { dataDir.appendingPathComponent("notes", isDirectory: true) }
 
+    /// The Chat only persona as a FILE, for codex's `-c
+    /// model_instructions_file` (which takes a path and refuses `""`).
+    /// Kept here, in SipAI's own data directory — never in codex's
+    /// store — and swept by the factory reset with the rest of it.
+    /// Rewritten only when `ChatOnlyPersona.text` differs from the file.
+    static var chatOnlyInstructionsFile: URL {
+        dataDir.appendingPathComponent("chat-only-instructions.md")
+    }
+
     /// ~/Library/Application Support/SipAI/mcp/ — home for the MCP
     /// approver runtime files (approver.py, config.json, approver.sock).
     /// Kept inside this app's own data directory so nothing else can

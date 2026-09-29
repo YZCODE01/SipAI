@@ -231,14 +231,18 @@ def _extract_tool_call(arguments: dict) -> tuple[str, dict]:
 
 
 def _approve_content(verdict: str, message: str | None, updated_input,
-                     original_input: dict | None = None) -> dict:
+                     original_input: dict | None = None,
+                     updated_permissions=None) -> dict:
     """Build the single-content-block response Claude Code expects.
 
-    Response text is a JSON-stringified ``{behavior, message?, updatedInput?}``.
-    On allow, ``updatedInput`` is always present: either the SipAI-supplied
-    modified input, or the original input Claude Code sent (so the tool
-    call runs with the exact input Claude proposed).  Claude Code rejects
-    an allow response that omits ``updatedInput`` as a validation error.
+    Response text is a JSON-stringified ``{behavior, message?, updatedInput?,
+    updatedPermissions?}``.  On allow, ``updatedInput`` is always present:
+    either the SipAI-supplied modified input, or the original input Claude
+    Code sent (so the tool call runs with the exact input Claude proposed).
+    Claude Code rejects an allow response that omits ``updatedInput`` as a
+    validation error.  ``updatedPermissions`` rides an allow only when SipAI
+    sent one — the plan card's "accept edits" approval, a ``setMode`` that
+    Claude Code applies to the session as it runs the tool.
     """
     body: dict = {"behavior": "allow" if verdict == "allow" else "deny"}
     if body["behavior"] == "deny":
@@ -248,6 +252,8 @@ def _approve_content(verdict: str, message: str | None, updated_input,
             body["updatedInput"] = updated_input
         else:
             body["updatedInput"] = original_input if isinstance(original_input, dict) else {}
+        if isinstance(updated_permissions, list) and updated_permissions:
+            body["updatedPermissions"] = updated_permissions
     return {
         "content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}],
     }
@@ -279,7 +285,9 @@ def _handle_tools_call(req_id, params: dict) -> None:
         verdict = "deny"
     message = resp.get("message") if isinstance(resp, dict) else None
     updated = resp.get("updated_input") if isinstance(resp, dict) else None
-    _result(req_id, _approve_content(verdict, message, updated, original_input=tool_input))
+    permissions = resp.get("updated_permissions") if isinstance(resp, dict) else None
+    _result(req_id, _approve_content(verdict, message, updated, original_input=tool_input,
+                                     updated_permissions=permissions))
 
 
 # ── Dispatch loop ─────────────────────────────────────────────────────────

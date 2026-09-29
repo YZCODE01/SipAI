@@ -13,7 +13,9 @@
 // messages carry either: the grey block already draws their bounds, so
 // the affordances have an edge to sit on and a hover tint has something
 // to tint. This view is shared by ChatView and the agent transcript, so
-// both get it from one place.
+// both get it from one place. While the pointer is over a code block
+// inside the message, the block's own Copy and Save take that corner
+// instead (`CodeBlockHoverPreference`).
 
 import AppKit
 import SwiftUI
@@ -21,7 +23,16 @@ import SwiftUI
 struct MessageBubble: View {
     @EnvironmentObject var config: ConfigManager
     @Environment(\.sipFontScale) private var fontScale
+    @Environment(\.sipLineSpacingFactor) private var lineSpacingFactor
     let message: ChatMessage
+
+    /// Label-to-content spacing and the user block's vertical inset
+    /// follow the transcript's gap rule, like every gap in the
+    /// renderer below them — see `SipFont.transcriptGapScale`.
+    private var gapScale: CGFloat {
+        SipFont.transcriptGapScale(fontScale: fontScale,
+                                   lineSpacingFactor: lineSpacingFactor)
+    }
 
     /// Pointer is inside this message's block.
     @State private var hovering = false
@@ -29,6 +40,10 @@ struct MessageBubble: View {
     /// click has an answer. Reverts on a timer rather than on hover-out:
     /// the confirmation should be visible without moving the mouse.
     @State private var copied = false
+    /// The pointer is over a code block inside this message. Its own
+    /// buttons then give way to the block's, which sit in the same corner
+    /// whenever the message ends in a code block.
+    @State private var codeBlockHovered = false
 
     /// Optional override for the assistant-side label. When nil (chat use),
     /// falls back to `config.display.aiLabel`. Pass a non-nil value from
@@ -64,8 +79,11 @@ struct MessageBubble: View {
     var body: some View {
         if isUser {
             userContent
+                .onPreferenceChange(CodeBlockHoverPreference.self) { inside in
+                    codeBlockHovered = inside
+                }
                 .padding(.horizontal, 12)
-                .padding(.vertical, 8)
+                .padding(.vertical, 8 * gapScale)
                 // Hover tint goes in the BACKGROUND layer, stacked on the
                 // block fill. Drawn as an overlay it would sit on top of
                 // the text and wash it out.
@@ -86,6 +104,7 @@ struct MessageBubble: View {
                     if !inside { copied = false }
                 }
                 .animation(.easeOut(duration: 0.12), value: hovering)
+                .animation(.easeOut(duration: 0.12), value: codeBlockHovered)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             assistantContent
@@ -100,20 +119,19 @@ struct MessageBubble: View {
     /// last line only when that line runs the full width.
     @ViewBuilder
     private var hoverActions: some View {
-        if hovering {
+        if hovering && !codeBlockHovered {
             HStack(spacing: 4) {
                 if let onEdit {
                     // Left of copy: branching is the bigger act.
-                    iconButton(
+                    CornerIconButton(
                         systemName: "square.and.pencil",
-                        tinted: false,
                         hint: editHint ?? String(
                             localized: "Create a new branch from here",
                             comment: "Default tooltip for the branch-from-here pencil on a sent message"),
                         action: onEdit
                     )
                 }
-                iconButton(
+                CornerIconButton(
                     systemName: copied ? "checkmark" : "doc.on.doc",
                     tinted: copied,
                     hint: String(localized: "Copy this message",
@@ -124,30 +142,6 @@ struct MessageBubble: View {
             .padding(6)
             .transition(.opacity)
         }
-    }
-
-    private func iconButton(systemName: String,
-                            tinted: Bool,
-                            hint: String,
-                            action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(tinted ? SipDesign.blue : ChatDesign.textSecondary)
-                .frame(width: 22, height: 20)
-                .background(
-                    RoundedRectangle(cornerRadius: 5)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 5)
-                        .stroke(SipDesign.borderLight, lineWidth: 1)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 5))
-        }
-        .buttonStyle(.plain)
-        .help(hint)
-        .accessibilityLabel(hint)
     }
 
     private func copyMessage() {
@@ -165,7 +159,7 @@ struct MessageBubble: View {
 
     @ViewBuilder
     private var userContent: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 6 * gapScale) {
             header
             MarkdownRenderer.render(message.content)
         }
@@ -173,7 +167,7 @@ struct MessageBubble: View {
 
     @ViewBuilder
     private var assistantContent: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 6 * gapScale) {
             header
             MarkdownRenderer.render(message.content)
         }
@@ -185,13 +179,16 @@ struct MessageBubble: View {
             Text(labelText)
                 .font(.system(size: 13 * fontScale, weight: .semibold))
                 .foregroundColor(ChatMarkdownStyle.label)
+            // Inside the transcript's content re-scope, at the size
+            // these show at Default: `contentRatio` is 1 there, where a
+            // raw `12 * fontScale` would land on 11 — see `SipFont`.
             if !isUser, let model = message.model {
                 Text(model)
-                    .font(.system(size: 12))
+                    .font(.system(size: 12 * SipFont.contentRatio(fontScale)))
                     .foregroundColor(ChatDesign.textSecondary)
                 if let t = message.time {
                     Text(String(format: "· %.1fs", t))
-                        .font(.system(size: 12))
+                        .font(.system(size: 12 * SipFont.contentRatio(fontScale)))
                         .foregroundColor(ChatDesign.textHint)
                 }
             }
@@ -200,7 +197,7 @@ struct MessageBubble: View {
                     Image(systemName: "paperclip")
                     Text(f)
                 }
-                .font(.system(size: 12))
+                .font(.system(size: 12 * SipFont.contentRatio(fontScale)))
                 .foregroundColor(ChatDesign.textSecondary)
             }
             Spacer(minLength: 0)
@@ -229,6 +226,7 @@ struct MessageBubble: View {
 struct BranchEditor: View {
     @EnvironmentObject var config: ConfigManager
     @Environment(\.sipFontScale) private var fontScale
+    @Environment(\.sipLineSpacingFactor) private var lineSpacingFactor
 
     @Binding var text: String
     /// The fork is being written / the branch is starting. Both buttons
@@ -252,16 +250,24 @@ struct BranchEditor: View {
                 .font(.system(size: 13 * fontScale, weight: .semibold))
                 .foregroundColor(ChatMarkdownStyle.label)
 
+            // Inside the content re-scope, so `contentRatio`: the box
+            // keeps its 14 pt at Default and scales with the transcript
+            // around it, and its wrapped lines take the transcript's
+            // own spacing so the edit shares the rhythm of the message
+            // it replaces.
             MultilineTextField(
                 text: $text,
                 onSubmit: { if canCreate { onCreate() } },
                 onCancel: onCancel,
                 autoFocus: true,
-                spellChecking: config.display.spellCheck
+                spellChecking: config.display.spellCheck,
+                fontSize: 14 * SipFont.contentRatio(fontScale),
+                lineSpacing: 14 * fontScale * lineSpacingFactor
             )
             // Grows with the message up to a point, then scrolls — a
             // long prompt must not push the buttons off screen.
-            .frame(minHeight: 44, maxHeight: 260)
+            .frame(minHeight: 44 * SipFont.contentRatio(fontScale),
+                   maxHeight: 260 * SipFont.contentRatio(fontScale))
             .background(
                 RoundedRectangle(cornerRadius: 8)
                     .fill(SipDesign.surface)
@@ -273,7 +279,7 @@ struct BranchEditor: View {
 
             HStack(spacing: 8) {
                 Text(explanation)
-                    .font(.system(size: 11))
+                    .font(.system(size: 11 * SipFont.contentRatio(fontScale)))
                     .foregroundColor(ChatDesign.textHint)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
@@ -282,14 +288,14 @@ struct BranchEditor: View {
                 }
                 Button(action: onCancel) {
                     Text("Cancel", comment: "Button that abandons a message edit without branching")
-                        .font(.system(size: 12))
+                        .font(.system(size: 12 * SipFont.contentRatio(fontScale)))
                 }
                 .controlSize(.small)
                 .disabled(busy)
                 Button(action: onCreate) {
                     Text("Create Branch",
                          comment: "Button that forks the conversation from the edited message")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 12 * SipFont.contentRatio(fontScale), weight: .medium))
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)

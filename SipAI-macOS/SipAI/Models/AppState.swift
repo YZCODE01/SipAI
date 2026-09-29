@@ -132,17 +132,18 @@ final class AppState: ObservableObject {
     @Published var openAgentSessionPath: URL? = nil
 
     /// Name of the scheduled task whose key-information panel is showing
-    /// above the transcript, or nil.
+    /// — above a run's transcript, or as the task's whole page — or nil.
     ///
     /// Deliberately NOT mutually exclusive with `openAgentSessionId`:
-    /// opening a task shows the task's newest run *and* its panel, and
-    /// clicking between that task's runs keeps the panel up. The sidebar
-    /// is what clears it — a row that isn't one of the task's runs sets
-    /// it to nil as it opens. The chat / note / draft routes clear it
-    /// too, since those replace the centre pane outright.
+    /// opening a run from under its task shows the run *and* the task's
+    /// panel, and clicking between that task's runs keeps the panel up.
+    /// The sidebar is what clears it — a row that isn't one of the task's
+    /// runs sets it to nil as it opens. The chat / note / draft routes
+    /// clear it too, since those replace the centre pane outright.
     ///
-    /// A task with no runs yet sets this with `openAgentSessionId` nil,
-    /// which is why `ContentView.centerPane` tests for it explicitly.
+    /// The task's own row sets this with `openAgentSessionId` nil — the
+    /// task's page — which is why `ContentView.centerPane` tests for it
+    /// explicitly.
     @Published var openScheduledTaskName: String? = nil
 
     /// Holds a nascent Claude Code session before its first message is
@@ -188,6 +189,34 @@ final class AppState: ObservableObject {
     /// argument because ContentView's router creates the destination
     /// view fresh; there is nothing to hand a parameter to.
     @Published var pendingFindQuery: String? = nil
+
+    /// The Settings section on screen, or nil.
+    ///
+    /// Settings is a LAYER over the routing fields above, never one of
+    /// them: while this is set the sidebar lists the settings sections
+    /// and the centre pane shows this one, and the fields are left
+    /// exactly as they were. Leaving Settings therefore lands on
+    /// whatever was open, and a route that changes meanwhile (a note
+    /// that finished generating, a task's new run) is simply there on
+    /// the way back.
+    ///
+    /// Nothing in the routing fields' `didSet`s clears it. The user
+    /// leaves through the sidebar, or by opening something from outside
+    /// Settings — a search result, a notification — and those call sites
+    /// close it themselves. `startNewChat()` in particular must not: the
+    /// factory reset runs it on its PARTIAL-failure path too, where
+    /// closing Settings would take down the view whose alert is the only
+    /// report of what survived the wipe.
+    @Published var settingsSection: SettingsView.Tab? = nil
+
+    /// Open Settings on `section`, with the sidebar in view: the sections
+    /// and the way back live there, and a deep link (the composer's
+    /// context-chip "?", the chat page's "Learn more") can arrive while
+    /// it is hidden.
+    func openSettings(_ section: SettingsView.Tab) {
+        settingsSection = section
+        if !leftSidebarVisible { leftSidebarVisible = true }
+    }
 
     /// Currently-selected model id (key in config.json `models`).
     @Published var activeModel: String? = nil
@@ -237,6 +266,24 @@ final class AppState: ObservableObject {
         composerDrafts[key] ?? ""
     }
 
+    /// Files staged in an agent composer's Chat only mode, keyed like
+    /// the text and for the same reason: a staged file is the user's
+    /// work and must survive a detour. Same store rules — written on
+    /// every change, empty removes, not `@Published`.
+    private var composerAttachments: [String: [ChatAttachment]] = [:]
+
+    func composerAttachments(for key: String) -> [ChatAttachment] {
+        composerAttachments[key] ?? []
+    }
+
+    func setComposerAttachments(_ attachments: [ChatAttachment], for key: String) {
+        if attachments.isEmpty {
+            composerAttachments.removeValue(forKey: key)
+        } else {
+            composerAttachments[key] = attachments
+        }
+    }
+
     /// Stash (or, for empty text, forget) one identity's unsent message.
     func setComposerDraft(_ text: String, for key: String) {
         if text.isEmpty {
@@ -244,6 +291,25 @@ final class AppState: ObservableObject {
         } else {
             composerDrafts[key] = text
         }
+    }
+
+    /// A conversation moved to a new address: its unsent text goes with
+    /// it, REPLACING whatever the new address held, and nothing stays
+    /// behind. A chat's address is its (group, slug), and both halves
+    /// are reused — the next chat to take the old address must not find
+    /// this one's text waiting there.
+    func moveComposerDraft(from oldKey: String, to newKey: String) {
+        guard oldKey != newKey else { return }
+        setComposerDraft(composerDraft(for: oldKey), for: newKey)
+        setComposerDraft("", for: oldKey)
+    }
+
+    /// A chat group is deleted with every chat in it: their unsent text
+    /// goes too — the group's new-chat slot included, which is
+    /// `chatDraftKey` with an empty slug, i.e. this very prefix.
+    func dropComposerDrafts(inChatGroup group: String) {
+        let prefix = Self.chatDraftKey(slug: "", project: group)
+        composerDrafts = composerDrafts.filter { !$0.key.hasPrefix(prefix) }
     }
 
     /// Forget every unsent message. Only the factory reset calls this:
@@ -254,6 +320,7 @@ final class AppState: ObservableObject {
     /// install they just erased.
     func clearComposerDrafts() {
         composerDrafts.removeAll()
+        composerAttachments.removeAll()
     }
 
     /// Clear all four routing fields so the center column shows the empty

@@ -36,6 +36,7 @@ swiftc -O -target arm64-apple-macos15.0 -o "$out/searchharness" \
   "$here/../../SipAI/Utilities/MathDelimiters.swift" \
   "$here/../../SipAI/Utilities/MathDisplayBlock.swift" \
   "$here/../../SipAI/Utilities/MarkdownRenderer.swift" \
+  "$here/../../SipAI/Utilities/CodeBlockActions.swift" \
   "$here/../../SipAI/Views/Chat/TranscriptFind.swift" \
   "$here/main.swift"
 "$out/searchharness" "$@"

@@ -49,10 +49,15 @@ enum NoteHTML {
     /// Full HTML document. `katexHref` is the directory-relative prefix
     /// the KaTeX assets sit at (they are staged next to the written HTML
     /// file, so this is normally empty).
+    /// `bodyPointSize` is the on-screen tier's body size — every other
+    /// size in the stylesheet is in `em`, so the whole document follows
+    /// it. The PDF keeps the design's 14: a printed page's type must
+    /// not depend on the display setting it was exported under.
     static func document(markdown: String,
                          metadata: Metadata,
                          dark: Bool,
-                         forPrint: Bool) -> String {
+                         forPrint: Bool,
+                         bodyPointSize: CGFloat = 14) -> String {
         // A PDF carries its own title block, and a note's opening H1 IS
         // its title by construction (`createNote` derives one from the
         // other), so printing both puts the name on the page twice.
@@ -75,7 +80,7 @@ enum NoteHTML {
         font-src file:; img-src 'none'; connect-src 'none'; base-uri 'none'">
         <title>\(escape(metadata.title))</title>
         <link rel="stylesheet" href="katex.min.css">
-        <style>\(css(forPrint: forPrint))</style>
+        <style>\(css(forPrint: forPrint, bodyPointSize: forPrint ? 14 : bodyPointSize))</style>
         </head>
         <body class="\(forPrint ? "print" : "screen")">
         <main id="sipai-note">
@@ -524,8 +529,10 @@ extension NoteHTML {
     /// Page styling. The screen palette tracks `ChatDesign`; the print
     /// palette is always the light one, because a PDF is a document and
     /// nobody wants a dark rectangle on paper.
-    static func css(forPrint: Bool) -> String {
-        """
+    static func css(forPrint: Bool, bodyPointSize: CGFloat = 14) -> String {
+        // Formatted without a locale: a decimal comma would not parse.
+        let bodySize = String(format: "%.2fpx", Double(bodyPointSize))
+        return """
         :root {
           --fg: #1d1d1f; --dim: #86868b; --rule: #e5e7eb;
           --bg: #ffffff; --code-bg: #f6f7f9; --link: #2563eb;
@@ -540,7 +547,7 @@ extension NoteHTML {
         html, body { margin: 0; padding: 0; background: var(--bg); }
         body {
           color: var(--fg);
-          font: 14px/1.62 -apple-system, BlinkMacSystemFont, "SF Pro Text",
+          font: \(bodySize)/1.62 -apple-system, BlinkMacSystemFont, "SF Pro Text",
                 "Helvetica Neue", Helvetica, Arial, sans-serif;
           -webkit-font-smoothing: antialiased;
           overflow-wrap: break-word;
@@ -575,14 +582,14 @@ extension NoteHTML {
           border: 1px solid var(--rule); border-radius: 8px; overflow: hidden;
         }
         .sipai-lang {
-          font: 11px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+          font: 0.786em/1 ui-monospace, SFMono-Regular, Menlo, monospace;
           color: var(--dim); padding: 8px 12px 0; text-transform: lowercase;
         }
         .sipai-code pre {
           margin: 0; padding: 10px 12px 12px; overflow-x: auto;
         }
         .sipai-code code {
-          background: none; padding: 0; font-size: 12.5px; line-height: 1.5;
+          background: none; padding: 0; font-size: 0.893em; line-height: 1.5;
         }
         table {
           border-collapse: collapse; margin: 0.9em 0; font-size: 0.95em;

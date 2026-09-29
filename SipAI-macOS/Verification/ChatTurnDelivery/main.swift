@@ -219,6 +219,99 @@ func behavioural() async {
     check("the old key is vacated by the move",
           !chats.isChatInFlight(slug: mover.slug, project: nil))
 
+    print("\n5. Unread replies — the sidebar's steady dot and its place")
+    let config = ConfigManager()
+    chats.configure(config: config)
+    func key(_ slug: String, _ project: String? = nil) -> String {
+        ChatManager.liveKey(slug: slug, project: project)
+    }
+    func turn(_ slug: String, _ project: String? = nil, stopped: Bool = false) async {
+        let t = Task<Void, Never> { while !Task.isCancelled { await Task.yield() } }
+        chats.beginTurn(slug: slug, project: project, startedAt: Date(), task: t)
+        if stopped { chats.noteTurnOutcome(.interrupted, slug: slug, project: project) }
+        chats.endTurn(slug: slug, project: project)
+        t.cancel()
+        await t.value
+    }
+    let away = chats.saveChat(StoredChat(slug: "", title: "Asked and left",
+                                         messages: [ChatMessage(role: "user", content: "q")]))
+    let here = chats.saveChat(StoredChat(slug: "", title: "Looking at it",
+                                         messages: [ChatMessage(role: "user", content: "q")]))
+    chats.noteOpenChat(slug: here.slug, project: nil)
+    await turn(away.slug)
+    check("a reply that lands while its chat is NOT open is unread",
+          chats.isChatUnread(slug: away.slug, project: nil)
+            && config.chatUnreadKeys == [key(away.slug)], "\(config.chatUnreadKeys)")
+    check("…and lights the root Chats scope, and no group's",
+          chats.hasChatUnread(inProject: nil) && !chats.hasChatUnread(inProject: "work"))
+    await turn(here.slug)
+    check("a reply to the chat the user is looking at is not",
+          !chats.isChatUnread(slug: here.slug, project: nil))
+    chats.noteOpenChat(slug: nil, project: nil)
+    let stopped = chats.saveChat(StoredChat(slug: "", title: "Stopped",
+                                            messages: [ChatMessage(role: "user", content: "q")]))
+    await turn(stopped.slug, stopped: true)
+    check("a turn the user stopped leaves no mark, even after they left",
+          !chats.isChatUnread(slug: stopped.slug, project: nil))
+
+    check("an unread chat is placed in the unread tier",
+          chats.sidebarTier(slug: away.slug, project: nil) == .unread)
+    chats.noteOpenChat(slug: away.slug, project: nil)
+    check("opening it reads it", !chats.isChatUnread(slug: away.slug, project: nil))
+    check("…but it keeps its place while it stays open",
+          chats.sidebarTier(slug: away.slug, project: nil) == .unread)
+    chats.noteOpenChat(slug: here.slug, project: nil)
+    check("…and settles once the user opens something else",
+          chats.sidebarTier(slug: away.slug, project: nil) == .rest)
+
+    let replying = chats.saveChat(StoredChat(slug: "", title: "Replying",
+                                             messages: [ChatMessage(role: "user", content: "q")]))
+    let unread = chats.saveChat(StoredChat(slug: "", title: "Unread",
+                                           messages: [ChatMessage(role: "user", content: "q")]))
+    chats.noteOpenChat(slug: nil, project: nil)
+    await turn(unread.slug)
+    let live = Task<Void, Never> { while !Task.isCancelled { await Task.yield() } }
+    chats.beginTurn(slug: replying.slug, project: nil, startedAt: Date(), task: live)
+    let plain = chats.loadChat(slug: here.slug, project: nil)!
+    let ordered = chats.sidebarOrdered([plain, chats.loadChat(slug: unread.slug, project: nil)!,
+                                        chats.loadChat(slug: replying.slug, project: nil)!])
+    check("a list is ordered replying first, then unread, then the rest",
+          ordered.map(\.slug) == [replying.slug, unread.slug, here.slug],
+          "\(ordered.map(\.slug))")
+    chats.endTurn(slug: replying.slug, project: nil)
+    live.cancel()
+    await live.value
+
+    _ = chats.moveChat(slug: unread.slug, project: nil, toProject: "work")
+    check("a moved chat carries its unread reply to its new home",
+          config.chatUnreadKeys.contains(key(unread.slug, "work"))
+            && !config.chatUnreadKeys.contains(key(unread.slug)), "\(config.chatUnreadKeys)")
+    check("…and lights its group's scope", chats.hasChatUnread(inProject: "work"))
+
+    await turn(replying.slug)
+    check("(a mark to delete)", chats.isChatUnread(slug: replying.slug, project: nil))
+    chats.deleteChat(slug: replying.slug, project: nil)
+    check("a deleted chat takes its mark with it",
+          !config.chatUnreadKeys.contains(key(replying.slug)))
+    let torn = chats.saveChat(StoredChat(slug: "", title: "Torn down",
+                                         messages: [ChatMessage(role: "user", content: "q")]))
+    let tornTask = Task<Void, Never> { while !Task.isCancelled { await Task.yield() } }
+    chats.beginTurn(slug: torn.slug, project: nil, startedAt: Date(), task: tornTask)
+    chats.deleteChat(slug: torn.slug, project: nil)
+    chats.endTurn(slug: torn.slug, project: nil)
+    await tornTask.value
+    check("a turn torn down by a delete leaves no mark when it winds up",
+          !config.chatUnreadKeys.contains(key(torn.slug)))
+
+    await turn(here.slug)
+    check("(a mark whose file will vanish)", chats.isChatUnread(slug: here.slug, project: nil))
+    try? fm.removeItem(at: SipaiPaths.chatStateFile(slug: here.slug, project: nil))
+    chats.reload()
+    check("a mark for a chat no longer listed is pruned on reload",
+          !config.chatUnreadKeys.contains(key(here.slug)))
+    check("…and a listed one is kept",
+          config.chatUnreadKeys.contains(key(unread.slug, "work")))
+
     try? fm.removeItem(at: SipaiPaths.root)
 }
 

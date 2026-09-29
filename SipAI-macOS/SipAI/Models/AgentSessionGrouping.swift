@@ -1,8 +1,8 @@
 // AgentSessionGrouping.swift
-// What an agent's sidebar section shows: which TIER it is in at all
-// (`AgentSectionTier`), and how its list is bucketed once there is one
-// — None / Folder / Date / State / Custom. Grouping state lives in this
-// app's own config.json.
+// How an agent's sidebar list is bucketed — None / Folder / Date /
+// State / Custom. Whether the section shows at all is `AgentPresence`
+// (AgentGuide.swift). Grouping state lives in this app's own
+// config.json.
 //
 // Two things about the buckets worth knowing before changing them:
 //
@@ -14,67 +14,6 @@
 //   path; a sidebar has room for one folder name (see `detail` below).
 
 import Foundation
-
-// MARK: - Section tier
-
-/// What an agent's sidebar section can DO right now, derived from three
-/// facts the section already holds.
-///
-/// One value answers all three of the questions that used to be asked
-/// separately — the header suffix, which body row renders, and whether
-/// the grouping menu is offered — so they cannot contradict each other.
-/// They did: the header appended "(read only)" whenever the agent was
-/// not ready, directly above a body row saying the CLI is not installed.
-/// On a machine with no Claude Code and no session store, that is a
-/// section claiming to hold sessions it cannot drive while holding none
-/// at all.
-///
-/// Read-only is a claim about ROWS: sessions that list, open and read
-/// but cannot be sent to. An agent with nothing to list has nothing to
-/// be read-only about, whatever its credentials are doing — so the
-/// suffix is earned by rows, not by the absence of a binary.
-enum AgentSectionTier {
-    /// CLI installed and signed in: new sessions, sends, hand-offs.
-    case interactive
-    /// Rows to read, no way to drive them — the CLI is missing, or it
-    /// is present without working auth. Sessions a desktop app wrote
-    /// land here on a machine that never installed the CLI.
-    case readOnly
-    /// CLI present, auth missing, nothing synced yet. Nothing to read;
-    /// what the user needs is the sign-in step.
-    case notConfigured
-    /// No CLI and no sessions. The section stays in the sidebar to say
-    /// the agent is supported and what to install, and says nothing
-    /// about reading.
-    case unavailable
-
-    /// `isReady` is installed AND signed in (`AgentManager.isAgentReady`);
-    /// `hasRows` counts scheduled tasks as well as regular sessions,
-    /// since a task's runs are rows too.
-    ///
-    /// Rows outrank the binary deliberately: an agent whose CLI lost its
-    /// auth still lists everything it recorded, and that list is the
-    /// point of the tier.
-    static func resolve(isReady: Bool,
-                        isInstalled: Bool,
-                        hasRows: Bool) -> AgentSectionTier {
-        if isReady { return .interactive }
-        if hasRows { return .readOnly }
-        return isInstalled ? .notConfigured : .unavailable
-    }
-
-    /// Whether the section header names the tier — only `.readOnly`
-    /// does. The other two non-interactive tiers say more in one body
-    /// sentence than a two-word suffix could, and a suffix promising
-    /// readable sessions over a section that lists none is simply false.
-    var namesTierInTitle: Bool { self == .readOnly }
-
-    /// Grouping is a READ operation, so it is offered wherever there is
-    /// something to group — and to an installed agent whose first
-    /// session has not landed yet, so the choice is already made when
-    /// one does.
-    var offersGrouping: Bool { self != .unavailable }
-}
 
 // MARK: - Mode
 
@@ -114,11 +53,13 @@ enum AgentGroupMode: String, CaseIterable, Identifiable {
 
 /// What a row is doing, for `state` grouping. Ordered most-urgent first:
 /// an approval is blocking the user, so it outranks a turn that is simply
-/// still running.
+/// still running; a finished run nobody has opened comes next, above
+/// everything that has nothing new to show.
 enum AgentGroupState: String {
     case awaitingApproval
     case working
     case runningElsewhere
+    case unread
     case scheduled
     case idle
 
@@ -127,8 +68,9 @@ enum AgentGroupState: String {
         case .awaitingApproval: return 0
         case .working: return 1
         case .runningElsewhere: return 2
-        case .scheduled: return 3
-        case .idle: return 4
+        case .unread: return 3
+        case .scheduled: return 4
+        case .idle: return 5
         }
     }
 
@@ -143,6 +85,9 @@ enum AgentGroupState: String {
         case .runningElsewhere:
             return String(localized: "Running in another terminal",
                           comment: "State group — an external Claude Code process owns the turn")
+        case .unread:
+            return String(localized: "Unread",
+                          comment: "State group — sessions whose run finished and that have not been opened since")
         case .scheduled:
             return String(localized: "Scheduled",
                           comment: "State group — scheduled task definitions")
@@ -150,6 +95,45 @@ enum AgentGroupState: String {
             return String(localized: "Sessions",
                           comment: "State group — everything not currently doing anything")
         }
+    }
+}
+
+// MARK: - Tiers
+
+/// Where a row stands in the sidebar's order before its time is asked:
+/// running first, then a finished run nobody has opened yet, then
+/// everything else. Newest first within a tier. The chat list and every
+/// agent section order rows this way in every grouping mode, and Folder
+/// and Custom order their GROUPS this way too (`AgentSessionGrouping
+/// .buckets`, `arranged`).
+///
+/// The tier decides PLACEMENT only. The dot a row draws says what is
+/// true now — a pulse while it runs, a steady dot while its finished
+/// run is unopened — and never reads the held tier below.
+enum SidebarTier: Int, Comparable {
+    case running = 0
+    case unread = 1
+    case rest = 2
+
+    static func < (lhs: SidebarTier, rhs: SidebarTier) -> Bool {
+        lhs.rawValue < rhs.rawValue
+    }
+
+    static func of(running: Bool, unread: Bool) -> SidebarTier {
+        running ? .running : (unread ? .unread : .rest)
+    }
+
+    /// The tier the OPEN row is placed at: never below the best tier it
+    /// has stood in since it was opened. Opening an unread session reads
+    /// it, and a run finishing while it is open leaves nothing unread —
+    /// both would otherwise drop the row the user just clicked out from
+    /// under the pointer, and take its group with it. It may still RISE
+    /// (a send makes it running). It settles into its real tier when the
+    /// user opens anything else, which is what clears `held`.
+    static func placed(_ actual: SidebarTier,
+                       heldSinceOpened held: SidebarTier?) -> SidebarTier {
+        guard let held else { return actual }
+        return min(actual, held)
     }
 }
 
@@ -177,10 +161,11 @@ enum AgentListItem: Identifiable, Hashable {
     }
 
     /// When this row's owner last SPOKE to it — the last user message
-    /// for a session, the last prompt a schedule fired for a task —
-    /// or nil for a scheduled task that has never run. Date grouping
-    /// keeps nil in its own bucket rather than filing a never-run task
-    /// under some arbitrary month.
+    /// for a session; for a task, the last prompt a schedule fired or
+    /// the moment the task was scheduled, whichever is later
+    /// (`ScheduledAgentTask.lastActive`). Nil only for a task with
+    /// neither — Date grouping keeps nil in its own bucket rather than
+    /// filing it under some arbitrary month.
     ///
     /// Deliberately not the file's mtime: this value is both printed
     /// on the row and used to order it, and mtime keeps moving for as
@@ -193,7 +178,7 @@ enum AgentListItem: Identifiable, Hashable {
         }
     }
 
-    /// Sort key. Never-run tasks sink to the bottom of the stream.
+    /// Sort key. A row with no date sinks to the bottom of the stream.
     var sortDate: Date { activityDate ?? .distantPast }
 
     var isSpawnedSubagent: Bool {
@@ -258,6 +243,19 @@ struct AgentSessionGroup: Identifiable {
     /// Full tilde path behind the header, surfaced as a tooltip.
     let tooltip: String
     let items: [AgentListItem]
+    /// The newest `activityDate` among ALL the group's rows, taken
+    /// before any cap trims them — nil when no row has one (a named
+    /// group with no rows yet, or one holding only undated tasks).
+    /// What `AgentSessionGrouping.arranged` asks when deciding whether
+    /// a turn has started here since the headers were last dragged; a
+    /// trimmed copy must carry it over rather than recompute it from
+    /// the rows it kept.
+    let newestActivity: Date?
+    /// The best tier among ALL the group's rows, taken before any cap —
+    /// `.rest` for a group with none running or unread (and for an empty
+    /// one). What `arranged` draws above a dragged order in the modes
+    /// whose groups follow the tiers; a trimmed copy carries it over.
+    var tier: SidebarTier = .rest
 
     var id: String { key }
 }
@@ -274,22 +272,42 @@ enum AgentSessionGrouping {
     /// Bucket `items` (already sorted — insertion order is preserved
     /// inside each group) into display groups.
     ///
-    /// Folder and date groups are ordered by their most recent row;
-    /// custom groups follow the order the user created them in with
-    /// Ungrouped last; state groups use `AgentGroupState.order`.
+    /// Folder, date and custom groups are ordered by their most recent
+    /// row, so the group a turn has just started in is the first one
+    /// under the section header. Scheduling a task dates its row too
+    /// (`ScheduledAgentTask.lastActive`), so the group a task was just
+    /// created in rises the same way. A group with no dated row — a
+    /// named group nothing has been filed into yet — sorts after every
+    /// group that has one, and
+    /// custom groups among those keep the order they were created in,
+    /// Ungrouped last. State groups use `AgentGroupState.order`: that
+    /// order is urgency, and recency must not reshuffle it. An order the
+    /// user DRAGGED the headers into is applied on top of this one, by
+    /// `arranged`.
+    ///
+    /// In Folder and Custom (`tiersOrderGroups`) the TIER comes before
+    /// recency: a group with a running row first, then one with an
+    /// unread row, then the rest — each group placed where its top row
+    /// would sort (its best tier, then the newest row OF that tier).
+    /// Without that, a group whose session started earlier and is still
+    /// running sat below one whose session started later and had
+    /// already finished. Date keeps date order (it is a calendar, not a
+    /// place) and State its urgency order; the tiers apply to the rows
+    /// inside those, through the stream's own order.
     ///
     /// An empty bucket is dropped — deleting a group's last session
     /// removes its header too — with ONE exception: a group the user
     /// NAMED renders while empty. A folder or a date bucket describes
     /// rows and means nothing without them, but a named group is a
     /// thing the user made, and its header is the only route to its +,
-    /// its Rename and its Delete. Dropping it made "New Group…" look
+    /// its Rename and its Delete. Dropping it made "New group…" look
     /// like it had done nothing, and left the group unreachable until
     /// something was filed into it by hand. Ungrouped is not in the
     /// exception: nobody made it, and an empty one says nothing.
     static func buckets(_ items: [AgentListItem],
                         mode: AgentGroupMode,
                         state: (AgentListItem) -> AgentGroupState = { _ in .idle },
+                        tier: (AgentListItem) -> SidebarTier = { _ in .rest },
                         customGroups: [String] = [],
                         assignments: [String: String] = [:],
                         now: Date = Date()) -> [AgentSessionGroup] {
@@ -372,10 +390,44 @@ enum AgentSessionGrouping {
             buckets[key]?.items.compactMap(\.activityDate).max()
         }
 
+        // Each group's best tier, and its newest row OF that tier — read
+        // once per group rather than once per comparison.
+        var bestTier: [String: SidebarTier] = [:]
+        var tierNewest: [String: Date] = [:]
+        for key in keyOrder {
+            let rows = buckets[key]?.items ?? []
+            let tiers = rows.map(tier)
+            let best = tiers.min() ?? .rest
+            bestTier[key] = best
+            tierNewest[key] = zip(rows, tiers)
+                .filter { $0.1 == best }
+                .compactMap { $0.0.activityDate }
+                .max()
+        }
+        let byTier = tiersOrderGroups(mode)
+
         let ordered = keyOrder.sorted { lhs, rhs in
             let lhsOrder = fixedOrder[lhs] ?? Int.max
             let rhsOrder = fixedOrder[rhs] ?? Int.max
-            if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
+            // Urgency outranks recency in State mode. Custom mode has
+            // fixed positions too — the creation order — but there they
+            // only break the tie between groups with no dated row.
+            if mode != .custom, lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
+            if byTier {
+                let lhsTier = bestTier[lhs] ?? .rest
+                let rhsTier = bestTier[rhs] ?? .rest
+                if lhsTier != rhsTier { return lhsTier < rhsTier }
+                if lhsTier != .rest {
+                    // Two running (or two unread) groups: the one whose
+                    // newest such row is newer. An undated row of that
+                    // tier counts as the oldest — a key, never a reason
+                    // to fall through to another one, which would make
+                    // the comparison inconsistent across three groups.
+                    let left = tierNewest[lhs] ?? .distantPast
+                    let right = tierNewest[rhs] ?? .distantPast
+                    if left != right { return left > right }
+                }
+            }
             switch (newest(lhs), newest(rhs)) {
             case let (left?, right?):
                 if left != right { return left > right }
@@ -386,6 +438,7 @@ enum AgentSessionGrouping {
             case (nil, nil):
                 break
             }
+            if lhsOrder != rhsOrder { return lhsOrder < rhsOrder }
             return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
         }
 
@@ -399,8 +452,95 @@ enum AgentSessionGrouping {
                                      label: found.label,
                                      detail: found.detail,
                                      tooltip: found.tooltip,
-                                     items: ranked)
+                                     items: ranked,
+                                     newestActivity: newest(key),
+                                     tier: bestTier[key] ?? .rest)
         }
+    }
+
+    /// Whether a mode's GROUPS follow the tiers — Folder and Custom, the
+    /// places a session lives. Date is a calendar and keeps date order;
+    /// State is already ordered by what its groups are doing; None draws
+    /// one group.
+    static func tiersOrderGroups(_ mode: AgentGroupMode) -> Bool {
+        switch mode {
+        case .folder, .custom: return true
+        case .none, .date, .state: return false
+        }
+    }
+
+    // MARK: - Group order over a dragged one
+
+    /// Whether a group a turn starts in moves to the top even over an
+    /// order the user dragged the headers into — Folder, Date and
+    /// Custom, the modes whose own order is already "most recent
+    /// first". State mode's order is urgency, where recency has no
+    /// say, and None draws no headers to drag.
+    static func liftsActiveGroups(_ mode: AgentGroupMode) -> Bool {
+        switch mode {
+        case .folder, .date, .custom: return true
+        case .none, .state: return false
+        }
+    }
+
+    /// The order a section draws its groups in: `groups` in the order
+    /// `buckets` gave them, `dragged` the ids the user last dragged the
+    /// headers into (empty if they never have), `draggedAt` when.
+    ///
+    /// A dragged order is written WHOLE — every header on screen, at the
+    /// moment of the drag — so on its own it pins every group that
+    /// existed then, and recency stops reaching any of them: the folder
+    /// a new session runs in stays wherever it was dropped, and a
+    /// folder that is new since then lands BELOW all the pinned ones.
+    /// So a group whose newest row is later than the drag is lifted out
+    /// of the dragged order and drawn first, newest on top; every other
+    /// group keeps the dragged position (`SidebarOrdering.apply`). A
+    /// drag therefore holds until a turn starts somewhere, and then
+    /// that group goes to the top — the same thing the section does
+    /// when nothing was ever dragged.
+    ///
+    /// `draggedAt` nil is an order dragged before the time was recorded:
+    /// every group with a dated row is lifted, which leaves the saved
+    /// order deciding only among the undated ones until the headers are
+    /// dragged again. The next drag records the time.
+    ///
+    /// Above all of that, in the modes whose groups follow the tiers
+    /// (`tiersOrderGroups`: Folder and Custom), a group holding a
+    /// running or an unread row is drawn first WHATEVER was dragged —
+    /// "always on top" — in the tier order `buckets` already gave it.
+    /// The dragged order and the lift above only arrange the rest.
+    ///
+    /// Pure, with the group's id, newest date and tier handed in, so the
+    /// rule runs headless over the section's own wrapper type.
+    static func arranged<Group>(_ groups: [Group],
+                                mode: AgentGroupMode,
+                                dragged: [String],
+                                draggedAt: Date?,
+                                id: (Group) -> String,
+                                newest: (Group) -> Date?,
+                                tier: (Group) -> SidebarTier = { _ in .rest }) -> [Group] {
+        guard !dragged.isEmpty else { return groups }
+        guard liftsActiveGroups(mode) else {
+            return SidebarOrdering.apply(groups, order: dragged, id: id)
+        }
+        let byTier = tiersOrderGroups(mode)
+        let since = draggedAt ?? .distantPast
+        var tiered: [Group] = []
+        var lifted: [Group] = []
+        var kept: [Group] = []
+        for group in groups {
+            if byTier, tier(group) < .rest {
+                tiered.append(group)
+            } else if let date = newest(group), date > since {
+                lifted.append(group)
+            } else {
+                kept.append(group)
+            }
+        }
+        // `groups` is in tier order, then newest-first, in every mode
+        // that lifts, so both the tiered and the lifted ones are already
+        // in the order they should be drawn in.
+        return tiered + lifted + SidebarOrdering.apply(kept, order: dragged, id: id)
     }
 
     // MARK: - A group's folder
@@ -408,12 +548,13 @@ enum AgentSessionGrouping {
     /// Where a session started from `name`'s header should open: the
     /// newest row filed in that group whose folder still exists.
     ///
-    /// `sortedItems` must be the sidebar's own stream — newest-first on
-    /// `AgentListItem.activityDate`, the last USER message and never a
-    /// file's mtime, or a session left working answers for the group
-    /// for the length of its turn. Walking that order and taking the
-    /// first row that qualifies makes the answer "where you last worked
-    /// in this group" rather than "where most of its rows are".
+    /// `sortedItems` must be the sidebar's own stream — tier first
+    /// (`SidebarTier`), then newest-first on `AgentListItem.activityDate`,
+    /// the last USER message and never a file's mtime, or a session left
+    /// working answers for the group for the length of its turn. Walking
+    /// that order and taking the first row that qualifies makes the
+    /// answer "where you are working in this group" — its top row —
+    /// rather than "where most of its rows are".
     ///
     /// A row whose folder cannot be opened is SKIPPED, not returned. A
     /// session with no recorded cwd falls back to decoding its
@@ -472,7 +613,7 @@ enum AgentSessionGrouping {
         guard let date = date else {
             return ("undated",
                     String(localized: "No activity yet",
-                           comment: "Date group for scheduled tasks that have never run"))
+                           comment: "Date group for scheduled tasks with no run and no creation date"))
         }
         let calendar = Calendar.current
         let days = calendar.dateComponents([.day],

@@ -58,7 +58,10 @@ struct AgentSession: Identifiable, Hashable {
     let projectPath: URL?
     /// Name from the first user message's
     /// `<scheduled-task name="…">` marker. Nil for regular sessions.
-    let scheduledTaskName: String?
+    /// Settable for one caller: a run the scheduler has just started is
+    /// filed under its task before its transcript can say so
+    /// (`ScheduledAgentTaskScanner.overlaying`).
+    var scheduledTaskName: String?
     /// Which agent owns this session ("claude_code" / "codex" /
     /// "kimi"). Drives history parsing, sidebar sectioning, and the
     /// read-only tier.
@@ -112,12 +115,24 @@ struct ScheduledAgentTask: Identifiable, Hashable {
     /// definition directory was deleted. The panel shows those
     /// read-only, since there is no file left to revise.
     var definition: ScheduledTaskDefinition? = nil
+    /// When the task was scheduled: the birth time of its definition
+    /// DIRECTORY. Never the SKILL.md's own dates — every save replaces
+    /// that file, so they move whenever anything is edited. Nil for an
+    /// orphan, and wherever the filesystem keeps no birth time.
+    var createdAt: Date? = nil
 
     var id: String { name }
     /// Same clock as a regular row: when this task last SENT a prompt,
     /// not when its newest run last wrote a byte. `sessions` is
-    /// ordered newest-first on that same key by the scanner.
-    var lastActive: Date? { sessions.first?.activityAt }
+    /// ordered newest-first on that same key by the scanner. Nil until
+    /// the first run — the row prints "Never".
+    var lastRunAt: Date? { sessions.first?.activityAt }
+    /// The task's place in the sidebar: its newest run, or the moment it
+    /// was scheduled when that is later — so a task just created sits at
+    /// the top of its group like a session just sent to, instead of
+    /// sinking below every row that has ever run. Scheduling it IS the
+    /// user's last word to it until it fires.
+    var lastActive: Date? { [lastRunAt, createdAt].compactMap { $0 }.max() }
 
     /// `definition` IS part of equality. It is tempting to leave a whole
     /// prompt body out of a value that keys SwiftUI diffing, but this
@@ -137,6 +152,7 @@ struct ScheduledAgentTask: Identifiable, Hashable {
             && lhs.sessions == rhs.sessions
             && lhs.agent == rhs.agent
             && lhs.definition == rhs.definition
+            && lhs.createdAt == rhs.createdAt
     }
 
     func hash(into hasher: inout Hasher) { hasher.combine(name) }
@@ -150,26 +166,53 @@ struct ScheduledAgentTask: Identifiable, Hashable {
 /// why `==` / `hash` key off `id` alone — same pattern as
 /// `StreamEvent` in `AgentRunner.swift`, so SwiftUI's `ForEach` diffing
 /// behaves identically across live and historical streams.
+/// The newest turn a transcript records, read from its turn markers
+/// (`CodexSessionScanner.latestTurn`, `KimiSessionScanner.latestTurn`):
+/// whether it is still open, when it started, and — once it has ended —
+/// how long it took, in the agent's own figures. What a watcher that
+/// starts mid-turn reads to know it did, and what the composer's clock
+/// rests on after a turn another process ran.
+struct RecordedTurn: Equatable {
+    var open: Bool
+    var startedAt: Date?
+    var seconds: Double?
+}
+
 struct AgentSessionHistoryItem: Identifiable, Hashable {
     let id: UUID = UUID()
     let kind: Kind
-    /// `uuid` of the JSONL record this item was parsed out of, when it
-    /// had one. This is the row's handle back into the transcript, and
-    /// it is what `AgentSessionFork` cuts a branch at.
+    /// The row's handle back into the transcript, in the writer's own
+    /// vocabulary: the `uuid` of the claude JSONL record it was parsed
+    /// out of, the `turn_id` of the codex turn it belongs to, the
+    /// `message.id` of the kimi user record. It is what a branch is
+    /// cut at (`AgentSessionFork`, `CodexSessionFork`, `KimiSessionFork`).
     ///
-    /// It has to be the record's uuid rather than a line number:
-    /// `readHistory` parses a BOUNDED TAIL of the file, so an index into
-    /// what it read is not an index into the file. Nil for items that
-    /// have no record behind them — the derived `.interrupted` marker.
+    /// It has to be an identifier the FILE carries rather than a line
+    /// number: `readHistory` parses a BOUNDED TAIL of the file, so an
+    /// index into what it read is not an index into the file. Nil for
+    /// items that have no record behind them — the derived
+    /// `.interrupted` marker — and for the agent's own rows, which are
+    /// never branched from.
     var recordUuid: String? = nil
 
     /// True for a user-role record the harness injected rather than
     /// anything the user typed — see `AgentSessionScanner.isHarnessNotice`.
     var isSystemNotice: Bool = false
 
+    /// The files a user message carried as inlined attachments
+    /// (`AttachmentInline`), for the paperclip line under the bubble.
+    /// The row's text has the blocks STRIPPED; the names are read off
+    /// the raw record before that, since an agent transcript stores no
+    /// `files` key of its own. Empty on every other row.
+    var attachedFiles: [String] = []
+
     enum Kind {
         case userText(String)
         case assistantText(String)
+        /// A readable thought. The readers keep none unless asked, and
+        /// `keepingThoughts` then drops every one outside a turn that
+        /// ran in Chat only — the only turns that draw them.
+        case thinking(String)
         case toolUse(id: String, name: String, input: [String: Any])
         case toolResult(toolUseId: String, content: String, isError: Bool)
         /// The turn above ended without finishing — kill/quit residue,
@@ -185,6 +228,35 @@ struct AgentSessionHistoryItem: Identifiable, Hashable {
         lhs.id == rhs.id
     }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
+
+    /// `items` with every `.thinking` row dropped except inside a turn
+    /// whose user row's handle is in `chatOnlyTurns`.
+    ///
+    /// A thought is drawn only inside a Chat only turn's activity line,
+    /// and a row that draws nothing must not be in the list at all: the
+    /// transcript's display window, its "N older rows" count and the
+    /// find engine all count rows, so invisible ones would spend the
+    /// window on nothing. A turn opens at a message the user sent — a
+    /// notice in the user column opens none.
+    static func keepingThoughts(_ items: [AgentSessionHistoryItem],
+                                inTurns chatOnlyTurns: Set<String>)
+    -> [AgentSessionHistoryItem] {
+        var keep = false
+        var out: [AgentSessionHistoryItem] = []
+        out.reserveCapacity(items.count)
+        for item in items {
+            switch item.kind {
+            case .userText where !item.isSystemNotice:
+                keep = item.recordUuid.map(chatOnlyTurns.contains) ?? false
+                out.append(item)
+            case .thinking:
+                if keep { out.append(item) }
+            default:
+                out.append(item)
+            }
+        }
+        return out
+    }
 }
 
 /// A nascent Claude Code session that hasn't been spawned yet.
@@ -214,6 +286,18 @@ struct ClaudeSessionDraft: Identifiable, Hashable {
     /// the session id arrives — the only moment a real key exists to
     /// file under, and one the view being torn down cannot cost.
     var customGroup: String?
+    /// Set on the draft the SCHEDULER makes for a run: the task it is a
+    /// run of, and the title the scanners will give it. The run is listed
+    /// under its task from the instant it has a session id — its
+    /// transcript names the task only once its first record is on disk,
+    /// and until a scan reads that, the row would otherwise sit among the
+    /// ordinary sessions.
+    var scheduledRun: ScheduledRunIdentity?
+
+    struct ScheduledRunIdentity: Hashable {
+        let taskName: String
+        let title: String
+    }
 
     init(cwd: URL, name: String? = nil, agentKey: String = "claude_code",
          customGroup: String? = nil) {
@@ -432,8 +516,14 @@ enum AgentSessionScanner {
     /// indexing, and the find bar's "search the whole session". It stays
     /// a bound (never "read it all"): a budget is what keeps a
     /// pathological transcript from being pulled into memory entire.
+    ///
+    /// `includeThinking` keeps the thinking blocks that carry text, as
+    /// `.thinking` rows, for a session with Chat only turns in it; the
+    /// caller then applies `AgentSessionHistoryItem.keepingThoughts`.
+    /// Everything else reads without them.
     static func readHistory(of url: URL, maxTurns: Int = 50,
-                            byteBudget: Int? = nil) -> [AgentSessionHistoryItem] {
+                            byteBudget: Int? = nil,
+                            includeThinking: Bool = false) -> [AgentSessionHistoryItem] {
         // Lossy decode + bounded tail. STRICT decoding returns nil —
         // an EMPTY transcript for the whole session — whenever a
         // snapshot of a file another claude is MID-WRITING ends inside
@@ -478,14 +568,20 @@ enum AgentSessionScanner {
                 let raw = content ?? obj["content"] ?? ""
                 let rawText = extractText(fromContent: raw)
                 let cleaned = cleanUserText(rawText)
-                if !cleaned.isEmpty {
+                // Inlined attachments: the names come off the RAW text,
+                // before the strip inside `cleanUserText` removes the
+                // blocks they ride in.
+                let attached = AttachmentInline.names(in: rawText)
+                if !cleaned.isEmpty || !attached.isEmpty {
                     // A compaction summary is a user-role record that
                     // the user never wrote — labelled like a harness
                     // notice, and for the same reason.
                     let isSummary = (obj["isCompactSummary"] as? Bool) == true
-                    items.append(AgentSessionHistoryItem(
+                    var item = AgentSessionHistoryItem(
                         kind: .userText(cleaned), recordUuid: recordUuid,
-                        isSystemNotice: isHarnessNotice(rawText) || isSummary))
+                        isSystemNotice: isHarnessNotice(rawText) || isSummary)
+                    item.attachedFiles = attached
+                    items.append(item)
                 }
 
             case "assistant":
@@ -498,7 +594,8 @@ enum AgentSessionScanner {
                 // the same row changes speaker when history takes over.
                 items.append(contentsOf: parseAssistantBlocks(
                     content, recordUuid: recordUuid,
-                    isSynthetic: (msg["model"] as? String) == "<synthetic>"))
+                    isSynthetic: (msg["model"] as? String) == "<synthetic>",
+                    includeThinking: includeThinking))
 
             case "system":
                 // A local slash command's answer — the one system record
@@ -623,8 +720,9 @@ enum AgentSessionScanner {
         // Whether the newest API call ran in fast mode: assistant
         // records carry `usage.speed` ("fast" / "standard") on claude
         // builds that know the mode, and nothing at all on older ones
-        // — nil then, never false, so a seed cannot switch a session
-        // off on the strength of a record that said nothing.
+        // — nil then, never false. Even false is an outcome, not a
+        // choice (a refused call records standard), so the seed lets
+        // only true move the switch (`ClaudeFastMode.seededSwitch`).
         var fast: Bool? = nil
         for line in text.split(separator: "\n").reversed() {
             if mode != nil && model != nil && effort != nil { break }
@@ -672,14 +770,17 @@ enum AgentSessionScanner {
     /// Seeds the composer's context chip when opening an existing
     /// session (live assistant events take over once a turn streams),
     /// and rides out with the model that produced it — the chip divides
-    /// by a WINDOW, and a window belongs to a model. Returns 0 / nil if
-    /// the file is unreadable or no assistant record carries usage.
-    static func lastContextTokens(of url: URL) -> (tokens: Int, model: String?) {
+    /// by a WINDOW, and a window belongs to a model — and with the speed
+    /// that call ran at, the fast switch's outcome on reopen. Returns
+    /// 0 / nil if the file is unreadable or no assistant record carries
+    /// usage.
+    static func lastContextTokens(of url: URL) -> (tokens: Int, model: String?, speed: String?) {
         guard let text = boundedTail(of: url) else {
-            return (0, nil)
+            return (0, nil, nil)
         }
         var last = 0
         var lastModel: String? = nil
+        var lastSpeed: String? = nil
         text.enumerateLines { line, _ in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty,
@@ -714,9 +815,13 @@ enum AgentSessionScanner {
                 last = total
                 lastModel = (msg["model"] as? String)
                     .flatMap { $0.isEmpty ? nil : $0 }
+                // What that call ran at — the fast switch's outcome as
+                // the transcript keeps it (`ClaudeFastModeReport`).
+                lastSpeed = (usage["speed"] as? String)
+                    .flatMap { $0.isEmpty ? nil : $0 }
             }
         }
-        return (last, lastModel)
+        return (last, lastModel, lastSpeed)
     }
 
     /// Seconds the NEWEST finished turn in this transcript took — the
@@ -945,7 +1050,8 @@ enum AgentSessionScanner {
     /// them. Any other block type keeps its ordinary shape.
     private static func parseAssistantBlocks(_ content: Any?,
                                              recordUuid: String? = nil,
-                                             isSynthetic: Bool = false)
+                                             isSynthetic: Bool = false,
+                                             includeThinking: Bool = false)
     -> [AgentSessionHistoryItem] {
         func textItem(_ t: String) -> AgentSessionHistoryItem {
             isSynthetic
@@ -977,8 +1083,18 @@ enum AgentSessionScanner {
                     kind: .toolUse(id: id, name: name, input: input),
                     recordUuid: recordUuid
                 ))
+            case "thinking" where includeThinking:
+                // Mirrors `AgentEventParser.parseAssistant`: an empty
+                // block is thinking the API left out, with nothing to draw.
+                if let raw = dict["thinking"] as? String {
+                    let t = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !t.isEmpty {
+                        out.append(AgentSessionHistoryItem(kind: .thinking(t),
+                                                           recordUuid: recordUuid))
+                    }
+                }
             default:
-                break  // "thinking" and anything else we don't surface
+                break  // anything else we don't surface
             }
         }
         return out
@@ -1250,6 +1366,19 @@ enum AgentSessionScanner {
                       comment: "Fallback title for a Claude session with no user text")
     }
 
+    /// The title a session opened by `prompt` will be listed under before
+    /// the agent names it: tags stripped, whitespace collapsed, 50
+    /// characters at most — the rule all three scanners apply to a first
+    /// message. What a scheduled run is called from the instant it
+    /// starts, so its row does not change name when the scan catches up.
+    static func title(fromPrompt prompt: String) -> String? {
+        let collapsed = cleanUserText(prompt)
+            .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+            .joined(separator: " ")
+        guard !collapsed.isEmpty else { return nil }
+        return collapsed.count > 50 ? String(collapsed.prefix(47)) + "..." : collapsed
+    }
+
     /// The `<command-name>` entries in a transcript's head — what a
     /// zero-turn session actually holds ("/clear", "/exit", …). Lets
     /// the empty state explain the file instead of presenting a
@@ -1459,7 +1588,12 @@ enum AgentSessionScanner {
     /// turn and every message carrying `<local-command-stdout>` output
     /// clean to empty and VANISH from the transcript.
     static func cleanUserText(_ text: String) -> String {
-        stripWrappers(text, patterns: [
+        // Inlined attachment blocks FIRST, matched as a pair: the
+        // generic `<[^>]+>` sweep below would eat the block's tags and
+        // leave the whole file's contents standing in the bubble. The
+        // names the paperclip line prints are read off the raw text by
+        // the caller before this runs.
+        stripWrappers(AttachmentInline.stripping(text), patterns: [
             "<scheduled-task[^>]*>[\\s\\S]*?</scheduled-task>",
             "<system-reminder>[\\s\\S]*?</system-reminder>",
             "<local-command-caveat>[\\s\\S]*?</local-command-caveat>",
@@ -1488,7 +1622,9 @@ enum AgentSessionScanner {
     /// turn-liveness text check (a record that is ONLY command/system
     /// wrappers is claude bookkeeping, not the user starting a turn).
     static func cleanSessionMetaText(_ text: String) -> String {
-        stripWrappers(text, patterns: [
+        // Same first step as `cleanUserText`: a session whose first
+        // message carried an attachment must not be TITLED by the file.
+        stripWrappers(AttachmentInline.stripping(text), patterns: [
             "<scheduled-task[^>]*>[\\s\\S]*?</scheduled-task>",
             "<command-name>[\\s\\S]*?</command-name>",
             "<command-message>[\\s\\S]*?</command-message>",
@@ -1599,32 +1735,74 @@ enum ScheduledAgentTaskScanner {
             .appendingPathComponent(".claude/scheduled-tasks", isDirectory: true)
     }()
 
+    /// One task directory as the scanner reads it.
+    struct Definition {
+        let description: String
+        let directory: URL
+        let skill: URL
+        let cwd: URL?
+        let agent: String
+        let parsed: ScheduledTaskDefinition?
+        let createdAt: Date?
+    }
+
+    /// Read one task directory, or nil when `directory` is not one.
+    /// The scan and the composer's just-created listing both go through
+    /// here, so a task reads the same whichever of them saw it first.
+    static func definition(in directory: URL) -> Definition? {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: directory.path,
+                                             isDirectory: &isDirectory),
+              isDirectory.boolValue else { return nil }
+        let name = directory.lastPathComponent
+        let skill = directory.appendingPathComponent("SKILL.md")
+        let parsed = ScheduledTaskDefinition.read(name: name, skillFile: skill)
+        let created = (try? directory.resourceValues(forKeys: [.creationDateKey]))?
+            .creationDate
+        return Definition(
+            description: parsed?.description ?? name,
+            directory: directory,
+            skill: skill,
+            cwd: parsed?.workingDirectory,
+            agent: parsed?.agent ?? "claude_code",
+            parsed: parsed,
+            createdAt: created
+        )
+    }
+
+    /// A task with no runs yet, read from its directory — what the
+    /// sidebar lists the moment the composer has written one, before
+    /// the rescan that follows reaches it.
+    static func newTask(named name: String) -> ScheduledAgentTask? {
+        guard !name.isEmpty, !name.hasPrefix("."),
+              let definition = definition(
+                  in: taskRoot.appendingPathComponent(name, isDirectory: true))
+        else { return nil }
+        return ScheduledAgentTask(
+            name: name,
+            description: definition.description,
+            directoryURL: definition.directory,
+            skillFileURL: definition.skill,
+            workingDirectory: definition.cwd,
+            sessions: [],
+            agent: definition.agent,
+            definition: definition.parsed,
+            createdAt: definition.createdAt
+        )
+    }
+
     static func scan(grouping sessions: [AgentSession]) -> [ScheduledAgentTask] {
         let fm = FileManager.default
-        var definitions: [String: (description: String, directory: URL,
-                                   skill: URL, cwd: URL?, agent: String,
-                                   parsed: ScheduledTaskDefinition?)] = [:]
+        var definitions: [String: Definition] = [:]
 
         if let taskDirectories = try? fm.contentsOfDirectory(
             at: taskRoot,
-            includingPropertiesForKeys: nil,
+            includingPropertiesForKeys: [.creationDateKey],
             options: [.skipsHiddenFiles]
         ) {
             for directory in taskDirectories {
-                var isDirectory: ObjCBool = false
-                guard fm.fileExists(atPath: directory.path, isDirectory: &isDirectory),
-                      isDirectory.boolValue else { continue }
-                let name = directory.lastPathComponent
-                let skill = directory.appendingPathComponent("SKILL.md")
-                let parsed = ScheduledTaskDefinition.read(name: name, skillFile: skill)
-                definitions[name] = (
-                    description: parsed?.description ?? name,
-                    directory: directory,
-                    skill: skill,
-                    cwd: parsed?.workingDirectory,
-                    agent: parsed?.agent ?? "claude_code",
-                    parsed: parsed
-                )
+                guard let definition = definition(in: directory) else { continue }
+                definitions[directory.lastPathComponent] = definition
             }
         }
 
@@ -1640,7 +1818,7 @@ enum ScheduledAgentTaskScanner {
         // deleted after those runs completed.
         for taskName in sessionsByTask.keys where definitions[taskName] == nil {
             let directory = taskRoot.appendingPathComponent(taskName, isDirectory: true)
-            definitions[taskName] = (
+            definitions[taskName] = Definition(
                 description: taskName,
                 directory: directory,
                 skill: directory.appendingPathComponent("SKILL.md"),
@@ -1651,7 +1829,8 @@ enum ScheduledAgentTaskScanner {
                 // orphaned codex or kimi task under the Claude Code
                 // section: `scheduledTasks(for:)` splits on exactly this.
                 agent: sessionsByTask[taskName]?.first?.agentKey ?? "claude_code",
-                parsed: nil
+                parsed: nil,
+                createdAt: nil
             )
         }
 
@@ -1669,12 +1848,14 @@ enum ScheduledAgentTaskScanner {
                 workingDirectory: definition.cwd,
                 sessions: runs,
                 agent: definition.agent,
-                definition: definition.parsed
+                definition: definition.parsed,
+                createdAt: definition.createdAt
             )
         }
 
-        // Recently-run scheduled tasks first, followed by never-run
-        // definitions in stable alphabetical order.
+        // Most recently active first — a run, or the task being
+        // scheduled — then anything with no date at all in stable
+        // alphabetical order.
         tasks.sort { lhs, rhs in
             switch (lhs.lastActive, rhs.lastActive) {
             case let (left?, right?):
@@ -1695,4 +1876,66 @@ enum ScheduledAgentTaskScanner {
     // live on `ScheduledTaskDefinition` — one parser shared by the
     // scanner, the scheduler and the editor, so the three can never
     // disagree about what a task file says.
+
+    // MARK: - Runs the scheduler has just started
+
+    /// A run the app started for a task, known before its transcript can
+    /// say so: the task, the title its prompt gives it, and when it began.
+    struct LiveScheduledRun: Equatable {
+        let taskName: String
+        let title: String
+        let startedAt: Date
+    }
+
+    /// How long a run that is no longer in flight keeps its filing when
+    /// the transcript still names no task. Its marker is written with its
+    /// first record, so a scan after the turn ends has read it; past this
+    /// the disk is the authority, as it is for every other row.
+    static let liveRunSettleWindow: TimeInterval = 60
+
+    /// Lay the runs the scheduler started (`runs`, keyed by session id)
+    /// over lists that may not have read their marker yet: each run's row
+    /// is filed under its task in `sessions` — which takes it out of the
+    /// ordinary sessions — and put among that task's runs.
+    ///
+    /// `diskFiled` is the ids a SCAN read a task marker for, off the
+    /// transcript itself. Only that retires a run: the rows handed in may
+    /// carry a task name this app wrote (a placeholder, or an earlier pass
+    /// of this rule), and reading that as the disk speaking would drop the
+    /// run from both lists until the next scan. A run is also retired once
+    /// it is neither in flight (`running`) nor younger than
+    /// `liveRunSettleWindow` — past that the disk decides, as it does for
+    /// every other row. Idempotent, and pure, so the rule runs headless.
+    static func overlaying(_ runs: [String: LiveScheduledRun],
+                           sessions: [AgentSession],
+                           tasks: [ScheduledAgentTask],
+                           diskFiled: Set<String>,
+                           running: Set<String>,
+                           now: Date) -> (sessions: [AgentSession],
+                                          tasks: [ScheduledAgentTask],
+                                          runs: [String: LiveScheduledRun]) {
+        guard !runs.isEmpty else { return (sessions, tasks, runs) }
+        var sessions = sessions
+        var tasks = tasks
+        var held: [String: LiveScheduledRun] = [:]
+        for (id, run) in runs {
+            // The scan's own grouping already holds it.
+            if diskFiled.contains(id) { continue }
+            guard running.contains(id)
+                    || now.timeIntervalSince(run.startedAt) < liveRunSettleWindow
+            else { continue }
+            held[id] = run
+            guard let index = sessions.firstIndex(where: { $0.id == id }) else { continue }
+            sessions[index].scheduledTaskName = run.taskName
+            sessions[index].origin = .scheduled
+            if let task = tasks.firstIndex(where: { $0.name == run.taskName }),
+               !tasks[task].sessions.contains(where: { $0.id == id }) {
+                tasks[task].sessions.append(sessions[index])
+                // Newest first, the order the scanner hands runs over in
+                // and the one `lastRunAt` reads.
+                tasks[task].sessions.sort { $0.activityAt > $1.activityAt }
+            }
+        }
+        return (sessions, tasks, held)
+    }
 }

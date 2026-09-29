@@ -3,27 +3,57 @@
 
 import SwiftUI
 
+/// The plan-usage coin's leading edge, reported by the coin itself.
+private struct UsageCoinLeadingKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > 0 { value = next }
+    }
+}
+
 struct ContentView: View {
+    static let mainLayoutSpace = "sipMainLayout"
+
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var config: ConfigManager
     @EnvironmentObject var chats: ChatManager
-    @EnvironmentObject var projects: ProjectManager
     @EnvironmentObject var agents: AgentManager
     @EnvironmentObject var notesManager: NotesManager
-    /// Only needed so the Settings sheet can be handed it — a factory
-    /// reset has to be able to drop the scheduler's run records.
-    @EnvironmentObject var scheduler: ScheduledTaskScheduler
 
-    @State private var showingSettings: Bool = false
-    /// Which pane the settings sheet opens on. Only the outdated-CLI
-    /// banner moves it; reset on dismiss so the gear button keeps
-    /// landing where it always did.
-    @State private var settingsTab: SettingsView.Tab = .models
-    @ObservedObject private var cliUpdates = AgentCLIUpdateMonitor.shared
+    /// The menu of settings sections that rises from the sidebar's
+    /// Settings row. Which section Settings shows, once open, is
+    /// `AppState.settingsSection`.
+    @State private var showingSettingsMenu: Bool = false
+    /// A Help question to open on and scroll to, set by
+    /// `.openHelpTopic`. It belongs to that one visit: cleared once
+    /// Settings shows anything but Help, so a later visit opens Help
+    /// plain.
+    @State private var settingsHelpTopic: HelpTopic? = nil
     @State private var showingModelSetup: Bool = false
     @State private var leftToggleHovered: Bool = false
     @State private var searchHovered: Bool = false
     @State private var showingSearch: Bool = false
+    /// The plan-usage coin and its window. The coin renders only while
+    /// some installed agent is on a plan (`UsageMonitor.showsIcon`) —
+    /// or while its window is open, so a verdict that flips mid-read
+    /// never takes the button out from under the cursor.
+    @ObservedObject private var usage = UsageMonitor.shared
+    @State private var usageHovered: Bool = false
+    @State private var showingUsage: Bool = false
+    /// The coin's leading edge in the main layout's own coordinate
+    /// space, read off the button itself so its window lands under it
+    /// whatever the glyphs before it measure. The fallback is the sum
+    /// of the insets before it, for the first pass before geometry
+    /// reports.
+    @State private var usageCoinLeading: CGFloat = 138
+    /// The coin's tooltip AND its accessibility label — one string, so
+    /// the two can never say different things. The glyph is a bare
+    /// letter, which names nothing on its own.
+    private var planUsageTitle: String {
+        String(localized: "Plan usage",
+               comment: "Tooltip for the toolbar plan-usage button")
+    }
 
     /// User-resizable sidebar width, persisted across launches.
     /// Window-chrome preference, so UserDefaults rather than the
@@ -45,9 +75,19 @@ struct ContentView: View {
     /// is what re-arms it.
     @State private var showOnboarding: Bool?
 
+    /// The open chat as ONE value, so a change of either half — the slug
+    /// or its group — reaches `ChatManager.noteOpenChat` once. Empty
+    /// while no chat is open.
+    private var openChatKey: String {
+        guard let slug = appState.openChatSlug else { return "" }
+        return ChatManager.liveKey(slug: slug, project: appState.openChatProject)
+    }
+
     var body: some View {
-        // First-time setup: show onboarding only on a truly fresh install.
-        if showOnboarding ?? (config.models.isEmpty && !config.hasCompletedSetup) {
+        // First-time setup: the welcome page, only on a fresh install
+        // (`needsOnboarding` — the same gate the window's minimum size
+        // reads).
+        if showOnboarding ?? config.needsOnboarding {
             OnboardingView(onComplete: { showOnboarding = false })
                 .environmentObject(appState)
                 .environmentObject(config)
@@ -70,7 +110,7 @@ struct ContentView: View {
             // Main content columns: left sidebar + center pane.
             HStack(spacing: 0) {
                 if appState.leftSidebarVisible {
-                    LeftSidebar(showingSettings: $showingSettings)
+                    LeftSidebar(showingSettingsMenu: $showingSettingsMenu)
                         // ROUNDED, always. A drag writes a continuous
                         // translation, so this persists fractional, and
                         // that fraction becomes a sub-point residue in
@@ -123,6 +163,8 @@ struct ContentView: View {
 
                 Button {
                     showingSearch.toggle()
+                    // One dropdown at a time.
+                    if showingSearch { showingUsage = false }
                 } label: {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 14, weight: .medium))
@@ -136,6 +178,33 @@ struct ContentView: View {
                              comment: "Tooltip for the global search button"))
                 .keyboardShortcut("f", modifiers: [.command, .shift])
 
+                if usage.showsIcon || showingUsage {
+                    Button {
+                        showingUsage.toggle()
+                        if showingUsage { showingSearch = false }
+                    } label: {
+                        // A "T", for tokens. Not a currency sign: at
+                        // this size a dollar sign's strokes thin to
+                        // nothing and it reads as an "S".
+                        Image(systemName: "t.circle")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(usageHovered || showingUsage
+                                             ? .primary : .secondary)
+                            .onHover { hovering in usageHovered = hovering }
+                    }
+                    .buttonStyle(.plain)
+                    // Measured BEFORE the padding, so the window aligns
+                    // with the glyph and not with the gap in front of it.
+                    .background(GeometryReader { geo in
+                        Color.clear.preference(
+                            key: UsageCoinLeadingKey.self,
+                            value: geo.frame(in: .named(Self.mainLayoutSpace)).minX)
+                    })
+                    .padding(.leading, 4)
+                    .help(planUsageTitle)
+                    .accessibilityLabel(planUsageTitle)
+                }
+
                 Spacer()
             }
             .padding(.leading, 84)
@@ -143,44 +212,12 @@ struct ContentView: View {
             .padding(.top, 8)
             .ignoresSafeArea(edges: .top)
         }
-        // A stale agent CLI is the one failure in this app with no
-        // voice of its own: turns keep working, against whatever models
-        // the old binary happens to know. So it is announced here
-        // rather than only in Settings, where nobody looks until
-        // something is already wrong.
-        //
-        // Deliberately STATIC — no clock, no countdown, no progress.
-        // The transcript's no-time-in-rows rule applies with more force
-        // to an overlay that is visible on every screen of the app.
-        //
-        // The overlay's own container draws nothing and takes no hits;
-        // only the rows below do, so this cannot swallow a click
-        // anywhere else in the window.
-        .overlay(alignment: .topTrailing) {
-            if !cliUpdates.bannerItems.isEmpty {
-                VStack(alignment: .trailing, spacing: 6) {
-                    ForEach(cliUpdates.bannerItems) { item in
-                        CLIUpdateBanner(item: item) {
-                            settingsTab = .updates
-                            showingSettings = true
-                        } onClose: {
-                            cliUpdates.dismissBanner(agentKey: item.agentKey)
-                        }
-                        .environmentObject(config)
-                    }
-                }
-                .padding(.top, 8)
-                .padding(.trailing, 14)
-                // The same strip the toolbar controls on the left draw
-                // in. Every centre view reserves that band at its top
-                // (`Spacer().frame(height: 44)` in the session and note
-                // views), so a banner drawn INTO it covers nothing —
-                // where one laid out under the safe area lands on the
-                // first rows of whatever the pane is showing.
-                .ignoresSafeArea(edges: .top)
-                .onAppear { cliUpdates.bannerAppeared() }
-            }
-        }
+        // Nothing about updates is drawn over the window. An update on
+        // offer — or a SipAI install waiting for a running turn — puts
+        // the download badge on Settings and on its Updates row
+        // (`UpdateBadge`); an update that happened, or an install that
+        // will, is said for a few seconds in place of the sidebar's
+        // wordmark (`UpdateAnnouncer`).
         // Anchored under its own button rather than presented as a
         // sheet: the conversation the reader came from stays visible
         // behind it, which is usually the thing they are searching
@@ -214,24 +251,66 @@ struct ContentView: View {
             }
         }
         .animation(.easeOut(duration: 0.12), value: showingSearch)
+        // The plan-usage window, the same shape as the search palette:
+        // an overlay under its button over a click-anywhere-else scrim.
+        .overlay(alignment: .topLeading) {
+            if showingUsage {
+                ZStack(alignment: .topLeading) {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { showingUsage = false }
+                    UsagePopover(isPresented: $showingUsage)
+                        .environmentObject(config)
+                        // Under the coin, wherever the toolbar put it.
+                        .padding(.leading, usageCoinLeading)
+                        .padding(.top, 8)
+                }
+                .transition(.opacity)
+                .zIndex(1)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: showingUsage)
+        // The menu of settings sections, the same shape again: an
+        // overlay over a click-anywhere-else scrim, as wide as the
+        // sidebar and rising from its Settings row — placed by the row's
+        // own anchor, so it follows the row through a sidebar resize.
+        .overlayPreferenceValue(SettingsMenuAnchorKey.self) { anchor in
+            if showingSettingsMenu, let anchor {
+                GeometryReader { geo in
+                    let row = geo[anchor]
+                    ZStack(alignment: .bottomLeading) {
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .onTapGesture { showingSettingsMenu = false }
+                        SettingsLauncherMenu(isPresented: $showingSettingsMenu)
+                            .frame(width: max(0, row.width - 16))
+                            .padding(.leading, row.minX + 8)
+                            .padding(.bottom, max(0, geo.size.height - row.minY + 6))
+                    }
+                }
+                .transition(.opacity)
+                .zIndex(1)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: showingSettingsMenu)
+        .modifier(SettingsMenuExclusivity(menu: $showingSettingsMenu,
+                                          search: $showingSearch,
+                                          usage: $showingUsage,
+                                          sidebarVisible: appState.leftSidebarVisible))
+        // The space the coin's position is measured in: the main
+        // layout itself, which every overlay above shares.
+        .coordinateSpace(name: Self.mainLayoutSpace)
+        .onPreferenceChange(UsageCoinLeadingKey.self) { leading in
+            // Only a real measurement moves it, and only by a whole
+            // point — the same reason the sidebar width is rounded.
+            guard leading > 0 else { return }
+            let rounded = leading.rounded()
+            if rounded != usageCoinLeading { usageCoinLeading = rounded }
+        }
         .onAppear {
             if appState.activeModel == nil {
                 appState.activeModel = config.defaultModel
             }
-        }
-        .sheet(isPresented: $showingSettings) {
-            SettingsView(initialTab: settingsTab)
-                .environmentObject(appState)
-                .environmentObject(config)
-                .environmentObject(projects)
-                .environmentObject(agents)
-                .environmentObject(chats)
-                .environmentObject(notesManager)
-                .environmentObject(scheduler)
-                .frame(minWidth: 720, minHeight: 540)
-                // Sheets are separate NSWindows and do not reliably
-                // inherit the main window's forced appearance.
-                .preferredColorScheme(appState.theme.colorScheme)
         }
         .sheet(isPresented: $showingModelSetup) {
             ModelSetupSheet()
@@ -239,21 +318,99 @@ struct ContentView: View {
                 .environmentObject(config)
                 .preferredColorScheme(appState.theme.colorScheme)
         }
-        .onChange(of: showingSettings) { _, showing in
-            if !showing { settingsTab = .models }
+        // What the centre pane shows, told to the two managers that own
+        // the sidebar's steady dot: opening a session or a chat is what
+        // reads it, and whatever is open when its run ends gets no dot.
+        // Here, on the one view that is always up, because the panes
+        // themselves are replaced on every detour.
+        .onChange(of: appState.openAgentSessionId, initial: true) { _, id in
+            agents.noteOpenSession(id)
+        }
+        .onChange(of: openChatKey, initial: true) { _, _ in
+            chats.noteOpenChat(slug: appState.openChatSlug,
+                               project: appState.openChatProject)
+        }
+        // And the draft: its first turn's session is the user's until
+        // the pane flips to it (`AgentManager.noteOpenDraft`).
+        .onChange(of: appState.pendingClaudeSessionDraft?.id, initial: true) { _, id in
+            agents.noteOpenDraft(id)
+        }
+        // A line beside the logo that lands while Add Model is up shows at
+        // once if the sheet leaves the logo in view, and waits for it to
+        // close if it covers it (`UpdateAnnouncer.sheetCoversLockup`).
+        // Settings is no sheet: it keeps the logo in view at the top of
+        // the sidebar, so an update run from Settings → Updates is said
+        // the moment it lands.
+        .onChange(of: showingModelSetup) { _, showing in
+            UpdateAnnouncer.shared.setSheetPresented(showing)
+        }
+        .onChange(of: appState.settingsSection) { _, section in
+            if section != .help { settingsHelpTopic = nil }
+            showingSettingsMenu = false
         }
         .onReceive(NotificationCenter.default.publisher(for: .openModelSetup)) { _ in
             showingModelSetup = true
+        }
+        // A Help question opened from deep inside a view — the
+        // composer's context-chip "?" — travels the same way
+        // `.openModelSetup` does: the question is this view's to hold
+        // until the Help page is made, and the composer is several
+        // routers away from it.
+        .onReceive(NotificationCenter.default.publisher(for: .openHelpTopic)) { note in
+            guard let raw = note.userInfo?[HelpTopic.userInfoKey] as? String,
+                  let topic = HelpTopic(rawValue: raw) else { return }
+            settingsHelpTopic = topic
+            appState.openSettings(.help)
+        }
+        // A Settings section opened from deep inside a view — the chat
+        // page's "Learn more", the sidebar's ADD AGENTS row — takes the
+        // same road as the Help deep link.
+        .onReceive(NotificationCenter.default.publisher(for: .openSettingsTab)) { note in
+            guard let raw = note.userInfo?[SettingsView.Tab.userInfoKey] as? String,
+                  let tab = SettingsView.Tab(rawValue: raw) else { return }
+            settingsHelpTopic = nil
+            appState.openSettings(tab)
+        }
+        // An agent that stops being LISTED — signed out in a terminal,
+        // hidden or deleted in the Guide — takes its open page with it:
+        // nothing renders a session of an unlisted agent, so the pane
+        // routes back to the chat page, as it does for a deleted
+        // session. Turns in flight are not killed; the transcript is
+        // simply no longer shown.
+        .onChange(of: agents.listedAgents) { _, listed in
+            let keys = Set(listed.map(\.key))
+            let openAgent: String? = {
+                if let id = appState.openAgentSessionId {
+                    return agents.sessions.first { $0.id == id }?.agentKey
+                }
+                if let draft = appState.pendingClaudeSessionDraft { return draft.agentKey }
+                if let task = appState.openScheduledTaskName {
+                    return agents.scheduledTasks.first { $0.name == task }?.agent
+                }
+                return nil
+            }()
+            guard let openAgent, !keys.contains(openAgent) else { return }
+            appState.openAgentSessionId = nil
+            appState.openAgentSessionPath = nil
+            appState.pendingClaudeSessionDraft = nil
+            appState.openScheduledTaskName = nil
         }
         // Re-arm the latched gate above. Forced to `true` rather than
         // back to `nil` on purpose: a reset promises first-run setup
         // outright, and re-deriving would hand that promise to whatever
         // config happens to say a moment later — the same 5 s agent
         // re-detection tick and model harvest that run on every launch
-        // are writing to it. Swapping this view out also takes the
-        // Settings sheet with it, which is the intended exit.
+        // are writing to it. Swapping this view out also takes Settings
+        // with it, which is the intended exit — and Settings is closed
+        // HERE, on the success path alone (`FactoryReset` posts this
+        // only when nothing survived), so the window comes back from
+        // onboarding on the ordinary sidebar and centre pane. A partial
+        // wipe leaves Settings open: its report is an alert on the
+        // settings list.
         .onReceive(NotificationCenter.default.publisher(for: .sipFactoryReset)) { _ in
             showOnboarding = true
+            appState.settingsSection = nil
+            showingSettingsMenu = false
         }
         .animation(.easeInOut(duration: 0.2), value: appState.leftSidebarVisible)
         // Font-size tier (Settings → Display) — outermost so sheets
@@ -262,22 +419,67 @@ struct ContentView: View {
         .environment(\.sipLineSpacingFactor, config.fontTier.lineSpacingFactor)
     }
 
-    /// Center column — the chat / note / agent-session router. Exactly
-    /// one of the four routing fields on `AppState` decides what shows;
-    /// they are mutually exclusive by construction (see their `didSet`s).
+    /// Center column — the Settings / chat / note / agent-session router.
+    /// While Settings is open it shows the settings section; otherwise
+    /// exactly one of the four routing fields on `AppState` decides what
+    /// shows, and they are mutually exclusive by construction (see their
+    /// `didSet`s). Settings leaves those fields alone, so closing it
+    /// lands back on whatever they name.
     @ViewBuilder
     private var centerPane: some View {
-        if appState.openNoteId != nil {
+        if let section = appState.settingsSection {
+            // REPLACES the pane rather than covering it. A pane left
+            // standing under Settings keeps its keyboard shortcuts live —
+            // an approval card's Return among them, and the transcript's
+            // ⌘F — and a composer that was first responder keeps taking
+            // keystrokes, all of it invisibly. Torn down here, the pane
+            // comes back the way it does from any other detour: drafts
+            // from `AppState`, notes flushed, turns owned by the managers.
+            SettingsView(section: section, initialHelpTopic: settingsHelpTopic)
+        } else if appState.openNoteId != nil {
             NoteView()
         } else if appState.openAgentSessionId != nil
                   || appState.pendingClaudeSessionDraft != nil
-                  // A scheduled task that has never run opens with no
-                  // session at all — the panel is the whole page.
+                  // A scheduled task's page — what its row opens — has
+                  // no session at all: the panel is the whole page.
                   || appState.openScheduledTaskName != nil {
             AgentSessionView()
         } else {
             ChatView()
         }
+    }
+}
+
+// MARK: - One dropdown at a time
+
+/// The settings menu and the two toolbar dropdowns never show together:
+/// opening the menu closes the search palette and the plan-usage window,
+/// and either of those — a toolbar click or ⌘⇧F, which the menu's scrim
+/// does not cover — closes the menu. A hidden sidebar takes the menu
+/// with it, since the row it rises from is gone.
+private struct SettingsMenuExclusivity: ViewModifier {
+    @Binding var menu: Bool
+    @Binding var search: Bool
+    @Binding var usage: Bool
+    let sidebarVisible: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: menu) { _, open in
+                if open {
+                    search = false
+                    usage = false
+                }
+            }
+            .onChange(of: search) { _, open in
+                if open { menu = false }
+            }
+            .onChange(of: usage) { _, open in
+                if open { menu = false }
+            }
+            .onChange(of: sidebarVisible) { _, visible in
+                if !visible { menu = false }
+            }
     }
 }
 
@@ -357,68 +559,5 @@ private struct SidebarResizeHandle: View {
             NSCursor.pop()
             cursorPushed = false
         }
-    }
-}
-
-/// One "your agent CLI is behind" row, top-trailing over the layout.
-///
-/// Closable, and the close is keyed on the VERSION rather than the
-/// agent: suppressing this release does not suppress the next one. It
-/// carries no dismissal of its own when the tool becomes current — the
-/// row simply stops being owed, which is how a CLI that updated itself
-/// takes its own notice down.
-private struct CLIUpdateBanner: View {
-    let item: CLIUpdateBannerItem
-    let onOpenSettings: () -> Void
-    let onClose: () -> Void
-
-    @EnvironmentObject var config: ConfigManager
-    @State private var closeHovered = false
-    @State private var textHovered = false
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "arrow.down.circle")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.orange)
-
-            Button(action: onOpenSettings) {
-                // Two tool-derived values in one sentence, so it goes
-                // through String(localized:) rather than the
-                // interpolating Text overload — that one runs a
-                // markdown pass over its result.
-                Text(String(localized: "\(config.agentLabel(for: item.agentKey, defaultName: item.defaultName)) has a new version available (\(item.latest.text)). Update it in Settings → Updates.",
-                            comment: "Banner: an agent's command-line tool is out of date; placeholders are the agent's label and a version number"))
-                    .font(.system(size: 12))
-                    .underline(textHovered)
-                    .foregroundStyle(.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .multilineTextAlignment(.leading)
-            }
-            .buttonStyle(.plain)
-            .onHover { textHovered = $0 }
-
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(closeHovered ? .primary : .secondary)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .onHover { closeHovered = $0 }
-            .help(String(localized: "Dismiss", comment: "Tooltip"))
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .frame(maxWidth: 360, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(.regularMaterial)
-                .shadow(color: .black.opacity(0.12), radius: 6, y: 2)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(Color.orange.opacity(0.35), lineWidth: 1)
-        )
     }
 }

@@ -126,7 +126,9 @@ private struct ProbeComposer: View {
             text: $model.text,
             measuredHeight: $model.height,
             onSubmit: { if canSend { model.submits += 1 } },
-            spellChecking: false
+            spellChecking: false,
+            fontSize: 14,
+            lineSpacing: 0
         )
         .frame(width: 320, height: 60)
     }
@@ -183,6 +185,28 @@ private func runScenario(bornSending: Bool, thenSending: Bool) -> Bool? {
     return model.submits > 0
 }
 
+/// The box must stay TextKit 2 after it has measured itself. Its height
+/// read used to go through `layoutManager`, which flips a stock text
+/// view into TextKit 1 for good — where the tier's paragraph line
+/// spacing draws the spelling underline in the gap under the word
+/// (`Verification/FontTierReach` pass 5 measures it). Returns whether
+/// the view is still TextKit 2 and whether the height still grew.
+private func generationScenario() -> (textKit2: Bool, measured: Bool)? {
+    let model = ProbeModel(sending: false)
+    let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 400, height: 200),
+                          styleMask: [.titled], backing: .buffered, defer: false)
+    window.contentView = NSHostingView(rootView: ProbeRoot(model: model))
+    window.orderFront(nil)
+    pump(0.5)
+    guard let content = window.contentView,
+          let tv = findTextView(in: content) else { return nil }
+    let before = model.height
+    model.text = "one line\nand a second line\nand a third line"
+    pump(0.5)
+    window.orderOut(nil)
+    return (tv.textLayoutManager != nil, model.height > before)
+}
+
 /// Spin the run loop so SwiftUI's update cycle actually runs; this
 /// process never calls NSApplication.run().
 private func pump(_ seconds: Double) {
@@ -215,6 +239,15 @@ case .some(false): check(true, "born idle, external turn started → Return is r
 case .some(true):  check(false, "born idle, external turn started → Return is refused",
                          "Return sent into a session another writer owns")
 case nil:          check(false, "born idle, external turn started → Return is refused", "no text view / no event")
+}
+
+switch generationScenario() {
+case let .some(r):
+    check(r.textKit2, "the box stays TextKit 2 after measuring its height",
+          "reading layoutManager flipped it — the spelling underline drifts under line spacing")
+    check(r.measured, "…and the measured height still grows with the text")
+case nil:
+    check(false, "the box stays TextKit 2 after measuring its height", "no text view")
 }
 
 print("")

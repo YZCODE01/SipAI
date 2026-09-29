@@ -32,13 +32,18 @@ out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 
 composer="$root/SipAI/Views/Chat/AgentComposer.swift"
+input="$root/SipAI/Views/Chat/MessageInput.swift"
 
 # The struct, verbatim, out of the shipping file: from its declaration
-# to the closing brace in column 0.
+# to the closing brace in column 0 — plus the text-view subclass it
+# builds its scroll view around (`DropForwardingTextView`, which lives
+# with the chat cards' field), extracted the same way.
 {
   echo "import SwiftUI"
   echo "import AppKit"
   awk '/^struct GrowingTextField: NSViewRepresentable \{/{f=1} f{print} f&&/^\}/{exit}' "$composer"
+  echo
+  awk '/^final class DropForwardingTextView: NSTextView \{/{f=1} f{print} f&&/^\}/{exit}' "$input"
 } > "$out/Extracted.swift"
 
 if ! grep -q "func updateNSView" "$out/Extracted.swift"; then

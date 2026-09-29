@@ -1,7 +1,8 @@
 // MarkdownRenderer.swift
 // Hand-rolled block + inline markdown renderer. A full markdown
 // library would be overkill — the supported subset is small:
-//   • Fenced code blocks (with an optional dim language label above).
+//   • Fenced code blocks (``` or ~~~, with an optional dim language
+//     label above, and Copy / Save buttons on hover).
 //   • Headings `# … ######` (H1 bold+underline, H2 bold, H3–H6 bold).
 //   • Horizontal rules (`---`, `***`, `___`).
 //   • Unordered + ordered lists, with 2- / 4-space nested indent.
@@ -495,66 +496,156 @@ enum MarkdownRenderer {
 
     fileprivate struct ExtractedCode { let language: String; let body: String }
 
-    /// Replace every ` ```lang\n…\n``` ` with a Private-Use-Area
-    /// sentinel `U+E000 CB{index} U+E000` so downstream passes can treat
-    /// the placeholder as an opaque line. Unclosed fences eat the rest
-    /// of the input as code.
+    /// The line that opens a fenced block.
+    private struct Fence {
+        let indent: Int
+        let marker: Character
+        let length: Int
+        let language: String
+    }
+
+    /// Replace every fenced block with a Private-Use-Area sentinel line
+    /// `U+E000 CB{index} U+E000`, so the passes downstream treat it as
+    /// one opaque line.
+    ///
+    /// Fences are read the CommonMark way: three or more backticks or
+    /// tildes at the START of a line, closed by the same character, at
+    /// least as many, alone on its line. Two things depend on it. A model
+    /// that hands over a Markdown file holding code blocks wraps it in a
+    /// longer fence, and the file must stay ONE block — it is what Copy
+    /// and Save carry. And three backticks inside a sentence or a table
+    /// cell are text: read as a fence, they would turn the rest of the
+    /// reply into one grey block. An unclosed fence runs to the end, which
+    /// is a reply still streaming.
+    ///
+    /// Each block is emitted after one blank line, and followed by one
+    /// when it ends the text — the spacing blocks are drawn with. Change
+    /// that and every transcript's rhythm around code moves with it
+    /// (`Verification/CodeBlockActions` §1a pins the shapes).
     private static func extractFencedCodeBlocks(_ source: String)
     -> (skeleton: String, blocks: [ExtractedCode]) {
+        let lines = source.split(separator: "\n", omittingEmptySubsequences: false)
         var blocks: [ExtractedCode] = []
-        var out = ""
-        var remaining = Substring(source)
-        let fence = "```"
-
-        while let openRange = remaining.range(of: fence) {
-            if openRange.lowerBound > remaining.startIndex {
-                out += remaining[remaining.startIndex..<openRange.lowerBound]
+        var out: [Substring] = []
+        out.reserveCapacity(lines.count)
+        var i = 0
+        while i < lines.count {
+            guard let fence = openingFence(lines[i]) else {
+                // Only this extractor may write a placeholder. A text
+                // line carrying the sentinel itself — a reply, a synced
+                // note — would otherwise be read back as one, pointing at
+                // a block that does not exist.
+                out.append(lines[i].contains(Self.codeBlockSentinel)
+                           ? Substring(lines[i].filter { $0 != Self.codeBlockSentinel })
+                           : lines[i])
+                i += 1
+                continue
             }
-            let afterFence = openRange.upperBound
-            var lang = ""
-            var bodyStart = afterFence
-            if let nl = remaining[afterFence...].firstIndex(of: "\n") {
-                let rawLang = remaining[afterFence..<nl]
-                    .trimmingCharacters(in: .whitespaces)
-                // Only the first whitespace-separated token is the
-                // language.
-                lang = rawLang.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
-                bodyStart = remaining.index(after: nl)
-            }
-            if let closeRange = remaining[bodyStart...].range(of: fence) {
-                let body = String(remaining[bodyStart..<closeRange.lowerBound])
-                let idx = blocks.count
-                blocks.append(ExtractedCode(language: lang, body: body))
-                out += "\n\u{E000}CB\(idx)\u{E000}\n"
-                remaining = remaining[closeRange.upperBound...]
-                // Consume an optional newline right after the closing
-                // fence so we don't emit a phantom blank paragraph.
-                if remaining.first == "\n" {
-                    remaining = remaining.dropFirst()
+            var body: [Substring] = []
+            var j = i + 1
+            var closed = false
+            while j < lines.count {
+                if closes(lines[j], fence) {
+                    closed = true
+                    break
                 }
-            } else {
-                // Unclosed — treat the rest as code.
-                let body = String(remaining[bodyStart...])
-                let idx = blocks.count
-                blocks.append(ExtractedCode(language: lang, body: body))
-                out += "\n\u{E000}CB\(idx)\u{E000}\n"
-                remaining = remaining[remaining.endIndex...]
+                body.append(droppingIndent(lines[j], upTo: fence.indent))
+                j += 1
             }
+            let text: String
+            if closed {
+                text = body.isEmpty ? "" : body.joined(separator: "\n") + "\n"
+            } else {
+                text = body.joined(separator: "\n")
+            }
+            out.append("")
+            out.append(Substring("\(codeBlockSentinel)CB\(blocks.count)\(codeBlockSentinel)"))
+            blocks.append(ExtractedCode(language: fence.language, body: text))
+            if !closed || j == lines.count - 1 {
+                out.append("")
+            }
+            i = j + 1
         }
-        out += remaining
-        return (out, blocks)
+        return (out.joined(separator: "\n"), blocks)
+    }
+
+    /// The fence `line` opens, or nil. Only indentation may precede it. A
+    /// backtick fence's info string may not hold a backtick — that line is
+    /// an inline code span, not a fence. The language is the info string's
+    /// first word.
+    private static func openingFence(_ line: Substring) -> Fence? {
+        var i = line.startIndex
+        var indent = 0
+        while i < line.endIndex, line[i] == " " || line[i] == "\t" {
+            indent += 1
+            i = line.index(after: i)
+        }
+        guard i < line.endIndex, line[i] == "`" || line[i] == "~" else { return nil }
+        let marker = line[i]
+        var length = 0
+        while i < line.endIndex, line[i] == marker {
+            length += 1
+            i = line.index(after: i)
+        }
+        guard length >= 3 else { return nil }
+        let info = line[i...]
+        if marker == "`", info.contains("`") { return nil }
+        let language = info.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+        return Fence(indent: indent, marker: marker, length: length, language: language)
+    }
+
+    /// Whether `line` closes `fence`: the same character, at least as many,
+    /// nothing after but whitespace, indented at most three columns past
+    /// the opener. A fence line that names a language (```` ```bash ````)
+    /// never closes — it is content, the inner fence of a file carried in
+    /// a longer one.
+    private static func closes(_ line: Substring, _ fence: Fence) -> Bool {
+        var i = line.startIndex
+        var indent = 0
+        while i < line.endIndex, line[i] == " " || line[i] == "\t" {
+            indent += 1
+            i = line.index(after: i)
+        }
+        guard indent <= fence.indent + 3 else { return false }
+        var length = 0
+        while i < line.endIndex, line[i] == fence.marker {
+            length += 1
+            i = line.index(after: i)
+        }
+        guard length >= fence.length else { return false }
+        return line[i...].allSatisfy { $0 == " " || $0 == "\t" }
+    }
+
+    /// `line` with up to `count` leading spaces or tabs removed. A fence
+    /// inside a list item is indented with the item, and so is every line
+    /// of its code; that indentation is the list's, not the code's.
+    private static func droppingIndent(_ line: Substring, upTo count: Int) -> Substring {
+        var i = line.startIndex
+        var dropped = 0
+        while dropped < count, i < line.endIndex, line[i] == " " || line[i] == "\t" {
+            dropped += 1
+            i = line.index(after: i)
+        }
+        return line[i...]
     }
 
     /// If `line` is a lone `U+E000 CB{index} U+E000` placeholder
     /// (possibly with surrounding whitespace) return `index`.
     private static func codeBlockIndex(in line: String) -> Int? {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        let sentinel: Character = "\u{E000}"
-        guard trimmed.first == sentinel, trimmed.last == sentinel else { return nil }
+        guard trimmed.first == codeBlockSentinel,
+              trimmed.last == codeBlockSentinel else { return nil }
         let inner = trimmed.dropFirst().dropLast()
         guard inner.hasPrefix("CB") else { return nil }
-        return Int(inner.dropFirst(2))
+        // Digits only: `Int` also accepts a sign, and a negative index
+        // passes the caller's `< count` check.
+        let digits = inner.dropFirst(2)
+        guard !digits.isEmpty, digits.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+        return Int(digits)
     }
+
+    /// Marks a fenced block's placeholder line in the skeleton.
+    private static let codeBlockSentinel: Character = "\u{E000}"
 
     // MARK: - Per-line classifiers
 
@@ -656,6 +747,17 @@ private struct MarkdownBlockList: View {
     /// whenever no find bar is open, which is the overwhelmingly common
     /// case and costs nothing.
     @Environment(\.sipSearchSlot) private var searchSlot
+    @Environment(\.sipFontScale) private var fontScale
+    @Environment(\.sipLineSpacingFactor) private var lineSpacingFactor
+
+    /// Every fixed gap below is a Default-tier design value times this
+    /// — the tier's line pitch over Default's — so the space between
+    /// blocks keeps its ratio to the space between wrapped lines. See
+    /// `SipFont.transcriptGapScale` for the measurement behind it.
+    private var gapScale: CGFloat {
+        SipFont.transcriptGapScale(fontScale: fontScale,
+                                   lineSpacingFactor: lineSpacingFactor)
+    }
 
     /// Where each block's matches start, counted from the row's own
     /// base. Empty (and never computed) unless a query is live.
@@ -674,6 +776,7 @@ private struct MarkdownBlockList: View {
 
     var body: some View {
         let slots = blockSlots
+        let gap = gapScale
         VStack(alignment: .leading, spacing: 0) {
             ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
                 let slot = index < slots.count ? slots[index] : .inactive
@@ -682,12 +785,12 @@ private struct MarkdownBlockList: View {
                     HeadingBlock(level: level, text: text, slot: slot)
                 case .paragraph(let text):
                     MarkdownInlineText(text, slot: slot)
-                        .padding(.vertical, paragraphGap)
+                        .padding(.vertical, paragraphGap * gap)
                 case .horizontalRule:
                     Rectangle()
                         .fill(SipDesign.borderLight.opacity(0.6))
                         .frame(height: 1)
-                        .padding(.vertical, 6)
+                        .padding(.vertical, 6 * gap)
                 case .bulletItem(let indent, let text):
                     ListRow(marker: marker(for: indent),
                             indent: indent,
@@ -703,18 +806,18 @@ private struct MarkdownBlockList: View {
                     BlockquoteRow(depth: depth, text: text, slot: slot)
                 case .codeBlock(let lang, let body):
                     CodeBlockView(language: lang, code: body, slot: slot)
-                        .padding(.vertical, 4)
+                        .padding(.vertical, 4 * gap)
                 case .table(let header, let alignments, let rows):
                     MarkdownTableView(header: header,
                                       alignments: alignments,
                                       rows: rows,
                                       slot: slot)
-                        .padding(.vertical, 6)
+                        .padding(.vertical, 6 * gap)
                 case .displayMath(let latex):
                     MathDisplayBlock(latex: latex)
-                        .padding(.vertical, 6)
+                        .padding(.vertical, 6 * gap)
                 case .blank:
-                    Spacer().frame(height: 6)
+                    Spacer().frame(height: 6 * gap)
                 }
             }
         }
@@ -729,6 +832,24 @@ private struct MarkdownBlockList: View {
     }
 }
 
+// MARK: - Body text colour
+
+private struct SipMarkdownTextColorKey: EnvironmentKey {
+    static let defaultValue: Color = ChatDesign.textPrimary
+}
+
+extension EnvironmentValues {
+    /// The colour markdown body text is drawn in: primary everywhere, and
+    /// secondary for a thought inside a Chat only turn's opened activity
+    /// line — the reasoning beside the answer, not the answer. Only the
+    /// foreground moves, so a find highlight (a background wash) and the
+    /// inline-code and link colours stay exactly as they are.
+    var sipMarkdownTextColor: Color {
+        get { self[SipMarkdownTextColorKey.self] }
+        set { self[SipMarkdownTextColorKey.self] = newValue }
+    }
+}
+
 // MARK: - Heading
 
 private struct HeadingBlock: View {
@@ -736,6 +857,8 @@ private struct HeadingBlock: View {
     let text: String
     var slot: SearchHighlightSlot = .inactive
     @Environment(\.sipFontScale) private var fontScale
+    @Environment(\.sipLineSpacingFactor) private var lineSpacingFactor
+    @Environment(\.sipMarkdownTextColor) private var textColor
 
     var body: some View {
         var attr = MarkdownInline.attributed(text, scale: fontScale)
@@ -747,14 +870,17 @@ private struct HeadingBlock: View {
             default: return (14 * fontScale, .bold, false, 4)
             }
         }()
+        let gap = SipFont.transcriptGapScale(fontScale: fontScale,
+                                             lineSpacingFactor: lineSpacingFactor)
         var styled = attr
         styled.font = Font.system(size: size, weight: weight)
         if underline { styled.underlineStyle = Text.LineStyle.single }
         return Text(styled)
-            .foregroundColor(ChatDesign.textPrimary)
+            .lineSpacing(size * lineSpacingFactor)
+            .foregroundColor(textColor)
             .fixedSize(horizontal: false, vertical: true)
-            .padding(.top, topPad)
-            .padding(.bottom, 2)
+            .padding(.top, topPad * gap)
+            .padding(.bottom, 2 * gap)
     }
 }
 
@@ -767,18 +893,36 @@ private struct ListRow: View {
     var markerWidth: CGFloat = 14
     var slot: SearchHighlightSlot = .inactive
     @Environment(\.sipFontScale) private var fontScale
+    @Environment(\.sipLineSpacingFactor) private var lineSpacingFactor
+    @Environment(\.sipMarkdownTextColor) private var textColor
 
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
             Text(marker)
                 .font(.system(size: 14 * fontScale))
-                .foregroundColor(ChatDesign.textPrimary)
+                .foregroundColor(textColor)
                 .frame(width: markerWidth * fontScale, alignment: .leading)
             MarkdownInlineText(text, slot: slot)
             Spacer(minLength: 0)
         }
         .padding(.leading, CGFloat(12 + indent * 6))
-        .padding(.vertical, 1)
+        .padding(.vertical, MarkdownRowPad.points(fontScale: fontScale,
+                                                  lineSpacingFactor: lineSpacingFactor))
+    }
+}
+
+/// The vertical pad on a list or blockquote row: the design's 1 pt at
+/// the tier's gap scale, floored at HALF the line spacing so two
+/// adjacent rows never sit closer than one wrapped line inside either
+/// of them. Without the floor a wrapped bullet's second line is farther
+/// from its first than the next bullet is, at every tier above Default
+/// — the scale alone leaves Large text mode at a fifth of its line gap.
+enum MarkdownRowPad {
+    static func points(fontScale: CGFloat, lineSpacingFactor: CGFloat) -> CGFloat {
+        let scaled = 1 * SipFont.transcriptGapScale(fontScale: fontScale,
+                                                    lineSpacingFactor: lineSpacingFactor)
+        let halfLineGap = 14 * fontScale * lineSpacingFactor / 2
+        return max(scaled, halfLineGap)
     }
 }
 
@@ -788,6 +932,8 @@ private struct BlockquoteRow: View {
     let depth: Int
     let text: String
     var slot: SearchHighlightSlot = .inactive
+    @Environment(\.sipFontScale) private var fontScale
+    @Environment(\.sipLineSpacingFactor) private var lineSpacingFactor
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
@@ -802,7 +948,8 @@ private struct BlockquoteRow: View {
             Spacer(minLength: 0)
         }
         .padding(.leading, 4)
-        .padding(.vertical, 1)
+        .padding(.vertical, MarkdownRowPad.points(fontScale: fontScale,
+                                                  lineSpacingFactor: lineSpacingFactor))
     }
 }
 
@@ -818,6 +965,7 @@ struct MarkdownInlineText: View {
     private let slot: SearchHighlightSlot
     @Environment(\.sipFontScale) private var fontScale
     @Environment(\.sipLineSpacingFactor) private var lineSpacingFactor
+    @Environment(\.sipMarkdownTextColor) private var textColor
 
     init(_ text: String, slot: SearchHighlightSlot = .inactive) {
         self.source = text
@@ -834,7 +982,7 @@ struct MarkdownInlineText: View {
         Text(attributed)
             .font(.system(size: 14 * fontScale))
             .lineSpacing(14 * fontScale * lineSpacingFactor)
-            .foregroundColor(ChatDesign.textPrimary)
+            .foregroundColor(textColor)
             .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
     }
@@ -903,8 +1051,14 @@ enum MarkdownInline {
 
     /// Pull every `` `code` `` into a numbered sentinel so the emphasis
     /// pass doesn't see backticks at all.
-    private static func extractInlineCode(_ text: String)
+    private static func extractInlineCode(_ source: String)
     -> (skeleton: String, spans: [String]) {
+        // The sentinel is this pass's alone: one already in the text would
+        // be read back as a code span the text never held. Removed per
+        // scalar, since the re-injection pattern matches scalars too.
+        let text = source.unicodeScalars.contains("\u{E001}")
+            ? String(String.UnicodeScalarView(source.unicodeScalars.filter { $0 != "\u{E001}" }))
+            : source
         var spans: [String] = []
         var out = ""
         var i = text.startIndex
@@ -1125,9 +1279,26 @@ struct CodeBlockView: View {
     /// `MarkdownRenderer.displayedTexts` leaves it out to match.
     var slot: SearchHighlightSlot = .inactive
     @Environment(\.sipFontScale) private var fontScale
+    /// What Save names the file after (`CodeBlockExport.suggestedFileName`).
+    @Environment(\.sipCodeFileTitle) private var fileTitle
+
+    /// Pointer is inside the block: its Copy and Save buttons show.
+    @State private var hovering = false
+    /// Copy landed — a checkmark for a moment, as on a message's copy.
+    @State private var copied = false
 
     private var body_: AttributedString {
         AttributedString.highlighting(code, slot: slot).0
+    }
+
+    private static var copyHint: String {
+        String(localized: "Copy code",
+               comment: "Tooltip for the copy button in a code block's corner")
+    }
+
+    private static var saveHint: String {
+        String(localized: "Save as a file…",
+               comment: "Tooltip for the save button in a code block's corner; a Save panel follows")
     }
 
     var body: some View {
@@ -1140,19 +1311,71 @@ struct CodeBlockView: View {
                     .padding(.top, 8)
                     .padding(.bottom, 2)
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(body_)
-                    .font(.system(size: 13 * fontScale, design: .monospaced))
-                    .foregroundColor(ChatDesign.textPrimary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 10)
-                    .textSelection(.enabled)
-            }
+            // Long lines WRAP. Scrolling sideways with the indicator hidden
+            // would leave the end of every long line off screen with
+            // nothing saying it is there. A line that fits is unchanged.
+            Text(body_)
+                .font(.system(size: 13 * fontScale, design: .monospaced))
+                .foregroundColor(ChatDesign.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .textSelection(.enabled)
         }
         .background(
             RoundedRectangle(cornerRadius: 8)
                 .fill(Color.gray.opacity(0.12))
         )
+        // Drawn OVER the block, never in its layout: no row changes
+        // height when the pointer arrives, which the transcript's
+        // positioning and its Font Size gaps both rely on.
+        .overlay(alignment: .bottomTrailing) { actions }
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .onHover { inside in
+            hovering = inside
+            if !inside { copied = false }
+        }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .preference(key: CodeBlockHoverPreference.self, value: hovering)
+        // Hover-only buttons do not exist for VoiceOver; the actions do.
+        .accessibilityElement(children: .contain)
+        .accessibilityAction(named: Text(Self.copyHint)) { copy() }
+        .accessibilityAction(named: Text(Self.saveHint)) { save() }
+    }
+
+    /// Lower-right corner, only while pointed at — the same corner and
+    /// the same buttons as a sent message's. Save sits left of Copy.
+    @ViewBuilder
+    private var actions: some View {
+        if hovering {
+            HStack(spacing: 4) {
+                CornerIconButton(systemName: "square.and.arrow.down",
+                                 hint: Self.saveHint,
+                                 action: save)
+                CornerIconButton(systemName: copied ? "checkmark" : "doc.on.doc",
+                                 tinted: copied,
+                                 hint: Self.copyHint,
+                                 action: copy)
+            }
+            .padding(6)
+            .transition(.opacity)
+        }
+    }
+
+    private func copy() {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(CodeBlockExport.copyText(code), forType: .string)
+        copied = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_400_000_000)
+            copied = false
+        }
+    }
+
+    private func save() {
+        CodeBlockSaving.save(code, language: language, title: fileTitle)
     }
 }
 
@@ -1170,6 +1393,7 @@ private struct MarkdownTableView: View {
     let rows: [[String]]
     var slot: SearchHighlightSlot = .inactive
     @Environment(\.sipFontScale) private var fontScale
+    @Environment(\.sipMarkdownTextColor) private var textColor
 
     private var columnCount: Int {
         max(header.count, rows.map(\.count).max() ?? 0)
@@ -1263,7 +1487,7 @@ private struct MarkdownTableView: View {
         attr.applySearchHighlight(slot)
         return Text(attr)
             .font(.system(size: 13 * fontScale))
-            .foregroundColor(ChatDesign.textPrimary)
+            .foregroundColor(textColor)
             .multilineTextAlignment(
                 column < alignments.count && alignments[column] == .center
                     ? .center

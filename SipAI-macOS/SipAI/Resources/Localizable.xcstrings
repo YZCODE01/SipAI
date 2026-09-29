@@ -26,6 +26,17 @@
         }
       }
     },
+    "“%@” and every run it made are removed for every app that reads them — SipAI, the CLI, and the desktop app. This cannot be undone." : {
+      "comment" : "Body of the Delete all confirmation for a scheduled task whose definition is already gone",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“%@”及其所有运行记录会对所有读取它们的 App 一并移除——SipAI、CLI 以及桌面 App。此操作无法撤销。"
+          }
+        }
+      }
+    },
     "“%@” and its messages are removed. This cannot be undone." : {
       "comment" : "Body of the chat delete confirmation",
       "localizations" : {
@@ -81,13 +92,13 @@
         }
       }
     },
-    "(read only)" : {
-      "comment" : "Sidebar section title suffix when the agent's listed sessions cannot be driven",
+    "“%@” stops running, its definition is removed, and every run it made is removed for every app that reads them — SipAI, the CLI, and the desktop app. This cannot be undone." : {
+      "comment" : "Body of the scheduled-task Delete all confirmation",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "（只读）"
+            "value" : "“%@”将停止运行，其定义会被移除，它的所有运行记录也会对所有读取它们的 App 一并移除——SipAI、CLI 以及桌面 App。此操作无法撤销。"
           }
         }
       }
@@ -136,6 +147,17 @@
         }
       }
     },
+    "%@ — an image can only be attached to a NEW %@ chat. Start one, or attach a text file or a PDF." : {
+      "comment" : "Image refused on a resumed kimi session; placeholders are the file name and the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@——只能在新的 %@ 对话中附加图片。请新建对话，或附加文本文件或 PDF。"
+          }
+        }
+      }
+    },
     "%@ — failed" : {
       "comment" : "Scheduled-task detail: last run outcome",
       "localizations" : {
@@ -143,6 +165,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%@ — 失败"
+          }
+        }
+      }
+    },
+    "%@ — images can only be attached in Chat only mode." : {
+      "comment" : "Image refused because Chat only is not available; placeholder is the file name",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@——仅在“仅对话”模式下可附加图片。"
           }
         }
       }
@@ -197,13 +230,46 @@
         }
       }
     },
-    "%@ CLI is installed but not signed in. Sessions sync read-only — configure it (e.g. codex login or an API key) to start new sessions." : {
-      "comment" : "Sidebar hint when an agent CLI exists but has no working auth",
+    "%@ and %lld more" : {
+      "comment" : "Update-hold sheet: the named sessions plus a count of the rest; placeholders are a list and a number",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@ CLI 已安装但未登录。会话以只读方式同步——请先完成配置（例如 codex login 或填入 API 密钥）才能新建会话。"
+            "value" : "%@ 及另外 %lld 个"
+          }
+        }
+      }
+    },
+    "%@ approves its own tool calls on a headless run" : {
+      "comment" : "Hint under the kimi Auto-approve mode row; placeholder is the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 在无界面运行时会自行批准工具调用"
+          }
+        }
+      }
+    },
+    "%@ can look things up on the web but can't read or change files. Attach files with +." : {
+      "comment" : "Hint under the Chat only mode row; placeholder is the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 可以上网查找信息，但无法读取或修改文件。用 + 附加文件。"
+          }
+        }
+      }
+    },
+    "%@ could not be asked to change its config. Add the line below to ~/.codex/config.toml yourself, above any [section] header." : {
+      "comment" : "Help card: no codex app-server answered; placeholder is the Codex label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法让 %@ 修改自己的配置。请自行把下面这一行加入 ~/.codex/config.toml，放在任何 [section] 标题之前。"
           }
         }
       }
@@ -241,6 +307,28 @@
         }
       }
     },
+    "%@ declined the change: %@" : {
+      "comment" : "Help card: codex refused the config write; placeholders are the Codex label and Codex's own message",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 拒绝了这项更改：%@"
+          }
+        }
+      }
+    },
+    "%@ did not answer, so the branch was not created." : {
+      "comment" : "Branch error when the agent's own fork call got no reply; placeholder is the agent's label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 没有响应，分支未创建。"
+          }
+        }
+      }
+    },
     "%@ exited with code %d." : {
       "comment" : "Fallback exit-code message when stderr is empty; placeholder is the agent name",
       "localizations" : {
@@ -258,6 +346,17 @@
         }
       }
     },
+    "%@ fast mode is paid only from usage credits." : {
+      "comment" : "Fast mode switch on a Claude plan: fast mode is paid from usage credits alone, never from the plan's own limits; the placeholder is the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 的快速模式只从额外用量中扣费。"
+          }
+        }
+      }
+    },
     "%@ has %lld pages — the limit is %lld." : {
       "comment" : "Attachment refused: PDF has too many pages",
       "localizations" : {
@@ -269,13 +368,24 @@
         }
       }
     },
-    "%@ has a new version available (%@). Update it in Settings → Updates." : {
-      "comment" : "Banner: an agent's command-line tool is out of date; placeholders are the agent's label and a version number",
+    "%@ has no model configured, so a new session cannot start." : {
+      "comment" : "Runner error: kimi's config.toml names no default_model; placeholder is the agent label",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@ 有新版本可用（%@）。请在「设置 → 更新」中更新。"
+            "value" : "%@ 未配置模型，无法开始新会话。"
+          }
+        }
+      }
+    },
+    "%@ has no switch for this in its own interface. The setting is one line in ~/.codex/config.toml, model_context_window — a single value that %@ clamps to each model's own maximum:" : {
+      "comment" : "Help card, paragraph 2; placeholders are the Codex label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 自身的界面里没有这个开关。这项设置是 ~/.codex/config.toml 中的一行 model_context_window——一个全局值，%@ 会把它限制在每个模型各自的上限以内："
           }
         }
       }
@@ -341,6 +451,17 @@
         }
       }
     },
+    "%@ is hidden in SipAI." : {
+      "comment" : "Scheduled-run failure: the agent is unticked in Settings → Agent Guide",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 已在 SipAI 中隐藏。"
+          }
+        }
+      }
+    },
     "%@ is installed but not signed in." : {
       "comment" : "Scheduled-run failure: agent CLI lacks auth",
       "localizations" : {
@@ -363,17 +484,6 @@
         }
       }
     },
-    "%@ is not installed on this machine. Install it to start a session." : {
-      "comment" : "Sidebar hint when an agent CLI binary is missing",
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "本机未安装 %@。安装后即可开始会话。"
-          }
-        }
-      }
-    },
     "%@ is too large (over %lld MB)." : {
       "comment" : "Attachment refused: file exceeds the size ceiling",
       "localizations" : {
@@ -381,6 +491,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%@ 太大了（超过 %lld MB）。"
+          }
+        }
+      }
+    },
+    "%@ is updating. Your message will be sent when the update finishes." : {
+      "comment" : "Transcript, under a message sent while SipAI updates the agent's command-line tool; placeholder is the agent's label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 正在更新，更新完成后将发送你的消息。"
+          }
+        }
+      }
+    },
+    "%@ just updated to %@" : {
+      "comment" : "Sidebar, in place of the SipAI wordmark for a few seconds: a command-line tool (or SipAI itself) has just been updated; placeholders are the tool's label and the new version number",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 已更新至 %@"
           }
         }
       }
@@ -424,6 +556,28 @@
         }
       }
     },
+    "%@ of %@" : {
+      "comment" : "Plan-usage row value as counts; placeholders are the used and the limit",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%1$@ / %2$@"
+          }
+        }
+      }
+    },
+    "%@ plan" : {
+      "comment" : "Plan-usage card subtitle for a Claude subscription tier; placeholder is the tier ('Max', 'Pro')\nPlan-usage card subtitle; placeholder is the plan tier",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 套餐"
+          }
+        }
+      }
+    },
     "%@ publishes no model list — enter a model id manually." : {
       "comment" : "Model setup: fallback note for a provider with no /models endpoint",
       "localizations" : {
@@ -431,6 +585,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%@ 未提供模型列表——请手动输入模型 ID。"
+          }
+        }
+      }
+    },
+    "%@ refused the Chat only turn: %@" : {
+      "comment" : "Runner error when kimi web refused a Chat only prompt; placeholders are the agent label and kimi's own sentence",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 拒绝了这次“仅对话”消息：%@"
           }
         }
       }
@@ -479,6 +644,50 @@
         }
       }
     },
+    "%@ would put this message over %lldk characters of attached text." : {
+      "comment" : "Attachment refused on an agent session: the per-message inlined-text cap; placeholders are the file name and the cap in thousands",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "附加 %@ 后，这条消息的附件文本将超过 %lldk 个字符。"
+          }
+        }
+      }
+    },
+    "%@'s local server did not answer: %@" : {
+      "comment" : "Runner error when kimi web failed a Chat only request; placeholders are the agent label and the reason",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 的本地服务器没有响应：%@"
+          }
+        }
+      }
+    },
+    "%@'s local server did not start: %@" : {
+      "comment" : "Runner error when kimi web could not be started for a Chat only turn; placeholders are the agent label and the reason",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 的本地服务器未能启动：%@"
+          }
+        }
+      }
+    },
+    "%@'s local server stopped answering before the turn finished." : {
+      "comment" : "Runner error when kimi web went silent during a Chat only turn; placeholder is the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 的本地服务器在这一轮结束前停止了响应。"
+          }
+        }
+      }
+    },
     "%lld" : {
       "comment" : "A count of the number of items in a session group.",
       "isCommentAutoGenerated" : true,
@@ -487,6 +696,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%lld"
+          }
+        }
+      }
+    },
+    "%lld agent turns are still running" : {
+      "comment" : "Update-hold sheet title: several turns are in flight; placeholder is a count",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 个智能体回合仍在进行中"
+          }
+        }
+      }
+    },
+    "%lld free limit resets available" : {
+      "comment" : "Plan-usage note: Codex rate-limit reset credits; placeholder is the count",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "有 %lld 次免费的额度重置可用"
           }
         }
       }
@@ -519,12 +750,46 @@
         }
       }
     },
-    "+ Add another model" : {
+    "%lld-day" : {
+      "comment" : "Plan-usage row: an n-day window",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "+ 添加另一个模型"
+            "value" : "%lld 天"
+          }
+        }
+      }
+    },
+    "%lld-hour" : {
+      "comment" : "Plan-usage row: an n-hour window",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 小时"
+          }
+        }
+      }
+    },
+    "%lld-minute" : {
+      "comment" : "Plan-usage row: an n-minute window",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 分钟"
+          }
+        }
+      }
+    },
+    "%lld-week" : {
+      "comment" : "Plan-usage row: an n-week window",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 周"
           }
         }
       }
@@ -561,34 +826,6 @@
         }
       }
     },
-    "💡 %@ detected. You can directly interact with %@ from SipAI without an additional API key." : {
-      "comment" : "Onboarding hint naming the one detected agent CLI; both placeholders are its name",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "new",
-            "value" : "💡 %1$@ detected. You can directly interact with %2$@ from SipAI without an additional API key."
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "💡 已检测到 %1$@。你可以在 SipAI 中直接使用 %2$@，无需额外的 API 密钥。"
-          }
-        }
-      }
-    },
-    "💡 %@ detected. You can directly interact with them from SipAI without an additional API key." : {
-      "comment" : "Onboarding hint when several agent CLIs are detected; the placeholder is the joined list of names",
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "💡 已检测到 %@。你可以在 SipAI 中直接使用它们，无需额外的 API 密钥。"
-          }
-        }
-      }
-    },
     "📝 Generating note…" : {
       "comment" : "Banner shown while a note is being generated",
       "localizations" : {
@@ -596,6 +833,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "📝 正在生成笔记…"
+          }
+        }
+      }
+    },
+    "1 free limit reset available" : {
+      "comment" : "Plan-usage note: one Codex rate-limit reset credit",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "有 1 次免费的额度重置可用"
           }
         }
       }
@@ -622,6 +870,28 @@
         }
       }
     },
+    "A chat sends your message straight to the model provider's API and shows the reply — no server in between, no SipAI account. Each provider bills its own API key per token." : {
+      "comment" : "Settings → Chat models: explanation, first paragraph",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "对话会把你的消息直接发送到模型提供商的 API 并显示回复——中间没有任何服务器，也不需要 SipAI 账号。各家提供商按 token 对自己的 API 密钥计费。"
+          }
+        }
+      }
+    },
+    "A file in the downloaded codex package (%@) is not signed by OpenAI, so the package was discarded." : {
+      "comment" : "Agent Guide: an executable in the extracted codex package failed the OpenAI Developer ID check; placeholder is its path inside the package",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下载的 codex 发布包中有一个文件（%@）不是由 OpenAI 签名的，因此整个发布包已被丢弃。"
+          }
+        }
+      }
+    },
     "A key is already stored — leave both fields empty to keep it." : {
       "comment" : "Model setup: stored-credentials notice on the API key step",
       "localizations" : {
@@ -633,6 +903,28 @@
         }
       }
     },
+    "a new session" : {
+      "comment" : "Update-hold sheet: a running turn whose session has no name yet",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新会话"
+          }
+        }
+      }
+    },
+    "A plan is ready for your review" : {
+      "comment" : "Notification body: an agent session in plan mode finished its plan and waits for approval",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "有一份计划等待你审阅"
+          }
+        }
+      }
+    },
     "A task named “%@” already exists." : {
       "comment" : "Scheduled-task error: duplicate name",
       "localizations" : {
@@ -640,6 +932,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "名为“%@”的任务已存在。"
+          }
+        }
+      }
+    },
+    "About chats" : {
+      "comment" : "Settings → Chat models: header of the explanation above the model list",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "关于对话"
           }
         }
       }
@@ -707,12 +1010,23 @@
       }
     },
     "Add %@ anyway" : {
-      "comment" : "Keep an unverified model id in the inline add flow\nModel setup: save the model even though verification failed",
+      "comment" : "Model setup: save the model even though verification failed",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "仍然添加 %@"
+          }
+        }
+      }
+    },
+    "Add agents" : {
+      "comment" : "Sidebar row when no agent CLI is installed and signed in; opens Settings → Agent Guide. Rendered uppercase like the section headers.",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加智能体"
           }
         }
       }
@@ -768,14 +1082,13 @@
         }
       }
     },
-    "Add more chat models from the same or different providers." : {
-      "comment" : "A description of the onboarding step where the user can add more models.",
-      "isCommentAutoGenerated" : true,
+    "Add more agents" : {
+      "comment" : "Sidebar row when some but not all supported agents are installed and signed in; opens Settings → Agent Guide. Rendered uppercase like the section headers.",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "从相同或不同的提供商添加更多对话模型。"
+            "value" : "添加更多智能体"
           }
         }
       }
@@ -813,7 +1126,7 @@
         }
       }
     },
-    "Add to Group" : {
+    "Add to group" : {
       "comment" : "Session/task row submenu for custom grouping",
       "localizations" : {
         "zh-Hans" : {
@@ -835,6 +1148,17 @@
         }
       }
     },
+    "Agent Guide" : {
+      "comment" : "Settings pane header",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "智能体指南"
+          }
+        }
+      }
+    },
     "Agent turns in progress will be stopped." : {
       "comment" : "Language pane: warning before restarting while agent turns are in flight",
       "localizations" : {
@@ -842,17 +1166,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "正在进行的智能体回合将被停止。"
-          }
-        }
-      }
-    },
-    "Agent-only mode — pick an agent session from the sidebar, or add a chat model in Settings → Models." : {
-      "comment" : "Empty-state subtitle shown when no chat model is configured but an agent CLI is installed.",
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "仅智能体模式——请从侧边栏选择一个智能体会话，或在“设置 → 模型”中添加对话模型。"
           }
         }
       }
@@ -918,6 +1231,39 @@
         }
       }
     },
+    "An agent turn is still running" : {
+      "comment" : "Update-hold sheet title: one turn is in flight",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "一个智能体回合仍在进行中"
+          }
+        }
+      }
+    },
+    "An image can only be attached to a NEW %@ chat, not to one already under way." : {
+      "comment" : "Runner error: images are refused on a resumed kimi session; placeholder is the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "只能在新的 %@ 对话中附加图片，无法附加到已在进行的对话。"
+          }
+        }
+      }
+    },
+    "An update is available" : {
+      "comment" : "Tooltip and accessibility label on the download badge beside Settings and beside its Updates row",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "有可用的更新"
+          }
+        }
+      }
+    },
     "An update is ready and will be installed once the running agent turn finishes." : {
       "comment" : "Updates pane: the install is waiting for agent turns to end",
       "localizations" : {
@@ -925,6 +1271,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "更新已就绪，将在正在进行的智能体回合结束后安装。"
+          }
+        }
+      }
+    },
+    "Anthropic Console — API usage billing. Opens platform.claude.com in your browser." : {
+      "comment" : "Agent Guide sign-in choice",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Anthropic Console——按 API 用量计费。将在浏览器中打开 platform.claude.com。"
           }
         }
       }
@@ -940,12 +1297,57 @@
         }
       }
     },
-    "API key for %@" : {
+    "API billing — Anthropic Console or an API key" : {
+      "comment" : "Agent Guide: claude runs on an API-billed account — a Console login, or an API key from its environment or settings",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "%@ 的 API 密钥"
+            "value" : "按 API 用量计费——Anthropic Console 或 API 密钥"
+          }
+        }
+      }
+    },
+    "API key" : {
+      "comment" : "Agent Guide: the tool runs on an API key",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "API 密钥"
+          }
+        }
+      }
+    },
+    "API key — paste a key from platform.openai.com." : {
+      "comment" : "Agent Guide sign-in choice",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "API 密钥——粘贴来自 platform.openai.com 的密钥。"
+          }
+        }
+      }
+    },
+    "API key — paste a key from the provider picked below." : {
+      "comment" : "Agent Guide sign-in choice",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "API 密钥——粘贴下方所选提供商的密钥。"
+          }
+        }
+      }
+    },
+    "API key (%@)" : {
+      "comment" : "Agent Guide: kimi runs on an API key; placeholder is the platform the key is from, e.g. platform.moonshot.cn",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "API 密钥（%@）"
           }
         }
       }
@@ -1005,24 +1407,68 @@
         }
       }
     },
-    "Applies to Opus models" : {
-      "comment" : "Model menu switch subtitle: claude's fast mode is Opus-only",
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "适用于 Opus 模型"
-          }
-        }
-      }
-    },
-    "Applies to the sidebar and chat/agent content. Bigger tiers also widen line spacing; Large text mode doubles it." : {
+    "Applies to the sidebar, the conversation, the text box and its controls, notes, and Settings. Bigger tiers also widen line spacing; Large text mode doubles it." : {
       "comment" : "Settings: font size help text",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "作用于侧边栏以及对话／智能体内容。更大的档位同时会加宽行距；大字体模式会将行距加倍。"
+            "value" : "作用于侧边栏、对话内容、输入框及其下方的控件、笔记和设置。更大的档位同时会加宽行距；大字体模式会将行距加倍。"
+          }
+        }
+      }
+    },
+    "Approve and accept edits" : {
+      "comment" : "Plan card button: approve the plan; the agent's edits are accepted without asking",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "批准并自动接受编辑"
+          }
+        }
+      }
+    },
+    "Approve plan" : {
+      "comment" : "Plan card button when the tool offers no accept-edits mode: approve the plan",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "批准计划"
+          }
+        }
+      }
+    },
+    "Approve, ask before edits" : {
+      "comment" : "Plan card button: approve the plan; the agent asks before each edit",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "批准，编辑前先询问"
+          }
+        }
+      }
+    },
+    "As listed by %@ %@ on %@. %@ refreshes this list itself; SipAI re-reads it after every %@ update." : {
+      "comment" : "Help card: where the table came from; placeholders are the Codex label, a version and a date",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "来自 %@ %@ 于 %@ 列出的清单。%@ 会自行刷新这份清单；SipAI 在每次 %@ 更新后都会重新读取。"
+          }
+        }
+      }
+    },
+    "Ask again now" : {
+      "comment" : "Tooltip on the plan-usage window's refresh button",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "立即重新查询"
           }
         }
       }
@@ -1060,12 +1506,34 @@
         }
       }
     },
+    "Attach file" : {
+      "comment" : "Instant hover hint for the add-files button in Chat only",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "附加文件"
+          }
+        }
+      }
+    },
     "Attach files" : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "附加文件"
+          }
+        }
+      }
+    },
+    "Attached files are sent with your message" : {
+      "comment" : "File picker explanatory text for the agent composer in Chat only",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "附加的文件会随消息一起发送"
           }
         }
       }
@@ -1125,13 +1593,24 @@
         }
       }
     },
-    "balanced" : {
-      "comment" : "Image model descriptor: middle of the range",
+    "Back to app" : {
+      "comment" : "Sidebar, while Settings is open: the row where Settings was. Leaves Settings and returns to whatever was open before.",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "均衡"
+            "value" : "返回应用"
+          }
+        }
+      }
+    },
+    "Back to default" : {
+      "comment" : "Help card button: remove model_context_window from config.toml",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢复默认"
           }
         }
       }
@@ -1147,17 +1626,6 @@
         }
       }
     },
-    "best quality" : {
-      "comment" : "Image model descriptor: highest quality, slowest",
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "质量最佳"
-          }
-        }
-      }
-    },
     "Better local AI agent management" : {
       "comment" : "Onboarding welcome bullet title",
       "localizations" : {
@@ -1165,6 +1633,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "更好的本地 AI 智能体管理"
+          }
+        }
+      }
+    },
+    "Billed at a higher rate than standard" : {
+      "comment" : "Model menu switch subtitle: on an API key, fast mode is billed at a higher per-token rate",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "按高于标准的费率计费"
+          }
+        }
+      }
+    },
+    "Billed to the API key %@ is signed in with" : {
+      "comment" : "Hover on the mode chip while Chat only is on, for an agent signed in with an API key; placeholder is the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "由 %@ 所登录的 API 密钥计费"
           }
         }
       }
@@ -1231,16 +1721,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "更改"
-          }
-        }
-      }
-    },
-    "Change key or endpoint" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "更改密钥或接入地址"
           }
         }
       }
@@ -1333,6 +1813,84 @@
         }
       }
     },
+    "Chat only" : {
+      "comment" : "Mode chip row: a turn with no file or command tools, only web lookups, drawing on the user's plan",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅对话"
+          }
+        }
+      }
+    },
+    "Chat only can't be applied to this session — %@'s tool-policy file has a shape SipAI doesn't know." : {
+      "comment" : "Runner error: a kimi session's tool-policy/state.json is not the measured shape; placeholder is the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法对此会话使用“仅对话”——%@ 的工具策略文件格式 SipAI 不认识。"
+          }
+        }
+      }
+    },
+    "Chat only can't be applied to this session — its folder in %@'s store could not be found." : {
+      "comment" : "Runner error: a kimi session directory is missing for a Chat only turn; placeholder is the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法对此会话使用“仅对话”——在 %@ 的存储中找不到它的文件夹。"
+          }
+        }
+      }
+    },
+    "Chat only could not be prepared: %@" : {
+      "comment" : "Runner error when the Chat only persona file cannot be written; placeholder is the system's error text",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法准备“仅对话”：%@"
+          }
+        }
+      }
+    },
+    "Chat only is a row in an agent session's mode chip. A turn sent under it carries none of the agent's file or command tools and no MCP servers — except that %@ keeps any you added to its own config — so the agent can't read, search or change files or run commands, but, like a chat app, it can still look things up on the web when a question needs current information. It answers in the same session, and the next turn in any other row continues the conversation with the tools back. It draws on whatever the tool is signed in to: %@ uses your Claude plan, %@ uses your Codex limits (a ChatGPT plan's Codex allowance, not its chat allowance), %@ uses your Kimi Code membership — and a tool signed in with an API key bills that key. A short exchange costs far less than a full agent turn, and switching rows re-caches the conversation once. To share a file, attach it with the + or drop it on the box: text files and PDF text travel inside the message, and an image goes to the model as an image (on %@, only in a new session's first message). On a new %@ session the first Chat only message arrives all at once; later ones stream. %@ searches the web only when it has a search provider, which a Kimi Code membership login provides; with an API key alone it can open a page but not search." : {
+      "comment" : "FAQ answer: the Chat only mode; placeholders are the three agent labels",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“仅对话”是智能体会话模式菜单中的一项。在这一模式下发送的消息不携带智能体的任何文件或命令工具，也不带 MCP 服务器——只是 %@ 会保留你在它自己的配置里添加的那些——因此智能体无法读取、搜索或修改文件，也不能运行命令；但它仍会像聊天应用那样，在问题需要最新信息时上网查找。它在同一个会话里作答，之后在其他任一模式下发送的消息会带着工具继续这段对话。它使用该工具所登录的账户：%@ 使用你的 Claude 套餐，%@ 使用你的 Codex 额度（ChatGPT 套餐中的 Codex 额度，而非其对话额度），%@ 使用你的 Kimi Code 会员；以 API 密钥登录的工具则由该密钥计费。一次简短的问答比一个完整的智能体回合便宜得多；切换模式会让对话重新缓存一次。要分享文件，请用 + 附加或把文件拖到输入框上：文本文件和 PDF 的文字会随消息一起发送，图片则作为图片发给模型（在 %@ 上，仅限新会话的第一条消息）。在新的 %@ 会话中，第一条“仅对话”消息会一次性到达，之后的消息则会流式显示。%@ 只有在配置了搜索服务时才会上网搜索（登录 Kimi Code 会员即自带一个）；仅使用 API 密钥时，它可以打开网页，但不能搜索。"
+          }
+        }
+      }
+    },
+    "Chat Prompt and Roles" : {
+      "comment" : "Settings section title: the system prompt and roles sent with chat messages.",
+      "isCommentAutoGenerated" : true,
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "对话提示词与角色"
+          }
+        }
+      }
+    },
+    "Chat with %@…" : {
+      "comment" : "Input placeholder while the mode chip is on Chat only; placeholder is the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "与 %@ 对话…"
+          }
+        }
+      }
+    },
     "Chat with GPT, Claude, and more with your API keys." : {
       "comment" : "Onboarding welcome bullet detail",
       "localizations" : {
@@ -1351,6 +1909,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "对话框显示"
+          }
+        }
+      }
+    },
+    "ChatGPT %@" : {
+      "comment" : "Plan-usage card subtitle for a Codex ChatGPT account; placeholder is the plan type\nPlan-usage card subtitle for a codex plan; placeholder is the plan type",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ChatGPT %@"
+          }
+        }
+      }
+    },
+    "ChatGPT plan — Plus, Pro, Business or Enterprise. Opens auth.openai.com in your browser." : {
+      "comment" : "Agent Guide sign-in choice",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "ChatGPT 套餐——Plus、Pro、Business 或 Enterprise。将在浏览器中打开 auth.openai.com。"
           }
         }
       }
@@ -1406,17 +1986,6 @@
         }
       }
     },
-    "Check these tools for new versions automatically" : {
-      "comment" : "Updates pane: toggle the periodic agent CLI release check",
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "自动检查这些工具的新版本"
-          }
-        }
-      }
-    },
     "Check for Updates…" : {
       "comment" : "App menu item: look for a newer version of SipAI",
       "localizations" : {
@@ -1446,6 +2015,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "输入时检查拼写"
+          }
+        }
+      }
+    },
+    "Check these tools for new versions automatically" : {
+      "comment" : "Updates pane: toggle the periodic agent CLI release check",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自动检查这些工具的新版本"
+          }
+        }
+      }
+    },
+    "Checking whether %@ offers Chat only. Send waits for the answer — pick another mode to send now." : {
+      "comment" : "Above the agent composer: a saved Chat only pick is held until the installed CLI's support for it has been read; placeholder is the agent's name",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在确认 %@ 是否支持“仅对话”。发送会等到确认之后；如需立即发送，请选择其他模式。"
+          }
+        }
+      }
+    },
+    "Checking…" : {
+      "comment" : "Agent Guide status line while the first account read is in flight",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在检查…"
           }
         }
       }
@@ -1483,16 +2085,6 @@
         }
       }
     },
-    "Choose your chat provider" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "选择你的对话提供商"
-          }
-        }
-      }
-    },
     "Choose…" : {
       "comment" : "Pick a dedicated folder\nScheduled-task editor folder button",
       "localizations" : {
@@ -1526,6 +2118,17 @@
         }
       }
     },
+    "Claude subscription — Pro or Max. Opens claude.com in your browser." : {
+      "comment" : "Agent Guide sign-in choice",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Claude 订阅——Pro 或 Max。将在浏览器中打开 claude.com。"
+          }
+        }
+      }
+    },
     "Clear" : {
       "comment" : "Global search tooltip",
       "localizations" : {
@@ -1533,6 +2136,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "清除"
+          }
+        }
+      }
+    },
+    "Click a button below to switch between the default and the maximum context window for these models." : {
+      "comment" : "Help card: sentence above the two buttons",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "点击下面的按钮，即可在这些模型的默认上下文窗口与最大上下文窗口之间切换。"
           }
         }
       }
@@ -1566,6 +2180,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "关闭查找"
+          }
+        }
+      }
+    },
+    "Code from the page, if it shows one" : {
+      "comment" : "Agent Guide: placeholder of the field for claude's pasted sign-in code",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "如果页面显示了代码，请粘贴到这里"
           }
         }
       }
@@ -1604,7 +2229,7 @@
       }
     },
     "Collapse scheduled runs" : {
-      "comment" : "Accessibility label for the expanded task chevron",
+      "comment" : "Accessibility hint for a scheduled task's row while its runs are showing",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -1647,6 +2272,17 @@
         }
       }
     },
+    "Compare this code with the one the page shows" : {
+      "comment" : "Agent Guide: under kimi's device code on the browser notice",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请核对页面上显示的代码是否与此相同"
+          }
+        }
+      }
+    },
     "Complete the endpoint above before continuing." : {
       "comment" : "Model setup: URL-completion field empty or unusable at save time",
       "localizations" : {
@@ -1658,12 +2294,13 @@
         }
       }
     },
-    "Configure image generation models." : {
+    "config.toml also sets model_auto_compact_token_limit = %@, which is where %@ compacts the conversation whatever the window says." : {
+      "comment" : "Help card: a user-set compaction limit is in force; placeholders are a number and the Codex label",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "配置图像生成模型。"
+            "value" : "config.toml 还设置了 model_auto_compact_token_limit = %@，无论窗口多大，%@ 都会在这个位置压缩对话。"
           }
         }
       }
@@ -1702,12 +2339,23 @@
       }
     },
     "Continue" : {
-      "comment" : "Model setup: advance to the next step",
+      "comment" : "Model setup: advance to the next step\nOnboarding/setup: advance to the next step",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "继续"
+          }
+        }
+      }
+    },
+    "Continue in your browser" : {
+      "comment" : "Agent Guide: title of the browser notice sheet",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在浏览器中继续"
           }
         }
       }
@@ -1734,6 +2382,39 @@
         }
       }
     },
+    "Copied" : {
+      "comment" : "Help card: the snippet was copied to the clipboard",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已复制"
+          }
+        }
+      }
+    },
+    "Copy" : {
+      "comment" : "Help card: copy the config snippet",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "复制"
+          }
+        }
+      }
+    },
+    "Copy code" : {
+      "comment" : "Tooltip for the copy button in a code block's corner",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "复制代码"
+          }
+        }
+      }
+    },
     "Copy LaTeX" : {
       "comment" : "Context-menu item on a typeset equation; copies its LaTeX source",
       "localizations" : {
@@ -1745,6 +2426,17 @@
         }
       }
     },
+    "Copy session ID" : {
+      "comment" : "Session row menu item — copies the agent's own id for this session",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "复制会话 ID"
+          }
+        }
+      }
+    },
     "Copy this message" : {
       "comment" : "Tooltip for the copy button on a sent message",
       "localizations" : {
@@ -1752,6 +2444,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "复制这条消息"
+          }
+        }
+      }
+    },
+    "Could not be checked · network error" : {
+      "comment" : "Fast mode status: the availability check failed on the network",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法检查 · 网络错误"
           }
         }
       }
@@ -1961,6 +2664,39 @@
         }
       }
     },
+    "Current session" : {
+      "comment" : "Plan-usage row: Claude's 5-hour window",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "当前会话"
+          }
+        }
+      }
+    },
+    "Current week (%@)" : {
+      "comment" : "Plan-usage row: Claude's weekly window for one model family; placeholder is the family ('Opus', 'Sonnet only')",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "本周（%@）"
+          }
+        }
+      }
+    },
+    "Current week (all models)" : {
+      "comment" : "Plan-usage row: Claude's weekly window over every model",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "本周（所有模型）"
+          }
+        }
+      }
+    },
     "Currently, SipAI only supports two languages. We will add more language support later." : {
       "comment" : "Language pane: only two languages ship today, more are coming",
       "localizations" : {
@@ -1983,6 +2719,17 @@
         }
       }
     },
+    "Custom (cron)" : {
+      "comment" : "Schedule frequency option — a hand-written cron expression, for advanced users",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自定义（cron）"
+          }
+        }
+      }
+    },
     "Custom (name & URL)" : {
       "comment" : "Model setup: row that opens the custom-provider form",
       "localizations" : {
@@ -1994,34 +2741,13 @@
         }
       }
     },
-    "custom cron" : {
-      "comment" : "Schedule summary placeholder for an unfinished custom expression",
+    "Daily" : {
+      "comment" : "Plan-usage row: a one-day window",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "自定义 cron"
-          }
-        }
-      }
-    },
-    "Custom cron" : {
-      "comment" : "Schedule frequency option",
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "自定义 cron"
-          }
-        }
-      }
-    },
-    "Custom Provider" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "自定义提供商"
+            "value" : "每日"
           }
         }
       }
@@ -2044,7 +2770,7 @@
       }
     },
     "Date" : {
-      "comment" : "Grouping mode — by last activity",
+      "comment" : "Grouping mode — by last activity\nSchedule editor label before the day chips of a one-time run",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -2139,12 +2865,23 @@
       }
     },
     "Delete" : {
-      "comment" : "Chat row menu item\nChat-group row menu item\nConfirm deleting a chat\nConfirm deleting a chat group\nConfirm deleting a custom session group\nConfirm deleting a scheduled task\nConfirm deleting a session\nConfirm deleting the model\nConfirmation button\nModel row menu: remove this model\nNote kebab menu item\nScheduled task row menu item\nSession row menu item",
+      "comment" : "Chat row menu item\nChat-group row menu item\nConfirm deleting a chat\nConfirm deleting a chat group\nConfirm deleting a custom session group\nConfirm deleting a session\nConfirm deleting the model\nConfirmation button\nModel row menu: remove this model\nNote kebab menu item\nSession row menu item",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "删除"
+          }
+        }
+      }
+    },
+    "Delete %@ from this Mac?" : {
+      "comment" : "Agent Guide: title of the delete confirmation; placeholder is the agent's name",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "从这台 Mac 删除 %@？"
           }
         }
       }
@@ -2160,6 +2897,17 @@
         }
       }
     },
+    "Delete all" : {
+      "comment" : "Confirm deleting a scheduled task's definition and every run session it made\nScheduled task row menu item — deletes the task's definition and every run session it made",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "全部删除"
+          }
+        }
+      }
+    },
     "Delete chat?" : {
       "comment" : "Title of the chat delete confirmation",
       "localizations" : {
@@ -2171,7 +2919,18 @@
         }
       }
     },
-    "Delete Group" : {
+    "Delete definition" : {
+      "comment" : "Confirm deleting a scheduled task's definition, keeping its runs\nScheduled task row menu item — deletes the task's definition and keeps its runs",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "删除定义"
+          }
+        }
+      }
+    },
+    "Delete group" : {
       "comment" : "Context menu item on a custom group header",
       "localizations" : {
         "zh-Hans" : {
@@ -2189,29 +2948,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "删除分组？"
-          }
-        }
-      }
-    },
-    "Delete model" : {
-      "comment" : "A button label that deletes a model.",
-      "isCommentAutoGenerated" : true,
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "删除模型"
-          }
-        }
-      }
-    },
-    "Delete scheduled task?" : {
-      "comment" : "Title of the scheduled-task delete confirmation",
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "删除计划任务？"
           }
         }
       }
@@ -2234,6 +2970,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "删除这条笔记？"
+          }
+        }
+      }
+    },
+    "Delete this task and all its runs?" : {
+      "comment" : "Title of the confirmation for a scheduled task's Delete all — the definition and every run session it made",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "删除此任务及其全部运行记录？"
+          }
+        }
+      }
+    },
+    "Delete this task's definition?" : {
+      "comment" : "Title of the confirmation for a scheduled task's Delete definition — its runs are kept",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "删除此任务的定义？"
           }
         }
       }
@@ -2293,6 +3051,17 @@
         }
       }
     },
+    "Did not complete" : {
+      "comment" : "Agent Guide: an install, sign-in, sign-out or delete did not achieve its result",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未完成"
+          }
+        }
+      }
+    },
     "Direct note" : {
       "comment" : "Note options row — generate the note immediately",
       "localizations" : {
@@ -2305,7 +3074,7 @@
       }
     },
     "Dismiss" : {
-      "comment" : "Tooltip",
+      "comment" : "Close button of the attachment notice above the agent composer",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -2357,6 +3126,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "完成"
+          }
+        }
+      }
+    },
+    "Downloading %@'s installer…" : {
+      "comment" : "Agent Guide progress: the vendor's installer script is downloading; placeholder is the vendor",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在下载 %@ 的安装程序…"
+          }
+        }
+      }
+    },
+    "Downloading OpenAI's release package…" : {
+      "comment" : "Agent Guide progress: codex's package is downloading",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在下载 OpenAI 的发布包…"
+          }
+        }
+      }
+    },
+    "Due %@" : {
+      "comment" : "Scheduled-task status: a one-time run's moment has passed and it has not started yet; placeholder is relative (“2 minutes ago”)",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@到期"
           }
         }
       }
@@ -2416,13 +3218,13 @@
         }
       }
     },
-    "Each provider has their dashboard to help users track their API credit usage. Please check your account dashboard for more information. SipAI also shows how full each agent session's context window is, in the chip under the composer." : {
+    "Each provider has their dashboard to help users track their API credit usage. Please check your account dashboard for more information. SipAI also shows how full each agent session's context window is, in the chip under the composer. Plan limits (the 5-hour and weekly windows of a subscription) are a different thing — see the next question." : {
       "comment" : "FAQ answer: tracking usage",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "每家提供商都提供控制台，帮助用户追踪 API 额度用量。更多信息请查看你的账号控制台。SipAI 也会在每个智能体会话的输入框下方显示上下文窗口的使用比例。"
+            "value" : "每家提供商都提供控制台，帮助用户追踪 API 额度用量。更多信息请查看你的账号控制台。SipAI 也会在每个智能体会话的输入框下方显示上下文窗口的使用比例。套餐额度（订阅的 5 小时窗口和每周窗口）是另一回事——见下一个问题。"
           }
         }
       }
@@ -2522,16 +3324,6 @@
         }
       }
     },
-    "Enter a model ID below." : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "请在下方输入模型 ID。"
-          }
-        }
-      }
-    },
     "Enter a region code like eu-west-3, or a full https:// URL." : {
       "comment" : "Model setup: invalid custom region entry for a template provider",
       "localizations" : {
@@ -2554,16 +3346,6 @@
         }
       }
     },
-    "Enter model ID manually" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "手动输入模型 ID"
-          }
-        }
-      }
-    },
     "Enter your account tag and gateway name, like account-tag/gateway-name." : {
       "comment" : "Model setup: invalid entry in the URL-completion field",
       "localizations" : {
@@ -2571,16 +3353,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "请输入你的账号标识和网关名称，格式为 account-tag/gateway-name。"
-          }
-        }
-      }
-    },
-    "Enter your API key" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "输入你的 API 密钥"
           }
         }
       }
@@ -2734,13 +3506,13 @@
         }
       }
     },
-    "Expand scheduled runs" : {
-      "comment" : "Accessibility label for the collapsed task chevron",
+    "Expand scheduled runs and open the task's page" : {
+      "comment" : "Accessibility hint for a scheduled task's row while its runs are folded away — the click also opens the task's page",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "展开计划运行记录"
+            "value" : "展开计划运行记录并打开任务页面"
           }
         }
       }
@@ -2752,6 +3524,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "展开任务详情"
+          }
+        }
+      }
+    },
+    "Extra usage: %@ of %@ left" : {
+      "comment" : "Plan-usage note: Kimi's extra-usage wallet; placeholders are the balance and the total",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "额外用量：剩余 %1$@ / %2$@"
           }
         }
       }
@@ -2800,35 +3583,35 @@
         }
       }
     },
-    "Fast mode is cooling down after a rate limit" : {
-      "comment" : "Model chip hover: claude reported fast mode paused after a rate limit",
+    "Fast mode (needs usage credits)" : {
+      "comment" : "Scheduled-task summary: the task asks for claude's fast mode, which the account's usage credits cannot pay for at the moment",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "快速模式因触发速率限制而暂时冷却"
+            "value" : "快速模式（需要额外用量）"
           }
         }
       }
     },
-    "Fast mode is off" : {
-      "comment" : "Model chip hover: claude reported fast mode inactive",
+    "Fast mode is on · %@" : {
+      "comment" : "Model chip hover: codex's fast mode is on for the next turn; the placeholder is codex's own description of the tier (“2x speed, increased usage”)",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "快速模式已关闭"
+            "value" : "快速模式已开启 · %@"
           }
         }
       }
     },
-    "Fast mode is on" : {
-      "comment" : "Model chip hover: claude reported fast mode active",
+    "Fast mode is on · the last reply ran fast" : {
+      "comment" : "Model chip hover: the newest API call ran in fast mode",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "快速模式已开启"
+            "value" : "快速模式已开启 · 上一条回复以快速模式运行"
           }
         }
       }
@@ -2844,13 +3627,13 @@
         }
       }
     },
-    "fast, cheap" : {
-      "comment" : "Image model descriptor: fastest and least expensive",
+    "Fast mode requested, but not running · %@" : {
+      "comment" : "Model chip hover: fast mode is switched on, but the calls run at standard speed; the placeholder says why",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "快速、经济"
+            "value" : "已请求快速模式，但未生效 · %@"
           }
         }
       }
@@ -2921,12 +3704,24 @@
         }
       }
     },
-    "Finish" : {
+    "Finish the running turn before removing this tool." : {
+      "comment" : "Agent Guide: why Delete is disabled",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "完成"
+            "value" : "请等正在进行的回合结束后再移除此工具。"
+          }
+        }
+      }
+    },
+    "Finish the running turn before signing out." : {
+      "comment" : "Agent Guide: why Sign out is disabled",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请等正在进行的回合结束后再退出登录。"
           }
         }
       }
@@ -2937,7 +3732,29 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "请先等待当前轮次结束，再更新此工具。"
+            "value" : "请等正在进行的回合结束后再更新此工具。"
+          }
+        }
+      }
+    },
+    "Finished" : {
+      "comment" : "Sidebar tag on a one-time scheduled task that has had its run",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已完成"
+          }
+        }
+      }
+    },
+    "Finished, not opened yet" : {
+      "comment" : "Accessibility label for the sidebar's steady dot — a run finished and the session (or chat) has not been opened since",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已完成，尚未打开"
           }
         }
       }
@@ -2964,12 +3781,24 @@
         }
       }
     },
-    "for %@" : {
+    "For advanced users: write the schedule as a 5-field cron expression (minute hour day month weekday)" : {
+      "comment" : "Hover text on the Custom (cron) schedule option",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "适用于 %@"
+            "value" : "供高级用户使用：以 5 字段 cron 表达式（分 时 日 月 周）编写计划"
+          }
+        }
+      }
+    },
+    "For API usage, check your provider's developer platform." : {
+      "comment" : "Plan-usage window footer: API usage is not shown here",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "API 用量请到你所用提供商的开发者平台查看。"
           }
         }
       }
@@ -3039,16 +3868,6 @@
         }
       }
     },
-    "Get your API key from %@" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "从 %@ 获取你的 API 密钥"
-          }
-        }
-      }
-    },
     "Give the task a name." : {
       "comment" : "Schedule validation: missing name",
       "localizations" : {
@@ -3056,6 +3875,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "请为任务取一个名称。"
+          }
+        }
+      }
+    },
+    "Global (kimi.ai)" : {
+      "comment" : "Agent Guide: kimi region choice",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "国际版（kimi.ai）"
           }
         }
       }
@@ -3116,6 +3946,17 @@
         }
       }
     },
+    "Hide the steps" : {
+      "comment" : "Tooltip on a Chat only activity line that is open: click to hide the model's thoughts and web lookups",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "隐藏步骤"
+          }
+        }
+      }
+    },
     "Home folder" : {
       "comment" : "Scheduled-task detail: no cwd recorded\nScheduled-task editor: no cwd set",
       "localizations" : {
@@ -3123,6 +3964,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "主目录"
+          }
+        }
+      }
+    },
+    "Hour" : {
+      "comment" : "Caption over the hour chips in the schedule editor",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "小时"
           }
         }
       }
@@ -3192,6 +4044,17 @@
         }
       }
     },
+    "How do you want to sign in?" : {
+      "comment" : "Agent Guide: question on the sign-in method sheet",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你想用哪种方式登录？"
+          }
+        }
+      }
+    },
     "https://…" : {
       "comment" : "Model setup: custom region URL placeholder",
       "localizations" : {
@@ -3214,34 +4077,112 @@
         }
       }
     },
-    "Image Models" : {
-      "comment" : "Model setup: row that opens the image-model page",
+    "If you would rather use a subscription plan for your conversations, use the **Chat only** mode of a SipAI agent session instead. See [Agent Guide](sipai://settings/agents) for the details." : {
+      "comment" : "Settings → Chat models: explanation, second paragraph. Keep the [Agent Guide](sipai://settings/agents) link and the **Chat only** mode name (the mode chip's row).",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "图像模型"
+            "value" : "如果你更想用订阅套餐进行对话，请改用 SipAI 智能体会话的“**仅对话**”模式。详情请见[智能体指南](sipai://settings/agents)。"
           }
         }
       }
     },
-    "Image models require an API key from the same provider.\nYou can also set these up later in Settings." : {
+    "incomplete cron expression" : {
+      "comment" : "Schedule summary placeholder while the Custom (cron) field does not hold a valid expression",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "图像模型需要同一提供商的 API 密钥。\n你也可以稍后在设置中配置。"
+            "value" : "未完成的 cron 表达式"
           }
         }
       }
     },
-    "Install the CLI and sign in once; the sidebar section appears automatically. For examples, Claude Code: npm install -g @anthropic-ai/claude-code, then run claude in a terminal to log in. Codex: npm install -g @openai/codex, then codex login. Either agent runs fully inside SipAI once it is signed in; before that its sessions list read-only." : {
-      "comment" : "FAQ answer: agent CLI setup",
+    "Install" : {
+      "comment" : "Agent Guide: install the agent's command-line tool",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "安装 CLI 并登录一次，侧边栏对应的区块就会自动出现。例如，Claude Code：npm install -g @anthropic-ai/claude-code，然后在终端运行 claude 登录。Codex：npm install -g @openai/codex，然后 codex login。两个智能体只要登录，就能完全在 SipAI 内部运行；在此之前它的会话只以只读方式列出。"
+            "value" : "安装"
+          }
+        }
+      }
+    },
+    "Install %@?" : {
+      "comment" : "Agent Guide: title of the install confirmation; placeholder is the agent's name",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "安装 %@？"
+          }
+        }
+      }
+    },
+    "Install Now" : {
+      "comment" : "Updates pane: stop the running agent turn and install the waiting SipAI update immediately",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "立即安装"
+          }
+        }
+      }
+    },
+    "Install or sign in to %@" : {
+      "comment" : "Tooltip on the sidebar's add-agents row; placeholder is the joined list of agent names",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "安装或登录 %@"
+          }
+        }
+      }
+    },
+    "Installed · not signed in" : {
+      "comment" : "Agent Guide status line",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已安装 · 未登录"
+          }
+        }
+      }
+    },
+    "Installed somewhere SipAI does not manage (%@). Remove it the way it was installed." : {
+      "comment" : "Agent Guide: the install source could not be detected, so no Delete is offered; placeholder is the binary's path",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "安装在 SipAI 不管理的位置（%@）。请按安装时的方式移除。"
+          }
+        }
+      }
+    },
+    "Installing…" : {
+      "comment" : "Agent Guide progress: the installer is running",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在安装…"
+          }
+        }
+      }
+    },
+    "Interrupt and Install Now" : {
+      "comment" : "Update-hold sheet: stop the running turn and install the update immediately",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "中断并立即安装"
           }
         }
       }
@@ -3279,6 +4220,39 @@
         }
       }
     },
+    "Its model is not among your organization's allowed models" : {
+      "comment" : "Fast mode status: the organization's model allow-list excludes the fast mode model",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "它所用的模型不在你所在组织允许的模型之列"
+          }
+        }
+      }
+    },
+    "Its sessions stay on disk; its section leaves the sidebar until you sign in again." : {
+      "comment" : "Agent Guide: body of the sign-out confirmation",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "它的会话仍保留在磁盘上；在重新登录之前，它的分区会从侧边栏消失。"
+          }
+        }
+      }
+    },
+    "Its sessions stay on disk; its section leaves the sidebar until you sign in again. Every API-key provider is removed from kimi's config.toml through kimi's own command, with the model aliases that referenced them." : {
+      "comment" : "Agent Guide: body of the sign-out confirmation for a key-based kimi",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "它的会话仍保留在磁盘上；在重新登录之前，它的分区会从侧边栏消失。所有 API 密钥提供商都会通过 kimi 自己的命令从 config.toml 中移除，引用它们的模型别名也会一并移除。"
+          }
+        }
+      }
+    },
     "Its stored API key is deleted permanently. Its models stay and can be re-linked by adding the provider again." : {
       "comment" : "Body of the Remove Provider confirmation",
       "localizations" : {
@@ -3286,6 +4260,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "其存储的 API 密钥将被永久删除。它的模型会保留，重新添加该提供商后即可重新关联。"
+          }
+        }
+      }
+    },
+    "Keep planning" : {
+      "comment" : "Plan card button: do not approve the plan yet; the agent stops and waits for the user's next message",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "继续规划"
           }
         }
       }
@@ -3301,6 +4286,28 @@
         }
       }
     },
+    "Kimi Code membership — opens %@ and shows a code to confirm there." : {
+      "comment" : "Agent Guide sign-in choice; placeholder is the site's sign-in page, www.kimi.com or www.kimi.ai",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kimi Code 会员——将打开 %@ 并显示一个需要在页面上确认的代码。"
+          }
+        }
+      }
+    },
+    "Kimi Code membership — opens the site you pick and shows a code to confirm there." : {
+      "comment" : "Agent Guide sign-in choice, before a Kimi Code site is picked",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Kimi Code 会员——将打开你所选的站点，并显示一个需要在页面上确认的代码。"
+          }
+        }
+      }
+    },
     "Kimi reported an error but gave no detail." : {
       "comment" : "Fallback message for a kimi error record",
       "localizations" : {
@@ -3308,6 +4315,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Kimi 报告了一个错误，但没有给出详情。"
+          }
+        }
+      }
+    },
+    "kimi.com and kimi.ai are separate services — pick the one you signed up on." : {
+      "comment" : "Agent Guide: under the Kimi Code site choice; the two sites keep separate accounts, memberships and keys",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "kimi.com 与 kimi.ai 是两个独立的服务——请选择你注册的那一个。"
           }
         }
       }
@@ -3371,6 +4389,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "上次检查 %@"
+          }
+        }
+      }
+    },
+    "last ran as %@" : {
+      "comment" : "Model chip hover: the model id this session's previous turn actually ran under, when it differs from what the alias resolves to now",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上一轮实际运行的模型为 %@"
           }
         }
       }
@@ -3475,6 +4504,28 @@
         }
       }
     },
+    "Looking for “%@” on %@" : {
+      "comment" : "Chat only activity line while codex searches inside a page; placeholders are the text looked for and the site",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在 %2$@ 中查找“%1$@”"
+          }
+        }
+      }
+    },
+    "Looking up the latest version…" : {
+      "comment" : "Agent Guide progress: fetching the version to install",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在查询最新版本…"
+          }
+        }
+      }
+    },
     "macOS keeps asking to let SipAI use a folder — is that normal?" : {
       "comment" : "FAQ question",
       "localizations" : {
@@ -3486,13 +4537,24 @@
         }
       }
     },
-    "Manage your local AI agents with efficient workflows." : {
-      "comment" : "Onboarding welcome bullet detail",
+    "Mainland China (kimi.com)" : {
+      "comment" : "Agent Guide: kimi region choice",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "通过 SipAI 管理你所有的本地 AI 智能体任务，让工作更高效。"
+            "value" : "中国大陆（kimi.com）"
+          }
+        }
+      }
+    },
+    "Managed by %@" : {
+      "comment" : "Updates pane: a package manager the tool's own updater leaves updates to installed this copy; placeholder is its name, e.g. Homebrew",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "由 %@ 管理"
           }
         }
       }
@@ -3508,6 +4570,17 @@
         }
       }
     },
+    "Maximum" : {
+      "comment" : "Help card table header: the largest context window config may set",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "最大"
+          }
+        }
+      }
+    },
     "MCP approver setup failed: %@" : {
       "comment" : "Runner error when MCPBridge.ensureRuntime throws",
       "localizations" : {
@@ -3519,13 +4592,68 @@
         }
       }
     },
+    "Membership" : {
+      "comment" : "Plan-usage card subtitle for a Kimi Code membership",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "会员"
+          }
+        }
+      }
+    },
+    "Membership (%@)" : {
+      "comment" : "Agent Guide: a Kimi Code membership; placeholder is the site it is signed in on, kimi.com or kimi.ai",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "会员（%@）"
+          }
+        }
+      }
+    },
+    "Minute" : {
+      "comment" : "Caption over the minute chips in the schedule editor",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "分钟"
+          }
+        }
+      }
+    },
+    "Missed" : {
+      "comment" : "Sidebar tag on a one-time scheduled task whose moment passed while SipAI was closed, too long ago to catch up",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已错过"
+          }
+        }
+      }
+    },
     "missed a run %@" : {
       "comment" : "Scheduled-task status: a slot passed without running",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "错过了一次运行 %@"
+            "value" : "%@错过了一次运行"
+          }
+        }
+      }
+    },
+    "Missed its one run %@" : {
+      "comment" : "Scheduled-task status: a one-time task's moment passed while SipAI was closed, too long ago to catch up; placeholder is relative (“3 days ago”)",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@错过了唯一一次运行"
           }
         }
       }
@@ -3564,22 +4692,12 @@
       }
     },
     "Model" : {
-      "comment" : "Instant hover hint for the model picker\nModel menu label when no override is set",
+      "comment" : "Help card table header\nInstant hover hint for the model picker\nModel menu label when no override is set",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "模型"
-          }
-        }
-      }
-    },
-    "Model ID" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "模型 ID"
           }
         }
       }
@@ -3597,23 +4715,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "找不到模型：%@。%@"
-          }
-        }
-      }
-    },
-    "Models" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Models"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "模型"
           }
         }
       }
@@ -3684,6 +4785,17 @@
         }
       }
     },
+    "Needs a paid subscription" : {
+      "comment" : "Fast mode status: the account's plan does not include fast mode",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要付费订阅"
+          }
+        }
+      }
+    },
     "Needs at least one turn and a chat model (Settings → Chat models)" : {
       "comment" : "Tooltip for the session-note button when disabled",
       "localizations" : {
@@ -3691,6 +4803,28 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "需要至少一个回合以及一个对话模型（设置 → 对话模型）"
+          }
+        }
+      }
+    },
+    "Needs usage credits" : {
+      "comment" : "Fast mode status: fast mode is paid from usage credits, which are not available",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要额外用量"
+          }
+        }
+      }
+    },
+    "Needs usage credits · %@" : {
+      "comment" : "Model menu switch subtitle: fast mode on a Claude plan is paid from usage credits, which are unavailable; the placeholder says why",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要额外用量 · %@"
           }
         }
       }
@@ -3723,7 +4857,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "新建 %@ 任务"
+            "value" : "新建 %@ 会话"
           }
         }
       }
@@ -3763,7 +4897,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "新建 Claude 任务"
+            "value" : "新建 Claude 会话"
           }
         }
       }
@@ -3774,7 +4908,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "新建 Codex 任务"
+            "value" : "新建 Codex 会话"
           }
         }
       }
@@ -3801,7 +4935,7 @@
         }
       }
     },
-    "New Group…" : {
+    "New group…" : {
       "comment" : "Group submenu item — create a group and file this row into it\nMenu item — create an empty custom session group\nMove-to menu item — create a chat group and move the chat into it",
       "localizations" : {
         "zh-Hans" : {
@@ -3818,7 +4952,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "新建 Kimi 任务"
+            "value" : "新建 Kimi 会话"
           }
         }
       }
@@ -3840,7 +4974,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "新建任务"
+            "value" : "新建会话"
           }
         }
       }
@@ -3851,13 +4985,13 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "在 %@ 中新建任务"
+            "value" : "在 %@ 中新建会话"
           }
         }
       }
     },
     "New version %@" : {
-      "comment" : "Updates pane: a newer CLI release exists; placeholder is a version number",
+      "comment" : "Updates pane: a newer release exists, of SipAI or of a command-line tool; placeholder is a version number",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -3874,6 +5008,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "下一个匹配"
+          }
+        }
+      }
+    },
+    "Next month" : {
+      "comment" : "Accessibility label of the calendar's forward arrow in the schedule editor",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下个月"
           }
         }
       }
@@ -3901,12 +5046,23 @@
       }
     },
     "No activity yet" : {
-      "comment" : "Date group for scheduled tasks that have never run",
+      "comment" : "Date group for scheduled tasks with no run and no creation date",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "尚无活动"
+          }
+        }
+      }
+    },
+    "No agent on this Mac is signed in to a plan." : {
+      "comment" : "Plan-usage window body when no agent CLI runs on a subscription",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这台 Mac 上没有登录了套餐的智能体。"
           }
         }
       }
@@ -3934,23 +5090,12 @@
       }
     },
     "No chat model configured. Add one in Settings → Chat models." : {
-      "comment" : "Session-note error when no model exists",
+      "comment" : "Error shown when generating a note without a configured model\nSend-time error when no chat model and no agent CLI is available.\nSession-note error when no model exists",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "未配置对话模型。请在「设置 → 对话模型」中添加。"
-          }
-        }
-      }
-    },
-    "No chat model configured. Add one in Settings → Models." : {
-      "comment" : "Empty-state subtitle shown when no chat model and no agent CLI is available.\nError shown when generating a note without a configured model\nSend-time error when no chat model and no agent CLI is available.",
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "未配置对话模型。请在「设置 → 模型」中添加。"
           }
         }
       }
@@ -4006,6 +5151,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "还没有分组。"
+          }
+        }
+      }
+    },
+    "no larger window" : {
+      "comment" : "Help card table: the model's maximum equals its default",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "没有更大的窗口"
           }
         }
       }
@@ -4094,6 +5250,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "%@ 尚未有任何输出。"
+          }
+        }
+      }
+    },
+    "No package is published for this Mac's architecture (%@)." : {
+      "comment" : "Agent Guide: codex's release has no package for this CPU; placeholder is the architecture",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "没有适用于这台 Mac 架构（%@）的发布包。"
           }
         }
       }
@@ -4208,13 +5375,13 @@
         }
       }
     },
-    "Not a valid 5-field cron expression (minute hour day month weekday)." : {
-      "comment" : "Schedule editor hint: parse failure",
+    "Not installed" : {
+      "comment" : "Agent Guide status line",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "不是有效的 5 字段 cron 表达式（分 时 日 月 周）。"
+            "value" : "未安装"
           }
         }
       }
@@ -4230,6 +5397,17 @@
         }
       }
     },
+    "Not running · %@" : {
+      "comment" : "Fast mode switch, while on: it is not running; the placeholder is the reason (“your usage credits are used up”)",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未生效 · %@"
+          }
+        }
+      }
+    },
     "Not set" : {
       "comment" : "When dedicated folder is unset",
       "localizations" : {
@@ -4241,13 +5419,13 @@
         }
       }
     },
-    "Not yet. For example, Claude's plan percentages come from private endpoints only Anthropic's own apps can use — there is no documented API. To see your limits, you need to check with your provider. If a session or weekly limit is hit mid-run, the CLI says so and SipAI shows that message in the transcript." : {
-      "comment" : "FAQ answer: plan consumption",
+    "Not updated yet" : {
+      "comment" : "Plan-usage window footer before any answer arrived",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "暂时不能。例如，Claude 的套餐百分比来自只有 Anthropic 自家 App 才能访问的私有接口，没有公开的 API。要查看你的额度，需要向你的提供商查询。如果运行途中触及单次会话或每周额度，CLI 会给出提示，SipAI 也会把该消息显示在记录中。"
+            "value" : "尚未更新"
           }
         }
       }
@@ -4340,6 +5518,17 @@
         }
       }
     },
+    "Nothing else on your Mac is changed." : {
+      "comment" : "Agent Guide: closing line of every install confirmation",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你的 Mac 上不会有其他改动。"
+          }
+        }
+      }
+    },
     "Nothing fires this task — use Run now when you want it." : {
       "comment" : "Schedule editor hint: no schedule",
       "localizations" : {
@@ -4406,6 +5595,17 @@
         }
       }
     },
+    "On by default in %@" : {
+      "comment" : "Fast mode switch: on because codex itself turns it on here — its config, or the model's own default — and not because it was picked; the placeholder is the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 %@ 中默认开启"
+          }
+        }
+      }
+    },
     "On day" : {
       "comment" : "Schedule editor day-of-month picker label",
       "localizations" : {
@@ -4434,6 +5634,28 @@
         }
       }
     },
+    "Once" : {
+      "comment" : "Schedule frequency option — a single run at a chosen date and time",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅一次"
+          }
+        }
+      }
+    },
+    "once, %@" : {
+      "comment" : "Schedule summary for a task that runs a single time; placeholder is a date and time such as “tomorrow at 9:00 AM”",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅一次，%@"
+          }
+        }
+      }
+    },
     "Only %lld files can be attached to one message." : {
       "comment" : "Attachment refused: per-message count cap",
       "localizations" : {
@@ -4445,6 +5667,17 @@
         }
       }
     },
+    "Only available on the Anthropic API directly" : {
+      "comment" : "Fast mode status: not offered through a cloud provider or gateway",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仅在直接使用 Anthropic API 时可用"
+          }
+        }
+      }
+    },
     "Only local commands were recorded: %@. Running /clear starts a fresh session file — quitting right after leaves it like this." : {
       "comment" : "Existing-session empty state detail; placeholder lists the slash commands found in the file",
       "localizations" : {
@@ -4452,6 +5685,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "只记录到本地命令：%@。运行 /clear 会新建一个会话文件——之后立刻退出就会留下这样的结果。"
+          }
+        }
+      }
+    },
+    "Only providers that are installed and signed in appear in the sidebar." : {
+      "comment" : "Agent Guide intro, closing sentence",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "只有已安装并已登录的提供商才会出现在侧边栏。"
           }
         }
       }
@@ -4522,13 +5766,35 @@
         }
       }
     },
-    "Open this scheduled task" : {
-      "comment" : "Accessibility hint for a scheduled task row",
+    "Open Settings → Agent Guide. Install runs the provider's own installer, Sign In opens the provider's sign-in page (a subscription) or takes an API key, and the provider appears in the sidebar once both are done. Installing or signing in from Terminal works the same way; SipAI notices within a few seconds. Only providers that are installed and signed in are listed — the sidebar's ADD AGENTS row opens the same page." : {
+      "comment" : "FAQ answer: agent CLI setup",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "打开此计划任务"
+            "value" : "打开“设置 → 智能体指南”。“安装”会运行提供商自己的安装程序，“登录”会打开提供商的登录页面（订阅）或接受 API 密钥，两者完成后该提供商就会出现在侧边栏。在“终端”里安装或登录也一样有效；SipAI 会在几秒内检测到。只有已安装并已登录的提供商才会被列出——侧边栏的“添加智能体”一行会打开同一个页面。"
+          }
+        }
+      }
+    },
+    "OpenAI's checksum file could not be fetched, so nothing was downloaded." : {
+      "comment" : "Agent Guide: the codex package's checksum list did not download",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法获取 OpenAI 的校验文件，因此没有下载任何内容。"
+          }
+        }
+      }
+    },
+    "OpenAI's model pages list a 1,050,000-token context window for GPT-6-Astra, GPT-5.6-Sol, and other recent models. %@'s own model catalog runs these models with a default context window of %@ tokens and keeps %lld%% of it effective — %@ tokens, the %@ in the chip." : {
+      "comment" : "Help card, paragraph 1; placeholders are the Codex label, a grouped token count, a percentage, a grouped token count and a compact token count",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "OpenAI 的模型页面为 GPT-6-Astra、GPT-5.6-Sol 等近期模型列出了 1,050,000 token 的上下文窗口。%@ 自己的模型目录让这些模型以 %@ token 的默认上下文窗口运行，并保留其中 %lld%% 作为有效窗口——即 %@ token，也就是输入框下方显示的 %@。"
           }
         }
       }
@@ -4540,16 +5806,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "或"
-          }
-        }
-      }
-    },
-    "Or enter a model ID" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "或手动输入模型 ID"
           }
         }
       }
@@ -4620,12 +5876,13 @@
         }
       }
     },
-    "Paste API key" : {
+    "Paste the key" : {
+      "comment" : "Agent Guide: placeholder of the API key field",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "粘贴 API 密钥"
+            "value" : "粘贴密钥"
           }
         }
       }
@@ -4663,6 +5920,17 @@
         }
       }
     },
+    "Paused after a rate limit · resumes by itself" : {
+      "comment" : "Fast mode status: paused after a rate limit; the agent turns it back on when the pause ends",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "因速率限制暂停 · 稍后会自动恢复"
+          }
+        }
+      }
+    },
     "Permission request" : {
       "comment" : "Approval card title",
       "localizations" : {
@@ -4670,6 +5938,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "权限请求"
+          }
+        }
+      }
+    },
+    "Pick a date" : {
+      "comment" : "Schedule editor chip that opens a calendar for a one-time run",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "选择日期"
           }
         }
       }
@@ -4686,12 +5965,34 @@
       }
     },
     "Plan" : {
-      "comment" : "Permission-mode chip label for plan",
+      "comment" : "Permission-mode chip label for plan\nPlan-usage card subtitle fallback",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "规划"
+          }
+        }
+      }
+    },
+    "Plan ready for review" : {
+      "comment" : "Plan card title: an agent session in plan mode finished its plan and waits for the user's approval",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "计划待审阅"
+          }
+        }
+      }
+    },
+    "Plan usage" : {
+      "comment" : "Title of the toolbar plan-usage window\nTooltip for the toolbar plan-usage button",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "套餐用量"
           }
         }
       }
@@ -4762,6 +6063,17 @@
         }
       }
     },
+    "Previous month" : {
+      "comment" : "Accessibility label of the calendar's back arrow in the schedule editor",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上个月"
+          }
+        }
+      }
+    },
     "Prompt" : {
       "comment" : "Scheduled-task detail section header\nScheduled-task editor field label",
       "localizations" : {
@@ -4773,18 +6085,6 @@
         }
       }
     },
-    "Prompt and Roles" : {
-      "comment" : "Settings tab title for configuring prompts and roles.",
-      "isCommentAutoGenerated" : true,
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "提示词与角色"
-          }
-        }
-      }
-    },
     "Prompts on every tool" : {
       "comment" : "Permission-mode hint: manual/default",
       "localizations" : {
@@ -4792,6 +6092,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "每次调用工具都询问"
+          }
+        }
+      }
+    },
+    "Provider" : {
+      "comment" : "Agent Guide: picker of the kimi key-based provider",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "提供商"
           }
         }
       }
@@ -4818,23 +6129,6 @@
         }
       }
     },
-    "Providers" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Providers"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "提供商"
-          }
-        }
-      }
-    },
     "Questions?" : {
       "comment" : "Help pane header",
       "localizations" : {
@@ -4857,6 +6151,39 @@
         }
       }
     },
+    "Ran once %@" : {
+      "comment" : "Scheduled-task status: a one-time task has had its run; placeholder is relative (“2 hours ago”)",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@已运行一次"
+          }
+        }
+      }
+    },
+    "Read %lld pages" : {
+      "comment" : "Settled Chat only activity line: several web pages opened; placeholder is the count",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已阅读 %lld 个网页"
+          }
+        }
+      }
+    },
+    "Read 1 page" : {
+      "comment" : "Settled Chat only activity line: one web page opened",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已阅读 1 个网页"
+          }
+        }
+      }
+    },
     "Read Only" : {
       "comment" : "Codex sandbox chip label for read-only",
       "localizations" : {
@@ -4868,46 +6195,35 @@
         }
       }
     },
-    "Read-only — install the Claude Code CLI (npm install -g @anthropic-ai/claude-code) to continue this session." : {
-      "comment" : "Read-only bar message for a claude session without the CLI",
+    "Reading %@" : {
+      "comment" : "Chat only activity line while a page is opened; placeholder is the site, like python.org",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "只读——安装 Claude Code CLI（npm install -g @anthropic-ai/claude-code）后即可继续此会话。"
+            "value" : "正在阅读 %@"
           }
         }
       }
     },
-    "Read-only — install the Codex CLI (npm install -g @openai/codex) to continue this session." : {
-      "comment" : "Read-only bar message for a codex session without the CLI",
+    "Reading a page" : {
+      "comment" : "Chat only activity line while a page is opened and its address is unknown",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "只读——安装 Codex CLI（npm install -g @openai/codex）后即可继续此会话。"
+            "value" : "正在阅读网页"
           }
         }
       }
     },
-    "Read-only — install the Kimi Code CLI (curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash) to continue this session." : {
-      "comment" : "Read-only bar message for a kimi session without the CLI",
+    "Ready to open %@…" : {
+      "comment" : "Agent Guide progress: the browser notice is up; placeholder is the host",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "只读——安装 Kimi Code CLI（curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash）后即可继续此会话。"
-          }
-        }
-      }
-    },
-    "Read-only — the Codex CLI is installed but not signed in. Configure it (codex login or an API key) to continue this session." : {
-      "comment" : "Read-only bar message for a codex session when the CLI lacks auth",
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "只读——Codex CLI 已安装但未登录。完成配置（codex login 或填入 API 密钥）后即可继续此会话。"
+            "value" : "准备打开 %@…"
           }
         }
       }
@@ -4918,7 +6234,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "准备在以下位置新建 %@ 任务："
+            "value" : "准备在以下位置新建 %@ 会话："
           }
         }
       }
@@ -4978,7 +6294,7 @@
         }
       }
     },
-    "Remove from Group" : {
+    "Remove from group" : {
       "comment" : "Group submenu item — un-file this row",
       "localizations" : {
         "zh-Hans" : {
@@ -4996,6 +6312,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "移除提供商"
+          }
+        }
+      }
+    },
+    "Removing…" : {
+      "comment" : "Agent Guide progress: the tool is being removed",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在移除…"
           }
         }
       }
@@ -5022,7 +6349,7 @@
         }
       }
     },
-    "Rename Group…" : {
+    "Rename group…" : {
       "comment" : "Context menu item on a custom group header",
       "localizations" : {
         "zh-Hans" : {
@@ -5055,23 +6382,13 @@
         }
       }
     },
-    "Repeats" : {
-      "comment" : "Schedule editor frequency picker label",
+    "Reported off for this model" : {
+      "comment" : "Fast mode status: the agent reported fast mode off and gave no reason",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "重复"
-          }
-        }
-      }
-    },
-    "Required for some models like GPT-5.4 Pro" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "部分模型（如 GPT-5.4 Pro）需要此项"
+            "value" : "报告称此模型未开启"
           }
         }
       }
@@ -5105,6 +6422,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "重置未完成"
+          }
+        }
+      }
+    },
+    "resets %@" : {
+      "comment" : "Plan-usage row reset, as the CLI phrased it; placeholder is the CLI's own text\nPlan-usage row reset; placeholder is a date and time",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 重置"
           }
         }
       }
@@ -5175,6 +6503,50 @@
         }
       }
     },
+    "Right now, %@" : {
+      "comment" : "Fast mode switch, while off: why it could not run now; the placeholder is the reason (“your usage credits are used up”)",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "目前，%@"
+          }
+        }
+      }
+    },
+    "Right now: config.toml sets model_context_window = %@, so every model runs at its maximum." : {
+      "comment" : "Help card: config raises the window to the ceiling; placeholder is a grouped number",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "当前：config.toml 设置了 model_context_window = %@，因此每个模型都以各自的最大窗口运行。"
+          }
+        }
+      }
+    },
+    "Right now: config.toml sets model_context_window = %@. A model whose maximum is lower runs at its maximum; the others use %@ (%lld%% of the setting)." : {
+      "comment" : "Help card: config sets a custom window; placeholders are two grouped numbers and a percentage",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "当前：config.toml 设置了 model_context_window = %@。上限低于此值的模型按其上限运行；其余模型使用 %@（该设置的 %lld%%）。"
+          }
+        }
+      }
+    },
+    "Right now: the default. Nothing is set in config.toml, so every model runs at its default window." : {
+      "comment" : "Help card: no model_context_window in config",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "当前：默认。config.toml 中没有设置，因此每个模型都以默认窗口运行。"
+          }
+        }
+      }
+    },
     "Roles" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -5199,6 +6571,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "行操作"
+          }
+        }
+      }
+    },
+    "Run %@ from one window, on your subscription or API key." : {
+      "comment" : "Onboarding welcome bullet detail; placeholder is the joined list of agent names",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在一个窗口里运行 %@，用你的订阅或 API 密钥。"
           }
         }
       }
@@ -5302,6 +6685,28 @@
         }
       }
     },
+    "Running: %@" : {
+      "comment" : "Update-hold sheet: which sessions are mid-turn; placeholder is a list of names",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "进行中：%@"
+          }
+        }
+      }
+    },
+    "Runs %@ — %@" : {
+      "comment" : "Schedule editor hint for a one-time run: its date and time, then how far away it is (“in 3 hours”)",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@运行——%@"
+          }
+        }
+      }
+    },
     "Runs %@ — next %@" : {
       "comment" : "Schedule editor hint: description plus next fire time",
       "localizations" : {
@@ -5347,6 +6752,28 @@
         }
       }
     },
+    "Runs one time, at the date and time you pick" : {
+      "comment" : "Hover text on the Once schedule option",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在你选择的日期和时间运行一次"
+          }
+        }
+      }
+    },
+    "Same model, faster output" : {
+      "comment" : "Model menu switch subtitle: what fast mode is, when the account kind is not known",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "同一模型，输出更快"
+          }
+        }
+      }
+    },
     "Saturday" : {
       "comment" : "Weekday name",
       "localizations" : {
@@ -5376,6 +6803,17 @@
         }
       }
     },
+    "Save as a file…" : {
+      "comment" : "Tooltip for the save button in a code block's corner; a Save panel follows",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "保存为文件…"
+          }
+        }
+      }
+    },
     "Save as Markdown…" : {
       "comment" : "Note kebab menu item",
       "localizations" : {
@@ -5398,6 +6836,17 @@
         }
       }
     },
+    "Save Code" : {
+      "comment" : "Title of the Save panel for a code block",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "保存代码"
+          }
+        }
+      }
+    },
     "Save Note" : {
       "comment" : "NSSavePanel title for saving a note to a file",
       "localizations" : {
@@ -5405,6 +6854,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "保存笔记"
+          }
+        }
+      }
+    },
+    "Saved as %@" : {
+      "comment" : "Plan card: the file the plan was saved to; placeholder is its path",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已保存为 %@"
           }
         }
       }
@@ -5481,24 +6941,6 @@
         }
       }
     },
-    "Search" : {
-      "comment" : "Sidebar search placeholder",
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Search"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "搜索"
-          }
-        }
-      }
-    },
     "Search chats, notes and sessions" : {
       "comment" : "Placeholder in the global search field",
       "localizations" : {
@@ -5543,6 +6985,28 @@
         }
       }
     },
+    "Searched the web" : {
+      "comment" : "Settled Chat only activity line: one web search",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已搜索网页"
+          }
+        }
+      }
+    },
+    "Searched the web %lld times" : {
+      "comment" : "Settled Chat only activity line: several web searches; placeholder is the count",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已搜索网页 %lld 次"
+          }
+        }
+      }
+    },
     "Searching %lld of %lld…" : {
       "comment" : "Global search progress; placeholders are counts",
       "localizations" : {
@@ -5560,12 +7024,24 @@
         }
       }
     },
-    "Select a provider to get started." : {
+    "Searching the web" : {
+      "comment" : "Chat only activity line while a web search runs and its terms are unknown",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "选择一个提供商开始。"
+            "value" : "正在搜索网页"
+          }
+        }
+      }
+    },
+    "Searching the web for “%@”" : {
+      "comment" : "Chat only activity line while a web search runs; placeholder is the search terms",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在搜索网页：“%@”"
           }
         }
       }
@@ -5577,26 +7053,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "选择要附加到消息中的文件"
-          }
-        }
-      }
-    },
-    "Select model from %@" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "从 %@ 选择模型"
-          }
-        }
-      }
-    },
-    "Select provider" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "选择提供商"
           }
         }
       }
@@ -5735,25 +7191,13 @@
         }
       }
     },
-    "Sessions sync read-only. Install the %@ CLI to interact." : {
-      "comment" : "Sidebar hint when an agent has sessions but no CLI",
+    "set by %@" : {
+      "comment" : "Model chip hover: the environment variable that decided which model the alias resolves to",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "会话以只读方式同步。安装 %@ CLI 后即可交互。"
-          }
-        }
-      }
-    },
-    "Set default" : {
-      "comment" : "A button that sets a model as the default.",
-      "isCommentAutoGenerated" : true,
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "设为默认"
+            "value" : "由 %@ 设定"
           }
         }
       }
@@ -5765,16 +7209,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "设为默认"
-          }
-        }
-      }
-    },
-    "Set your default chat model" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "设置你的默认对话模型"
           }
         }
       }
@@ -5793,6 +7227,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "设置"
+          }
+        }
+      }
+    },
+    "Show %@ in SipAI. Unticked, it stays installed and signed in on this Mac, but its sessions leave the sidebar and search, its scheduled tasks stop running, and nothing about it is shown or checked until you tick it again." : {
+      "comment" : "Agent Guide: hover on the show/hide checkbox; placeholder is the agent's name",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在 SipAI 中显示 %@。取消勾选后，它在这台 Mac 上仍保持安装和登录，但会话会从侧边栏和搜索中消失，计划任务停止运行，且不再显示或检查与它相关的任何内容，直到重新勾选。"
           }
         }
       }
@@ -5896,17 +7341,6 @@
         }
       }
     },
-    "Show logo and app name" : {
-      "comment" : "Settings: display toggle for the sidebar brand lockup",
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "显示标志和 App 名称"
-          }
-        }
-      }
-    },
     "Show note button" : {
       "comment" : "Settings: note button group label (no toggle of its own)",
       "localizations" : {
@@ -5939,6 +7373,28 @@
         }
       }
     },
+    "Show the steps" : {
+      "comment" : "Tooltip on a Chat only activity line that is closed: click to see the model's thoughts and web lookups",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示步骤"
+          }
+        }
+      }
+    },
+    "Show update messages" : {
+      "comment" : "Settings: display toggle for the short update messages shown in place of the sidebar's app name",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "显示更新提示"
+          }
+        }
+      }
+    },
     "Showing the first %lld — narrow the search for more." : {
       "comment" : "Global search notice when the result list is capped",
       "localizations" : {
@@ -5957,6 +7413,94 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "侧边栏"
+          }
+        }
+      }
+    },
+    "Sign In" : {
+      "comment" : "Agent Guide: sign the agent's command-line tool in",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "登录"
+          }
+        }
+      }
+    },
+    "Sign in to %@" : {
+      "comment" : "Agent Guide: title of the sign-in method sheet; placeholder is the agent's name",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "登录 %@"
+          }
+        }
+      }
+    },
+    "Sign out" : {
+      "comment" : "Agent Guide: sign-out link and confirm button",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "退出登录"
+          }
+        }
+      }
+    },
+    "Sign out of %@ on this Mac?" : {
+      "comment" : "Agent Guide: title of the sign-out confirmation; placeholder is the agent's name",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在这台 Mac 上退出 %@ 的登录？"
+          }
+        }
+      }
+    },
+    "Signed in — %@" : {
+      "comment" : "Agent Guide status line; placeholder describes the account (a plan name, or API key)",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已登录——%@"
+          }
+        }
+      }
+    },
+    "Signing in…" : {
+      "comment" : "Agent Guide progress: a key sign-in is running",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在登录…"
+          }
+        }
+      }
+    },
+    "Signing out…" : {
+      "comment" : "Agent Guide progress: the tool's sign-out is running",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在退出登录…"
+          }
+        }
+      }
+    },
+    "SipAI %@ will install once the running turn finishes." : {
+      "comment" : "Sidebar, in place of the SipAI wordmark for a few seconds: the user chose to wait for a running agent turn before an update installs; placeholder is the new version",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SipAI %@ 将在正在进行的智能体回合结束后安装。"
           }
         }
       }
@@ -5994,13 +7538,68 @@
         }
       }
     },
-    "SipAI is completely a local tool. Chats, notes, roles, and settings live in ~/Library/Application Support/SipAI, and API keys stay in that folder's config.json on your disk. Messages are sent only to the provider of the model you picked — there is no server in between. Agent sessions are stored by the CLIs themselves, under ~/.claude, ~/.codex and ~/.kimi-code." : {
+    "SipAI downloads Anthropic's installer from claude.ai and runs it. It installs to ~/.local/bin and may add that folder to your shell's PATH so Terminal finds it too. About 200 MB." : {
+      "comment" : "Agent Guide: install confirmation body for Claude Code",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SipAI 将从 claude.ai 下载 Anthropic 的安装程序并运行。它会安装到 ~/.local/bin，并可能把该目录加入 shell 的 PATH，以便“终端”也能找到它。约 200 MB。"
+          }
+        }
+      }
+    },
+    "SipAI downloads Moonshot's installer from code.kimi.com and runs it. It installs to ~/.kimi-code/bin and adds that folder to your shell's PATH." : {
+      "comment" : "Agent Guide: install confirmation body for Kimi Code",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SipAI 将从 code.kimi.com 下载 Moonshot 的安装程序并运行。它会安装到 ~/.kimi-code/bin，并把该目录加入 shell 的 PATH。"
+          }
+        }
+      }
+    },
+    "SipAI downloads OpenAI's release package (about 120 MB) from github.com/openai/codex, checks it against OpenAI's checksum file, and installs it under ~/.local/share/sipai/codex with a codex command in ~/.local/bin — adding that folder to your shell's PATH if Terminal does not see it yet. SipAI keeps this copy up to date from the same place; if you would rather have Homebrew or npm manage it, install it there yourself and SipAI will use that copy instead." : {
+      "comment" : "Agent Guide: install confirmation body for Codex",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SipAI 将从 github.com/openai/codex 下载 OpenAI 的发布包（约 120 MB），用 OpenAI 的校验文件核对后安装到 ~/.local/share/sipai/codex，并在 ~/.local/bin 放置 codex 命令——如果“终端”还找不到它，会把该目录加入 shell 的 PATH。SipAI 会从同一来源保持这份副本为最新；如果你更愿意用 Homebrew 或 npm 管理，请自行在那里安装，SipAI 会改用那份副本。"
+          }
+        }
+      }
+    },
+    "SipAI is completely a local tool. Chats, notes, roles, and settings live in ~/Library/Application Support/SipAI, and API keys stay in that folder's config.json on your disk. Messages are sent only to the provider of the model you picked — there is no server in between. Agent sessions are stored by the CLIs themselves, under ~/.claude, ~/.codex and ~/.kimi-code. Besides that, SipAI only checks for updates — for itself once a day, and for the agent tools every eight hours — sending nothing about you, and both checks can be turned off in Settings → Updates." : {
       "comment" : "FAQ answer: data storage and privacy",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "SipAI 完全是一个本地工具。对话、笔记、角色和设置保存在 ~/Library/Application Support/SipAI，API 密钥保存在该文件夹的 config.json 中，都在你自己的磁盘上。消息只会发送给你所选模型的提供商——中间没有任何服务器。智能体会话则由各 CLI 自己保存在 ~/.claude、~/.codex 和 ~/.kimi-code 下。"
+            "value" : "SipAI 完全是一个本地工具。对话、笔记、角色和设置保存在 ~/Library/Application Support/SipAI，API 密钥保存在该文件夹的 config.json 中，都在你自己的磁盘上。消息只会发送给你所选模型的提供商——中间没有任何服务器。智能体会话则由各 CLI 自己保存在 ~/.claude、~/.codex 和 ~/.kimi-code 下。此外，SipAI 只会检查更新——每天检查一次自身的更新，每八小时检查一次智能体工具的更新——不会发送任何关于你的信息，这两项检查都可以在“设置 → 更新”中关闭。"
+          }
+        }
+      }
+    },
+    "SipAI runs each supported provider's own command-line tool on this Mac and shows its sessions in the sidebar. You must have access to a provider before you can use its tool in SipAI — some AI providers aren't available in every country or region." : {
+      "comment" : "Agent Guide intro, first paragraph: what SipAI runs, and that access to the provider comes first",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SipAI 在这台 Mac 上运行每家受支持提供商自己的命令行工具，并把它的会话显示在侧边栏。你必须先拥有某家提供商的使用权限，才能在 SipAI 中使用它的工具——部分 AI 提供商并非在所有国家或地区都提供服务。"
+          }
+        }
+      }
+    },
+    "SipAI will install the update and relaunch once the work finishes. Interrupting stops that work now, the same as quitting, and installs right away. If you quit SipAI before then, the update is installed on the way out and SipAI stays closed." : {
+      "comment" : "Update-hold sheet body: the choice between waiting for the running turn and interrupting it",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SipAI 会在这些工作结束后安装更新并重新启动。“中断”会立即停止这些工作（与退出相同）并马上安装。若在此之前退出 SipAI，更新会在退出过程中安装，SipAI 不会重新打开。"
           }
         }
       }
@@ -6034,16 +7633,6 @@
         }
       }
     },
-    "Skip — agent sessions only" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "跳过——只用智能体会话"
-          }
-        }
-      }
-    },
     "Skipped" : {
       "comment" : "Scheduled-task detail: catch-up off",
       "localizations" : {
@@ -6051,6 +7640,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "跳过"
+          }
+        }
+      }
+    },
+    "skipped a run %@ — the previous run was still going" : {
+      "comment" : "Scheduled-task status: a slot came while the task's previous run was still going, so it was passed over rather than run late; placeholder is relative (“20 minutes ago”)",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@跳过了一次运行——上一次运行仍在进行"
           }
         }
       }
@@ -6118,6 +7718,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "子智能体会话"
+          }
+        }
+      }
+    },
+    "Subscription" : {
+      "comment" : "Plan-usage card subtitle for a Claude subscription of unknown tier\nPlan-usage card subtitle when the plan has no tier name",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "订阅"
           }
         }
       }
@@ -6244,6 +7855,138 @@
         }
       }
     },
+    "That time has already passed. Pick a later one." : {
+      "comment" : "Schedule validation: a one-time run was set for a moment in the past",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "该时间已过，请选择更晚的时间。"
+          }
+        }
+      }
+    },
+    "The answer was in a shape SipAI does not read." : {
+      "comment" : "Plan-usage card: the agent's usage answer did not parse",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "回应的格式 SipAI 无法读取。"
+          }
+        }
+      }
+    },
+    "The browser sign-in was not completed in time." : {
+      "comment" : "Agent Guide: no login completion arrived inside the ceiling",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "浏览器登录没有在规定时间内完成。"
+          }
+        }
+      }
+    },
+    "The change applies to the next turn of every %@ session, here and in your terminal, and shows in the chip at once. A larger request draws on your plan's limits or API usage faster." : {
+      "comment" : "Help card, closing paragraph; placeholder is the Codex label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更改从每个 %@ 会话的下一轮开始生效，在这里和你的终端里都一样，并会立即反映在输入框下方的显示上。更大的请求会更快消耗你的套餐额度或 API 用量。"
+          }
+        }
+      }
+    },
+    "The Chat section talks to AI models through their API endpoints and is billed per token. To add a model, click the model chip at the lower right of the chat box, or open Settings → Chat models. If you would rather use a subscription plan than an API key, the **Chat only** mode of an agent session gives you a similar kind of conversation — it is limited to the agent providers SipAI supports. [Learn more](sipai://settings/models)" : {
+      "comment" : "Empty chat page while no chat model is configured. Keep the [Learn more](sipai://settings/models) link and the **Chat only** mode name (the mode chip's row).",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "“对话”部分通过各家的 API 接口使用 AI 模型，按 token 计费。要添加模型，请点击输入框右下角的模型标签，或打开“设置 → 对话模型”。如果你更想用订阅套餐而不是 API 密钥，智能体会话的“**仅对话**”模式能提供类似的聊天体验——它仅限于 SipAI 支持的智能体提供商。[了解更多](sipai://settings/models)"
+          }
+        }
+      }
+    },
+    "The codex command could not be placed at %@: %@" : {
+      "comment" : "Agent Guide: the symlink for codex could not be written; placeholders are the path and the error",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法在 %1$@ 放置 codex 命令：%2$@"
+          }
+        }
+      }
+    },
+    "The command-line tool did not answer, so the branch was not created." : {
+      "comment" : "Branch error when the agent's own fork call got no reply",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "命令行工具没有响应，分支未创建。"
+          }
+        }
+      }
+    },
+    "The command-line tool did not answer." : {
+      "comment" : "Plan-usage card: the agent's own process produced no answer",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "命令行工具没有回应。"
+          }
+        }
+      }
+    },
+    "the copy SipAI installed under %@" : {
+      "comment" : "Agent Guide delete clause: a codex SipAI installed; placeholder is its directory",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SipAI 安装在 %@ 下的副本"
+          }
+        }
+      }
+    },
+    "The download did not match OpenAI's checksum and was discarded (expected %@, got %@)." : {
+      "comment" : "Agent Guide: the codex package failed its checksum; placeholders are the two digests",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下载内容与 OpenAI 的校验值不符，已丢弃（预期 %1$@，实际 %2$@）。"
+          }
+        }
+      }
+    },
+    "The downloaded codex did not answer with version %@ and was discarded." : {
+      "comment" : "Agent Guide: the extracted codex binary reported another version; placeholder is the expected version",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下载的 codex 没有报告版本 %@，已丢弃。"
+          }
+        }
+      }
+    },
+    "The downloaded codex package holds a symbolic link (%@), which OpenAI's package does not, so it was discarded." : {
+      "comment" : "Agent Guide: the extracted codex package contained a symlink; placeholder is its path inside the package",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "下载的 codex 发布包中含有符号链接（%@），而 OpenAI 的发布包中没有，因此已被丢弃。"
+          }
+        }
+      }
+    },
     "The endpoint may not be up to date — editing it could solve this." : {
       "comment" : "Model setup: hint next to a failed model fetch",
       "localizations" : {
@@ -6277,6 +8020,17 @@
         }
       }
     },
+    "The first message of a new session arrives all at once; later ones stream." : {
+      "comment" : "Hover on the mode chip while Chat only is on, appended on a kimi draft",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "新会话的第一条消息会一次性到达，之后的消息则会流式显示。"
+          }
+        }
+      }
+    },
     "The group is created and “%@” moves into it." : {
       "comment" : "Body of the new-group dialog",
       "localizations" : {
@@ -6284,6 +8038,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "将创建该分组，并把“%@”移入其中。"
+          }
+        }
+      }
+    },
+    "the Homebrew package %@" : {
+      "comment" : "Agent Guide delete clause: a Homebrew cask or formula; placeholder is the package name",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Homebrew 软件包 %@"
+          }
+        }
+      }
+    },
+    "The install folder could not be created at %@." : {
+      "comment" : "Agent Guide: the codex install directory could not be made; placeholder is its path",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法在 %@ 创建安装文件夹。"
+          }
+        }
+      }
+    },
+    "the install under %@/bin" : {
+      "comment" : "Agent Guide delete clause: kimi's native layout; placeholder is the install directory",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@/bin 下的安装"
           }
         }
       }
@@ -6306,6 +8093,50 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无法将安装程序写入磁盘。"
+          }
+        }
+      }
+    },
+    "The installer printed nothing and the tool is still not installed." : {
+      "comment" : "Agent Guide: an install produced no output and no binary",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "安装程序没有任何输出，工具仍未安装。"
+          }
+        }
+      }
+    },
+    "The last reply ran at standard speed" : {
+      "comment" : "Fast mode status: fast mode was requested but the newest API call ran at standard speed",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上一条回复以标准速度运行"
+          }
+        }
+      }
+    },
+    "The last reply ran fast" : {
+      "comment" : "Fast mode switch, while on: the newest API call ran in fast mode",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上一条回复以快速模式运行"
+          }
+        }
+      }
+    },
+    "the native install under ~/.local/bin and %@" : {
+      "comment" : "Agent Guide delete clause: claude's native layout; placeholder is the versions directory",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "~/.local/bin 和 %@ 下的原生安装"
           }
         }
       }
@@ -6343,6 +8174,39 @@
         }
       }
     },
+    "the npm package %@ under %@" : {
+      "comment" : "Agent Guide delete clause: an npm global install; placeholders are the package and the prefix",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%2$@ 下的 npm 软件包 %1$@"
+          }
+        }
+      }
+    },
+    "The package could not be downloaded from %@." : {
+      "comment" : "Agent Guide: the codex package did not download; placeholder is its URL",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法从 %@ 下载发布包。"
+          }
+        }
+      }
+    },
+    "The package did not carry the expected manifest and was discarded." : {
+      "comment" : "Agent Guide: the codex package's codex-package.json was missing or named another version",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "发布包缺少预期的清单文件，已丢弃。"
+          }
+        }
+      }
+    },
     "The PDF could not be written." : {
       "comment" : "PDF export failure reason",
       "localizations" : {
@@ -6350,6 +8214,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无法写入 PDF 文件。"
+          }
+        }
+      }
+    },
+    "The provider's model list could not be fetched, so nothing was written." : {
+      "comment" : "Agent Guide: kimi's catalog listing failed before the key sign-in",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法获取该提供商的模型列表，因此未写入任何内容。"
           }
         }
       }
@@ -6365,6 +8240,17 @@
         }
       }
     },
+    "The run could not be started." : {
+      "comment" : "Scheduled-run failure: the runner refused to start the turn",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法启动本次运行。"
+          }
+        }
+      }
+    },
     "The run exited with code %d." : {
       "comment" : "Scheduled-run failure: nonzero exit",
       "localizations" : {
@@ -6376,24 +8262,46 @@
         }
       }
     },
-    "The SipAI mark and wordmark at the top of the sidebar. Turn it off to give the section list that room." : {
-      "comment" : "Settings: sidebar brand toggle help text",
+    "The same catalog allows the window to be raised to %@ tokens, of which %@ are effective; that is the figure the chip shows once the setting is changed." : {
+      "comment" : "Help card, paragraph 1 continued; placeholders are two grouped token counts",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "侧边栏顶部的 SipAI 图标和文字标志。关闭后可以把这块空间让给下方的区块列表。"
+            "value" : "同一目录允许把窗口提高到 %@ token，其中 %@ 为有效窗口；更改设置后，输入框下方显示的就是这个数字。"
           }
         }
       }
     },
-    "The system prompt (Settings → Prompt and Roles) is the standing instruction sent with every chat message. Roles are named prompts you can switch between, so the same chat window can answer as a code reviewer, translator, or tutor. One starter role ships with the app as a worked example — edit it, delete it, or add your own." : {
+    "The sign-in address was not on %@ and was not opened." : {
+      "comment" : "Agent Guide: codex handed back a login URL on an unexpected host; placeholder is the expected host",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "登录地址不在 %@ 上，未打开。"
+          }
+        }
+      }
+    },
+    "The sign-in did not complete." : {
+      "comment" : "Agent Guide: the tool's login exited without signing in and printed nothing",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "登录未完成。"
+          }
+        }
+      }
+    },
+    "The system prompt (Settings → Chat Prompt and Roles) is the standing instruction sent with every chat message. Roles are named prompts you can switch between, so the same chat window can answer as a code reviewer, translator, or tutor. One starter role ships with the app as a worked example — edit it, delete it, or add your own." : {
       "comment" : "FAQ answer: system prompt and roles",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "系统提示词（「设置 → 提示词与角色」）是随每条对话消息一起发送的常驻指令。角色则是一组具名的提示词，你可以随时切换，让同一个对话窗口分别以代码审查员、翻译或老师的身份回答。App 内置了一个角色作为示例——你可以修改它、删除它，或添加自己的角色。"
+            "value" : "系统提示词（“设置 → 对话提示词与角色”）是随每条对话消息一起发送的常驻指令。角色则是一组具名的提示词，你可以随时切换，让同一个对话窗口分别以代码审查员、翻译或老师的身份回答。App 内置了一个角色作为示例——你可以修改它、删除它，或添加自己的角色。"
           }
         }
       }
@@ -6431,13 +8339,68 @@
         }
       }
     },
-    "The turn is still running, but nothing has come back for 3 minutes. This may be fine. However, if it persists for too long, it may indicate a blocked or misconfigured network route, which looks exactly like this because the agent retries in silence — agent CLIs read the HTTP_PROXY and HTTPS_PROXY environment variables and ignore the macOS system proxy setting." : {
+    "The tool did not answer." : {
+      "comment" : "Agent Guide: a request to the tool's own server got no answer inside the ceiling",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "工具没有回应。"
+          }
+        }
+      }
+    },
+    "The tool is still installed after the removal ran." : {
+      "comment" : "Agent Guide: the delete plan ran and the binary is still found",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移除操作运行后，工具仍处于安装状态。"
+          }
+        }
+      }
+    },
+    "The tool's app server could not be started." : {
+      "comment" : "Agent Guide: codex's app-server did not start or complete its handshake",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法启动工具的应用服务器。"
+          }
+        }
+      }
+    },
+    "The tool's local server is busy with a sign-in. Try again in a moment." : {
+      "comment" : "Plan-usage card: kimi's local server is held by the Agent Guide's sign-in flow",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "工具的本地服务器正忙于登录，请稍后再试。"
+          }
+        }
+      }
+    },
+    "The tool's own updater leaves this copy to %@, which SipAI does not run. Update it there, in Terminal." : {
+      "comment" : "Updates pane: hover on a tool a package manager updates; placeholder is the package manager's name, e.g. Homebrew",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "该工具自带的更新程序把这个副本的更新交给了 %@，而 SipAI 不会运行它。请在终端里通过它更新。"
+          }
+        }
+      }
+    },
+    "The turn is still running, but nothing has come back for 5 minutes. This may be fine. However, if it persists for too long, it may indicate a blocked or misconfigured network route, which looks exactly like this because the agent retries in silence. In that case, please check your network connection and settings, or search online to see whether the AI provider is down." : {
       "comment" : "Body of the stalled-turn notice",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "这一回合仍在运行，但已经有 3 分钟没有任何返回。这可能没有问题；但如果持续太久，就可能是网络线路被拦截或配置有误——出现这种情况时看起来正是如此，因为智能体会静默重试：智能体 CLI 只读取 HTTP_PROXY 和 HTTPS_PROXY 环境变量，并不会理会 macOS 的系统代理设置。"
+            "value" : "这一回合仍在运行，但已经有 5 分钟没有任何返回。这可能没有问题；但如果持续太久，就可能是网络线路被拦截或配置有误——出现这种情况时看起来正是如此，因为智能体会静默重试。如果是这样，请检查你的网络连接和设置，或上网搜索该 AI 提供商的服务是否中断。"
           }
         }
       }
@@ -6464,6 +8427,28 @@
         }
       }
     },
+    "the usage credit limit is reached" : {
+      "comment" : "Why usage credits are unavailable: the spending limit is reached",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已达到额外用量的支出上限"
+          }
+        }
+      }
+    },
+    "The version could not be looked up, so nothing was downloaded." : {
+      "comment" : "Agent Guide: the install could not learn the latest version",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法查询版本号，因此没有下载任何内容。"
+          }
+        }
+      }
+    },
     "There is nothing before that message to branch from." : {
       "comment" : "Branch error when the chosen message is the first one",
       "localizations" : {
@@ -6486,14 +8471,24 @@
         }
       }
     },
-    "These names appear above each message. Leave any field blank to fall back to the default." : {
-      "comment" : "Labels pane help text",
-      "extractionState" : "stale",
+    "This copy of SipAI was built locally and is not signed for distribution, so it does not update itself. Copies from the release page check for updates automatically." : {
+      "comment" : "Updates pane and app menu: hover on the greyed-out update controls, in a build that is not a signed release",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "这些名称会显示在每条消息上方。任意字段留空即可使用默认值。"
+            "value" : "此 SipAI 副本为本地构建，未经分发签名，因此不会自我更新。从发布页面下载的版本会自动检查更新。"
+          }
+        }
+      }
+    },
+    "This removes the %@ command-line tool, the same as uninstalling it in Terminal — here, %@. Its sessions, settings and sign-in stay in %@ and are back the moment you reinstall. Nothing else on your Mac is changed." : {
+      "comment" : "Agent Guide: body of the delete confirmation; placeholders are the agent's name, the detected install route, and the tool's own data folder",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这会移除 %1$@ 命令行工具，效果和在“终端”里卸载它一样——这里是 %2$@。它的会话、设置和登录信息仍保留在 %3$@ 中，重新安装后即可恢复。你的 Mac 上不会有其他改动。"
           }
         }
       }
@@ -6509,6 +8504,17 @@
         }
       }
     },
+    "This tool updates by itself once the running turn finishes." : {
+      "comment" : "Updates pane: why the Update button is disabled, when automatic updates are on",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "当前回合结束后，此工具会自动更新。"
+          }
+        }
+      }
+    },
     "This turn has been running for %@" : {
       "comment" : "Instant hover hint on the composer's turn clock while a turn is running",
       "localizations" : {
@@ -6520,13 +8526,13 @@
         }
       }
     },
-    "This version of SipAI does not update itself. Newly released builds check for updates automatically." : {
-      "comment" : "Updates pane: shown when the running build is not a signed release",
+    "Thought" : {
+      "comment" : "Settled Chat only activity line: the model thought before answering",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此版本的 SipAI 不会自我更新。新发布的版本会自动检查更新。"
+            "value" : "已思考"
           }
         }
       }
@@ -6553,19 +8559,19 @@
         }
       }
     },
-    "To chat with a model provider, add one in Settings → Models. For agent sessions, use the sidebar." : {
+    "To chat with a model provider, add one in Settings → Chat models." : {
       "comment" : "Send-time error when no chat model is configured but an agent CLI is available.",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "要与模型提供商对话，请在「设置 → 模型」中添加一个。智能体会话请使用侧边栏。"
+            "value" : "要与模型提供商对话，请在“设置 → 对话模型”中添加一个。"
           }
         }
       }
     },
     "Today" : {
-      "comment" : "Date group",
+      "comment" : "Date group\nSchedule editor chip: run the one-time task today",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -6611,6 +8617,17 @@
         }
       }
     },
+    "Tomorrow" : {
+      "comment" : "Schedule editor chip: run the one-time task tomorrow",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "明天"
+          }
+        }
+      }
+    },
     "Try again" : {
       "comment" : "Model setup: refetch the model list",
       "localizations" : {
@@ -6629,6 +8646,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "星期二"
+          }
+        }
+      }
+    },
+    "Turn on the check above first." : {
+      "comment" : "Updates pane: why the automatic-update switch is disabled",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请先开启上方的自动检查。"
+          }
+        }
+      }
+    },
+    "Turned off by your organization" : {
+      "comment" : "Fast mode status: the organization disabled fast mode",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已被你所在的组织关闭"
+          }
+        }
+      }
+    },
+    "Turned off in %@'s config (features.fast_mode)" : {
+      "comment" : "Codex speed: the fast_mode feature is disabled in the user's codex config; placeholder is the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已在 %@ 的配置中关闭（features.fast_mode）"
           }
         }
       }
@@ -6666,6 +8716,17 @@
         }
       }
     },
+    "Unavailable (%@)" : {
+      "comment" : "Fast mode status: a reason code this app does not know, shown as the agent sent it",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "不可用（%@）"
+          }
+        }
+      }
+    },
     "Underlines words the macOS dictionary doesn't know, in the chat and agent input boxes, the message editor and the note editor. Nothing is ever corrected for you." : {
       "comment" : "Settings: spell check help text",
       "localizations" : {
@@ -6699,6 +8760,17 @@
         }
       }
     },
+    "Unread" : {
+      "comment" : "State group — sessions whose run finished and that have not been opened since",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未读"
+          }
+        }
+      }
+    },
     "Unrecognized schedule “%@”" : {
       "comment" : "Scheduled-task status: cron could not be parsed",
       "localizations" : {
@@ -6706,6 +8778,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无法识别的计划“%@”"
+          }
+        }
+      }
+    },
+    "Untitled" : {
+      "comment" : "Default name the Save panel suggests for a code block when the conversation has no title",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "未命名"
           }
         }
       }
@@ -6743,6 +8826,50 @@
         }
       }
     },
+    "Update these tools automatically" : {
+      "comment" : "Updates pane: toggle automatic agent CLI updates",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "自动更新这些工具"
+          }
+        }
+      }
+    },
+    "Update…" : {
+      "comment" : "Updates pane: open the SipAI update window, with the release notes and Install",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新…"
+          }
+        }
+      }
+    },
+    "Updated %@" : {
+      "comment" : "Plan-usage window footer; placeholder is a relative time such as '3 min. ago'",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@更新"
+          }
+        }
+      }
+    },
+    "Updated just now" : {
+      "comment" : "Plan-usage window footer within a minute of the last answer",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "刚刚更新"
+          }
+        }
+      }
+    },
     "Updates" : {
       "comment" : "Settings pane header",
       "localizations" : {
@@ -6754,8 +8881,19 @@
         }
       }
     },
+    "Updating these tools is in Settings → Updates." : {
+      "comment" : "Agent Guide: pointer to where the agent CLI update rows live",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "更新这些工具请前往“设置 → 更新”。"
+          }
+        }
+      }
+    },
     "Updating…" : {
-      "comment" : "Updates pane: the CLI's own updater is running",
+      "comment" : "Plan-usage window footer while the CLIs are being asked\nUpdates pane: the CLI's own updater is running",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
@@ -6765,23 +8903,68 @@
         }
       }
     },
-    "Use" : {
+    "usage credits are not turned on" : {
+      "comment" : "Why usage credits are unavailable: never enabled",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "使用"
+            "value" : "尚未开启额外用量"
           }
         }
       }
     },
-    "Use %@ anyway" : {
-      "comment" : "Keep an unverified manually typed model id",
+    "usage credits are turned off for your account" : {
+      "comment" : "Why usage credits are unavailable: disabled for this member",
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "仍然使用 %@"
+            "value" : "你的账户已关闭额外用量"
+          }
+        }
+      }
+    },
+    "usage credits are unavailable" : {
+      "comment" : "Why usage credits are unavailable: a reason this app does not know",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "额外用量不可用"
+          }
+        }
+      }
+    },
+    "Usage credits: %@ / %@ spent this month" : {
+      "comment" : "Plan-usage note: Claude's usage credits; placeholders are the amount spent this month and the monthly spending limit",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "额外用量：本月已花费 %1$@ / %2$@"
+          }
+        }
+      }
+    },
+    "Usage credits: off" : {
+      "comment" : "Plan-usage note: Claude's usage credits are unavailable and claude gave no reason",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "额外用量：已关闭"
+          }
+        }
+      }
+    },
+    "Usage credits: off — %@" : {
+      "comment" : "Plan-usage note: Claude's usage credits are unavailable; the placeholder says why (“your usage credits are used up”)",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "额外用量：已关闭——%@"
           }
         }
       }
@@ -6808,6 +8991,39 @@
         }
       }
     },
+    "Use the maximum" : {
+      "comment" : "Help card button: write the largest window to config.toml",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用最大值"
+          }
+        }
+      }
+    },
+    "Used %lld tools" : {
+      "comment" : "Settled Chat only activity line: several other tools ran; placeholder is the count",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已使用 %lld 个工具"
+          }
+        }
+      }
+    },
+    "Used 1 tool" : {
+      "comment" : "Settled Chat only activity line: one other tool ran",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已使用 1 个工具"
+          }
+        }
+      }
+    },
     "Used as the default instructions when no project- or role-specific prompt is set." : {
       "comment" : "System prompt help text",
       "localizations" : {
@@ -6830,6 +9046,50 @@
         }
       }
     },
+    "Uses your %@ limits" : {
+      "comment" : "Hover on the mode chip while Chat only is on, codex; placeholder is the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用你的 %@ 额度"
+          }
+        }
+      }
+    },
+    "Uses your %@ membership" : {
+      "comment" : "Hover on the mode chip while Chat only is on, kimi; placeholder is the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用你的 %@ 会员"
+          }
+        }
+      }
+    },
+    "Uses your %@ plan" : {
+      "comment" : "Hover on the mode chip while Chat only is on, claude; placeholder is the agent label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "使用你的 %@ 套餐"
+          }
+        }
+      }
+    },
+    "Using %@" : {
+      "comment" : "Chat only activity line while a tool runs; placeholder is the tool's name",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在使用 %@"
+          }
+        }
+      }
+    },
     "Volcengine (Doubao)" : {
       "comment" : "Provider name; Chinese uses the company's own name, model token kept",
       "localizations" : {
@@ -6837,6 +9097,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "火山引擎（豆包）"
+          }
+        }
+      }
+    },
+    "Wait for the Turn" : {
+      "comment" : "Update-hold sheet: install once the running turn finishes",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "等待回合结束"
           }
         }
       }
@@ -6852,6 +9123,17 @@
         }
       }
     },
+    "Waiting for you to finish signing in in the browser…" : {
+      "comment" : "Agent Guide progress: a browser sign-in is open",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在等待你在浏览器中完成登录…"
+          }
+        }
+      }
+    },
     "Wednesday" : {
       "comment" : "Weekday name",
       "localizations" : {
@@ -6859,6 +9141,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "星期三"
+          }
+        }
+      }
+    },
+    "Weekly" : {
+      "comment" : "Plan-usage row: a one-week window",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "每周"
           }
         }
       }
@@ -6884,6 +9177,17 @@
         }
       }
     },
+    "What is Chat only?" : {
+      "comment" : "FAQ question about the composer's Chat only mode row",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "什么是“仅对话”？"
+          }
+        }
+      }
+    },
     "What's the difference between a chat and an agent session?" : {
       "comment" : "FAQ question",
       "localizations" : {
@@ -6895,6 +9199,28 @@
         }
       }
     },
+    "When a newer version is found, SipAI updates the tool by itself, waiting for any running turn of that tool to finish first, and says so next to the logo in the sidebar." : {
+      "comment" : "Updates pane: what the automatic CLI update does",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "发现新版本后，SipAI 会自动更新该工具（若该工具有正在进行的回合，会先等它结束），并在侧边栏的标志旁提示。"
+          }
+        }
+      }
+    },
+    "When SipAI or an agent tool is updated, a short message takes the app name's place for five seconds." : {
+      "comment" : "Settings: help text under the update-messages toggle",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "SipAI 或智能体工具更新后，侧边栏中的 App 名称会暂时换成一条简短提示，持续五秒。"
+          }
+        }
+      }
+    },
     "Where is my data stored? Does anything leave my Mac?" : {
       "comment" : "FAQ question",
       "localizations" : {
@@ -6902,6 +9228,39 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "我的数据保存在哪里？有内容会离开我的 Mac 吗？"
+          }
+        }
+      }
+    },
+    "Which site is your account or key from?" : {
+      "comment" : "Agent Guide: the first question on the Kimi Code sign-in sheet",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你的账号或密钥来自哪个站点？"
+          }
+        }
+      }
+    },
+    "Why %@? Opens Help" : {
+      "comment" : "Accessibility label of the context chip's help glyph; placeholder is the window as a compact token count",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "为什么是 %@？打开帮助"
+          }
+        }
+      }
+    },
+    "Why does %@ show a 258k context window, and how do I get the larger one?" : {
+      "comment" : "FAQ question; placeholder is the Codex label",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "为什么 %@ 显示 258k 的上下文窗口？怎样才能用上更大的？"
           }
         }
       }
@@ -6939,6 +9298,28 @@
         }
       }
     },
+    "Writing…" : {
+      "comment" : "Help card: the config write is in flight",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在写入…"
+          }
+        }
+      }
+    },
+    "Written, but %@ reports it will not take effect: %@" : {
+      "comment" : "Help card: the write landed but a higher config layer overrides it; placeholders are the Codex label and Codex's own message",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已写入，但 %@ 报告它不会生效：%@"
+          }
+        }
+      }
+    },
     "Xiaomi" : {
       "comment" : "Provider name; Chinese uses the company's own name",
       "localizations" : {
@@ -6946,6 +9327,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "小米"
+          }
+        }
+      }
+    },
+    "Yes — click the T icon beside the search icon in the toolbar. It appears when at least one of your agent tools is signed in to a plan (a Claude subscription, a ChatGPT plan for Codex, or a Kimi Code membership), and it shows what each plan reports: the current 5-hour session and weekly windows for Claude Code, the weekly and per-model limits for Codex, and the weekly quota and 5-hour window for Kimi Code. The numbers are fetched when you open the window and are as fresh as the time shown at the bottom; click the refresh arrow for a new reading. Each figure comes from the tool's own account query, run on your Mac by the tool itself: Claude Code answers its /usage command, Codex answers over its app server, and Kimi Code answers over its local server. No tokens are spent, SipAI never sees a login token, and nothing is stored or sent anywhere. If every agent runs on an API key there is nothing to show and the icon stays hidden; API usage and cost live on each provider's developer platform." : {
+      "comment" : "FAQ answer: plan consumption",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "可以——点击工具栏中搜索图标旁边的 T 图标。当至少一个智能体工具登录了套餐（Claude 订阅、Codex 的 ChatGPT 套餐或 Kimi Code 会员）时它就会出现，并显示各套餐报告的内容：Claude Code 当前的 5 小时会话窗口和每周窗口，Codex 的每周额度和各模型限额，以及 Kimi Code 的每周配额和 5 小时窗口。数字在你打开窗口时获取，新鲜程度以底部显示的时间为准；点击刷新箭头可重新读取。每个数字都来自该工具自身的账户查询，由该工具在你的 Mac 上自行运行：Claude Code 回答它的 /usage 命令，Codex 通过它的 app server 回答，Kimi Code 通过它的本地服务器回答。不消耗任何 token，SipAI 从不接触登录令牌，也不会存储或发送任何内容。如果所有智能体都使用 API 密钥，则没有可显示的内容，图标会保持隐藏；API 用量和费用请到各提供商的开发者平台查看。"
           }
         }
       }
@@ -6983,24 +9375,34 @@
         }
       }
     },
+    "You can install a tool below or in Terminal. Either way, SipAI notices within a few seconds. Sign In opens the provider's own sign-in page. The tool keeps its own login, just as it does in Terminal." : {
+      "comment" : "Agent Guide intro, second paragraph: installing and signing in",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你可以在下方安装工具，也可以在“终端”里安装。无论哪种方式，SipAI 都会在几秒内检测到。“登录”会打开提供商自己的登录页面。登录信息由工具自己保存，和在“终端”里一样。"
+          }
+        }
+      }
+    },
+    "You're about to be taken to %@ to sign in. Finish there and come back to SipAI — the row updates by itself. The tool stores its own login on this Mac; SipAI never sees your password or a token." : {
+      "comment" : "Agent Guide: body of the browser notice; placeholder is the website's host",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "即将前往 %@ 登录。在那里完成后回到 SipAI 即可——这一行会自动更新。登录信息由工具保存在这台 Mac 上；SipAI 不会看到你的密码或令牌。"
+          }
+        }
+      }
+    },
     "Your AI, your way." : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "让你的 AI 更高效"
-          }
-        }
-      }
-    },
-    "Your chat models" : {
-      "comment" : "A heading for the list of models.",
-      "isCommentAutoGenerated" : true,
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "你的对话模型"
           }
         }
       }
@@ -7027,6 +9429,28 @@
         }
       }
     },
+    "your organization has turned usage credits off" : {
+      "comment" : "Why usage credits are unavailable: disabled by the organization",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你所在的组织已关闭额外用量"
+          }
+        }
+      }
+    },
+    "your plan has no usage credits" : {
+      "comment" : "Why usage credits are unavailable: the plan or seat includes none",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你的套餐不含额外用量"
+          }
+        }
+      }
+    },
     "Your tagline" : {
       "comment" : "Placeholder in the empty-state tagline editor",
       "localizations" : {
@@ -7034,6 +9458,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "你的标语"
+          }
+        }
+      }
+    },
+    "your usage credits are used up" : {
+      "comment" : "Why usage credits are unavailable: the balance is exhausted",
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "你的额外用量已用完"
           }
         }
       }

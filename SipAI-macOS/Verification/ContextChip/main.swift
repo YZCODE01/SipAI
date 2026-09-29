@@ -415,7 +415,7 @@ check("the chip itself sets no delayed system tooltip",
 // past the window edge. Trailing keeps the hint's right edge on the
 // chip's.
 check("the chip's hint is aligned trailing, so it cannot run off the window",
-      composer.contains("hintAlignment: .trailing) {\n                    ContextUsageChip("))
+      composer.contains("hintAlignment: .trailing,\n                               hintAccessory: contextWindowHelpGlyph) {\n                    ContextUsageChip("))
 check("the view hands the chip the RESOLVED window",
       view.contains("contextWindowTokens: resolvedContextWindow"))
 check("the resolver is what resolves it",

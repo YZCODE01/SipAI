@@ -45,6 +45,8 @@ struct AgentLaunchOptions: Equatable {
     var effort: String? = nil
     var modelFullId: String? = nil
     var fastMode: Bool = false
+    var serviceTier: String? = nil
+    var chatOnly: Bool = false
 }
 
 enum ClaudeModelDisplay {
@@ -63,4 +65,23 @@ enum ClaudeModelDisplay {
     /// alias — see Verification/ComposerModelChip, which exercises it.
     /// Permissive here: this harness is about providers.
     static func canResolve(alias: String, to fullId: String) -> Bool { true }
+}
+
+/// `ConfigManager.resolvedModel` / `rememberedModelName` read the
+/// installed claude's alias table through this. Knows nothing here:
+/// every alias falls to whatever the config observed, and an id is
+/// named as itself. Verification/ComposerModelChip exercises the real
+/// one.
+enum ClaudeModelCatalog {
+    enum AliasSource { case environment, binary, observed }
+    struct Resolution: Equatable {
+        let id: String
+        let source: AliasSource
+    }
+    static func resolvedModel(alias: String,
+                              observed: (String) -> String?) -> Resolution? {
+        observed(alias).map { Resolution(id: $0, source: .observed) }
+    }
+    static func displayName(forId id: String) -> String { id }
+    static func family(ofId id: String) -> String? { ClaudeModelDisplay.familyAlias(of: id) }
 }

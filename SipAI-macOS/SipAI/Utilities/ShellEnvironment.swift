@@ -13,6 +13,13 @@
 import Foundation
 
 enum ShellEnvironment {
+    /// The user's login shell as launchd reports it; zsh when it says
+    /// nothing. One spelling — the capture and the Agent Guide's rc
+    /// file choice both read it.
+    static var loginShell: String {
+        ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+    }
+
     /// Guards `cache` + `capturing` only — never held across the
     /// capture itself, which takes up to ~12 s worst case. Callers that
     /// arrive mid-capture wait on the condition for the one in-flight
@@ -136,7 +143,7 @@ enum ShellEnvironment {
     /// Bounded by a timeout; returns [:] on any failure — resolution
     /// then simply falls back to the process environment.
     private static func captureLoginShellEnvironment() -> [String: String] {
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        let shell = loginShell
         let marker = "__SIPAI_ENV_\(UUID().uuidString)__"
         let p = Process()
         p.executableURL = URL(fileURLWithPath: shell)

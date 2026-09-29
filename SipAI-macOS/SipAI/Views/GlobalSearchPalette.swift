@@ -309,6 +309,10 @@ struct GlobalSearchPalette: View {
             // whatever task the last click was looking at.
             appState.openScheduledTaskName = nil
         }
+        // The palette is reachable from inside Settings, which is a layer
+        // over the routes rather than one of them: left open, it would go
+        // on covering the result just opened.
+        appState.settingsSection = nil
         isPresented = false
     }
 
@@ -351,7 +355,12 @@ struct GlobalSearchPalette: View {
                 fileURL: nil))
         }
 
-        for session in agents.sessions where !session.isEmptyShell {
+        // Sessions of LISTED agents only: an agent that is signed out,
+        // hidden or gone shows nothing anywhere (`AgentPresence`), and a
+        // result that opened a session nobody can drive would be the
+        // read-only tier by another door.
+        let listed = Set(agents.listedAgents.map(\.key))
+        for session in agents.sessions where !session.isEmptyShell && listed.contains(session.agentKey) {
             out.append(SearchDocumentSeed(
                 target: .session(id: session.id, fileURL: session.fileURL,
                                  agentKey: session.agentKey),

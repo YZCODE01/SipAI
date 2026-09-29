@@ -502,58 +502,25 @@ extension ChatAttachment {
 // MARK: - Inlining
 
 extension ChatAttachment {
-    /// Opening tag of an inlined block, as written. The strip below
-    /// matches this and its closing tag as a PAIR — a bare-tag sweep
-    /// would eat a closing angle bracket out of the user's own prose,
-    /// which is the trap the agent transcript's local-command reader
-    /// already documents.
-    private static let openPrefix = "<sipai-attachment name=\""
-    private static let closeTag = "</sipai-attachment>"
-
-    /// Wrap a text attachment for inlining into the outgoing message.
-    /// The name rides the tag so the model can refer to the file by the
-    /// name the user sees on the chip.
+    /// The wire format is `AttachmentInline`'s — one parser for the
+    /// chat page and the three agent transcript readers, kept in a
+    /// Foundation-only file so the headless reader harnesses can
+    /// compile it. These are the chat page's names for it.
     static func inlineBlock(name: String, text: String, truncated: Bool) -> String {
-        let escaped = name
-            .replacingOccurrences(of: "&", with: "&amp;")
-            .replacingOccurrences(of: "<", with: "&lt;")
-            .replacingOccurrences(of: ">", with: "&gt;")
-            .replacingOccurrences(of: "\"", with: "&quot;")
-        // The BODY must not be able to speak the wrapper's own tags. A
-        // file containing the literal closing tag would end the block
-        // early, and everything after it — content the file's author
-        // chose — would render as the user's own words. Escaping just
-        // the opening bracket breaks the match and is the smallest
-        // mutation of the file's text.
-        let safeText = text
-            .replacingOccurrences(of: closeTag, with: "&lt;" + closeTag.dropFirst())
-            .replacingOccurrences(of: openPrefix, with: "&lt;" + openPrefix.dropFirst())
-        let mark = truncated ? " truncated=\"true\"" : ""
-        return "\(openPrefix)\(escaped)\"\(mark)>\n\(safeText)\n\(closeTag)"
+        AttachmentInline.block(name: name, text: text, truncated: truncated)
     }
 
     /// What the transcript DRAWS in place of an inlined block: nothing.
-    /// The paperclip line under the bubble already names the files, and
-    /// a 50k-character dump inside a message bubble is a wall the reader
-    /// has to scroll past to reach their own question.
-    ///
-    /// The stored message keeps the block — that is what makes a
-    /// follow-up question about the file work — so this is a display
-    /// transform and must be applied to the find pipeline too, or the
-    /// counter names matches nothing tints.
+    /// See `AttachmentInline.stripping` — a display transform, applied
+    /// to the find pipeline too.
     static func strippingInlineBlocks(from content: String) -> String {
-        guard content.contains(openPrefix) else { return content }
-        var out = ""
-        var rest = Substring(content)
-        while let open = rest.range(of: openPrefix) {
-            // The tag must CLOSE to count. An unbalanced prefix is the
-            // user's own text and is left exactly as typed.
-            guard let close = rest.range(of: closeTag, range: open.upperBound..<rest.endIndex)
-            else { break }
-            out += rest[rest.startIndex..<open.lowerBound]
-            rest = rest[close.upperBound...]
-        }
-        out += rest
-        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+        AttachmentInline.stripping(content)
+    }
+
+    /// The names an inlined message carries, for a paperclip line on a
+    /// surface that stores no `files` key of its own (the agent
+    /// transcripts).
+    static func attachedNames(in content: String) -> [String] {
+        AttachmentInline.names(in: content)
     }
 }

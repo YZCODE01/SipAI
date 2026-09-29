@@ -7,6 +7,10 @@
 // file we wrote ourselves, as long as it is a clean linear PREFIX of a
 // real transcript with a new session id.
 //
+// (This file is claude's writer. `CodexSessionFork` and `KimiSessionFork`
+// are the other two; they share this file's error vocabulary and
+// `branchTitle`, and each speaks its own agent's format.)
+//
 // So a branch is a new session file:
 //
 //   ~/.claude/projects/<same project dir>/<new uuid>.jsonl
@@ -37,6 +41,10 @@ enum AgentSessionFork {
 
     // MARK: - Errors
 
+    /// Shared by all three writers (`CodexSessionFork`, `KimiSessionFork`
+    /// alias it): the sentences are about the message and the
+    /// transcript, so one vocabulary serves every agent and the view
+    /// catches one type.
     enum ForkError: LocalizedError {
         /// The record the row pointed at is no longer in the transcript
         /// (compacted away, or the file was rewritten under us).
@@ -47,9 +55,17 @@ enum AgentSessionFork {
         case nothingToBranch
         case unreadableSource
         case writeFailed(String)
+        /// The agent that forks its own threads (codex) gave no answer
+        /// — no CLI, no app-server, or the ceiling passed. The view
+        /// words this one with the agent's label; the description here
+        /// names none.
+        case agentUnavailable
 
         var errorDescription: String? {
             switch self {
+            case .agentUnavailable:
+                return String(localized: "The command-line tool did not answer, so the branch was not created.",
+                              comment: "Branch error when the agent's own fork call got no reply")
             case .cutPointNotFound:
                 return String(localized: "Could not find that message in the session transcript — it may have been compacted away.",
                               comment: "Branch error when the cut-point record is gone")
@@ -139,7 +155,11 @@ enum AgentSessionFork {
         if obj["sessionId"] is String {
             obj["sessionId"] = newSessionId
         }
-        guard let out = try? JSONSerialization.data(
+        // A line can hold a number JSON cannot write back (`1e400` reads
+        // as infinity); serialising it raises an exception no `try?`
+        // catches, so it is dropped here instead of aborting the app.
+        guard JSONSerialization.isValidJSONObject(obj),
+              let out = try? JSONSerialization.data(
             withJSONObject: obj, options: [.withoutEscapingSlashes]),
               let text = String(data: out, encoding: .utf8)
         else {
@@ -239,11 +259,21 @@ enum AgentSessionFork {
     /// live event and its record.
     ///
     /// Newest-first, because a repeated prompt ("continue") should
-    /// branch at the one you can see, not at its first occurrence.
+    /// branch at the one you can see, not at its first occurrence —
+    /// and `skippingNewest` is how many newer occurrences of the same
+    /// text the caller can see BELOW the one it means, so the pencil on
+    /// the older of two identical live rows cuts at that one.
     /// Reads files; call it off the main thread.
     static func resolveCutPoint(matchingUserText text: String,
-                                in url: URL) -> String? {
-        let wanted = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                                in url: URL,
+                                skippingNewest skip: Int = 0) -> String? {
+        // The reader's own normalisation on BOTH sides: it sweeps bare
+        // `<…>` tags out of a record's text (`cleanUserText`), so a
+        // message that spells a generic type (`Vec<String>`) matches its
+        // record only once the wanted text has been through the same
+        // cleaner.
+        let wanted = AgentSessionScanner.cleanUserText(text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !wanted.isEmpty else { return nil }
         // Escalating windows, for the same reason `lastLaunchOptions`
         // needs them: a tool-heavy turn buries its opening user record
@@ -252,7 +282,8 @@ enum AgentSessionFork {
             .attributesOfItem(atPath: url.path)
         let size = (attributes?[.size] as? NSNumber)?.uint64Value
         for budget in [256 * 1024, 4 * 1024 * 1024, 64 * 1024 * 1024] {
-            if let found = cutPointScan(text: wanted, in: url, budget: budget) {
+            if let found = cutPointScan(text: wanted, in: url, budget: budget,
+                                        skippingNewest: skip) {
                 return found
             }
             if let size, size <= UInt64(budget) { break }
@@ -261,10 +292,12 @@ enum AgentSessionFork {
     }
 
     private static func cutPointScan(text: String, in url: URL,
-                                     budget: Int) -> String? {
+                                     budget: Int,
+                                     skippingNewest skip: Int) -> String? {
         guard let window = AgentSessionScanner.boundedTail(of: url,
                                                            budget: budget)
         else { return nil }
+        var remaining = skip
         for line in window.split(separator: "\n").reversed() {
             // Cheap pre-filter; correctness comes from the parse.
             guard line.contains("\"user\"") else { continue }
@@ -282,7 +315,9 @@ enum AgentSessionFork {
             let body = AgentSessionScanner.cleanUserText(
                 AgentSessionScanner.extractText(
                     fromContent: msg["content"] ?? obj["content"] ?? ""))
-            if body == text { return uuid }
+            guard body == text else { continue }
+            if remaining == 0 { return uuid }
+            remaining -= 1
         }
         return nil
     }

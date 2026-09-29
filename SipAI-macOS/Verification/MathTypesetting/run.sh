@@ -32,6 +32,7 @@ swiftc -O -o "$out/mathharness" \
   "$src/SipAI/Utilities/MathDelimiters.swift" \
   "$src/SipAI/Utilities/MathDisplayBlock.swift" \
   "$src/SipAI/Utilities/MarkdownRenderer.swift" \
+  "$src/SipAI/Utilities/CodeBlockActions.swift" \
   "$src/SipAI/Utilities/LatexSymbols.swift" \
   "$src/SipAI/Utilities/SearchMatching.swift" \
   "$src/SipAI/Utilities/DesignSystem.swift" \

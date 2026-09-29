@@ -275,6 +275,11 @@ enum AgentSessionRename {
             object["title"] = title
             object["isCustomTitle"] = true
         }
+        // A number JSON cannot write back (`1e400` reads as infinity)
+        // raises an exception no `catch` sees; refuse the write instead.
+        guard JSONSerialization.isValidJSONObject(object) else {
+            throw Failure.write("state.json holds a value that cannot be written back")
+        }
         do {
             var out = try JSONSerialization.data(
                 withJSONObject: object,

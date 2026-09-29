@@ -19,6 +19,9 @@ struct NoteView: View {
     /// own making, so it has to be told the appearance rather than
     /// inheriting one.
     @Environment(\.colorScheme) private var colorScheme
+    /// The tier scale — a note is neither transcript nor sidebar, so
+    /// its preview and editor take the design-size convention.
+    @Environment(\.sipFontScale) private var fontScale
 
     /// Markdown source being edited. Meaningful only while
     /// `loadedNoteId` names the note on screen.
@@ -47,7 +50,7 @@ struct NoteView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Spacer().frame(height: 44)
+            Spacer().frame(height: SipDesign.pageTopBand)
             titleBar
             Divider().opacity(0.3)
             content
@@ -66,11 +69,11 @@ struct NoteView: View {
     private var titleBar: some View {
         HStack(spacing: 8) {
             Image(systemName: "note.text")
-                .font(.system(size: 12))
+                .sipFont(12)
                 .foregroundColor(ChatDesign.textSecondary)
             Text(note?.title ?? String(localized: "Note",
                                        comment: "Placeholder title when the note can't be resolved"))
-                .font(.system(size: 14, weight: .semibold))
+                .sipFont(14, weight: .semibold)
                 .foregroundColor(ChatDesign.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -97,7 +100,7 @@ struct NoteView: View {
             if editing { endEditing() } else { beginEditing() }
         } label: {
             Image(systemName: editing ? "eye" : "square.and.pencil")
-                .font(.system(size: 12))
+                .sipFont(12)
                 .foregroundColor(editing ? ChatDesign.blue : ChatDesign.textSecondary)
                 .frame(width: 22, height: 20)
                 .contentShape(Rectangle())
@@ -116,10 +119,10 @@ struct NoteView: View {
     private var saveFailureBadge: some View {
         HStack(spacing: 4) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 10))
+                .sipFont(10)
             Text("Couldn't save",
                  comment: "Note title bar: the note's file could not be written")
-                .font(.system(size: 12, weight: .medium))
+                .sipFont(12, weight: .medium)
         }
         .foregroundColor(.orange)
         .help(String(localized: "SipAI could not write this note's file. Your changes are still here — they will be saved again on the next edit.",
@@ -128,7 +131,7 @@ struct NoteView: View {
 
     private func pill(text: String) -> some View {
         Text(text)
-            .font(.system(size: 12, weight: .medium))
+            .sipFont(12, weight: .medium)
             .foregroundColor(ChatDesign.textSecondary)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
@@ -155,7 +158,8 @@ struct NoteView: View {
             if editing {
                 NoteSourceEditor(text: $draft,
                                  onEscape: endEditing,
-                                 spellChecking: config.display.spellCheck)
+                                 spellChecking: config.display.spellCheck,
+                                 fontSize: SipFont.scaled(13, fontScale))
                     .onChange(of: draft) { _, text in
                         // The identity `draft` belongs to, NOT whatever
                         // the router now points at. `switchNote` clears
@@ -181,7 +185,8 @@ struct NoteView: View {
                             metadata: NoteHTML.Metadata(title: note.title,
                                                         model: note.model,
                                                         date: note.date),
-                            dark: colorScheme == .dark)
+                            dark: colorScheme == .dark,
+                            bodyPointSize: SipFont.scaled(14, fontScale))
             }
         } else {
             VStack {
@@ -269,6 +274,9 @@ private struct NoteSourceEditor: NSViewRepresentable {
     var onEscape: () -> Void
     /// `DisplaySettings.spellCheck`, passed by the owning view.
     var spellChecking: Bool
+    /// The tier-scaled point size, in points, passed by the owning
+    /// view. No default, the `spellChecking` rule.
+    var fontSize: CGFloat
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -277,7 +285,8 @@ private struct NoteSourceEditor: NSViewRepresentable {
         let tv = scroll.documentView as! NSTextView
         tv.delegate = context.coordinator
         tv.string = text
-        tv.font = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+        TextInputTypography.apply(pointSize: fontSize, lineSpacing: 0,
+                                  monospaced: true, to: tv)
         tv.isRichText = false
         tv.allowsUndo = true
         tv.drawsBackground = false
@@ -319,6 +328,8 @@ private struct NoteSourceEditor: NSViewRepresentable {
         // `string` collapses the selection, so the insertion point is
         // put back where it was rather than at the top.
         TextInputSpellChecking.apply(spellChecking, to: tv)
+        TextInputTypography.apply(pointSize: fontSize, lineSpacing: 0,
+                                  monospaced: true, to: tv)
         guard tv.string != text else { return }
         let caret = tv.selectedRange().location
         tv.string = text

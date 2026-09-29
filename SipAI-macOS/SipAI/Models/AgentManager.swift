@@ -2,13 +2,15 @@
 // Detects installed agent CLIs and tracks seen/unseen state.
 
 import Foundation
+import Combine
 
 struct AgentInfo: Identifiable, Hashable {
     let key: String
     let name: String
     let cmd: String
-    /// Session store location relative to the home directory. A store
-    /// without the CLI still lists read-only.
+    /// Session store location relative to the home directory — the
+    /// default spelling, for readers that need one; a store alone earns
+    /// nothing in the sidebar (see `AgentPresence`).
     let storeDir: String
     var id: String { key }
 }
@@ -41,12 +43,29 @@ final class AgentHistoryCache {
         /// known: claude records no window anywhere, so its window is
         /// resolved from this model.
         let contextModel: String?
+        /// The speed that same call ran at ("fast" / "standard") — the
+        /// fast switch's outcome as the transcript keeps it; nil when
+        /// the record says nothing, and always nil off claude.
+        let lastCallSpeed: String?
         /// Seconds the transcript's newest finished turn took — the
         /// cold seed for the composer's turn clock, 0 when unknown.
         let turnDuration: Double
         let commands: [String]
         let fileSize: UInt64
         let fileMtime: Date
+        /// Bytes the read covered BEYOND this file — a codex branch's
+        /// inherited prefix, read out of its parent (`CodexSessionScanner
+        /// .historyExtent`). 0 for every other session. Cached because
+        /// the partiality verdict ("Show earlier", the find bar's scope
+        /// note) is judged on a cache hit too, and a branch's own file
+        /// is tiny.
+        let inheritedBytes: UInt64
+        /// The Chat only turns the read kept thoughts for
+        /// (`ConfigManager.agentChatOnlyTurns`). A turn recorded after
+        /// the read — the record lands a beat after the turn's answer —
+        /// leaves the entry stale on an unchanged file: that turn's
+        /// thoughts were never read, and it would draw as an agent turn.
+        let chatOnlyTurns: Set<String>
     }
 
     private static let capacity = 8
@@ -87,10 +106,13 @@ final class AgentHistoryCache {
             contextTokens: existing.contextTokens,
             contextWindow: existing.contextWindow,
             contextModel: existing.contextModel,
+            lastCallSpeed: existing.lastCallSpeed,
             turnDuration: existing.turnDuration,
             commands: existing.commands,
             fileSize: existing.fileSize,
-            fileMtime: existing.fileMtime
+            fileMtime: existing.fileMtime,
+            inheritedBytes: existing.inheritedBytes,
+            chatOnlyTurns: existing.chatOnlyTurns
         )
     }
 
@@ -120,77 +142,113 @@ final class AgentManager: ObservableObject {
     /// Agent CLIs detected on this machine (binary found on disk).
     @Published private(set) var installedAgents: [AgentInfo] = []
 
-    /// Agents worth showing at all: runnable CLI *or* a session store on
-    /// disk (a desktop app writes sessions without putting a CLI on
-    /// PATH). Availability drives the sidebar; `installedAgents` gates
-    /// interaction — the difference renders as the read-only tier.
-    @Published private(set) var availableAgents: [AgentInfo] = []
-
-    /// Agents not yet in the seen_agents list (for first-time hints).
-    @Published private(set) var unseenAgents: [AgentInfo] = []
-
     /// True if at least one agent CLI is installed on this machine.
-    /// Independent of the seen/unseen distinction — callers just want to know
-    /// whether agent-only mode is viable.
     var hasInstalledAgent: Bool {
         !installedAgents.isEmpty
     }
 
-    /// Installed AND actually usable. For codex, "installed" only means
-    /// the binary exists — without working auth every spawn would fail,
-    /// so the app treats an unconfigured codex as the read-only tier:
-    /// sessions list and open, but no new sessions and no Terminal
-    /// hand-offs until `codex login` (or a real API key) is set up.
-    func isAgentReady(_ key: String) -> Bool {
-        guard isAgentInstalled(key) else { return false }
-        if key == "codex" { return Self.codexAuthConfigured() }
-        // Kimi deliberately gets no auth probe. The codex one reads a
-        // file whose shape is known (`~/.codex/auth.json`); Kimi
-        // Code's credential store is not documented, and guessing a
-        // filename wrong here does not degrade gracefully — it pins an
-        // installed, signed-in CLI to the read-only tier, with no
-        // in-app way out. The fail direction is chosen on purpose:
-        // "installed" means ready, and an unauthenticated spawn
-        // surfaces kimi's own `/login` message in the transcript, which
-        // says more than a guessed banner could.
-        return true
+    // MARK: - Presence
+
+    /// What the app may show of each agent — see `AgentPresence`. ONE
+    /// derivation (`recomputePresence`) over three inputs owned by
+    /// three things: the binary (`reload`), the account verdict (the
+    /// usage monitor's file layer, absorbed through `accountsSink`),
+    /// and `hidden_agents` (written only through `setHidden`).
+    @Published private(set) var presences: [String: AgentPresence] = [:]
+
+    /// The listed agents, in registry order — what every surface reads:
+    /// the sidebar's sections, the ADD row, search, the usage coin, the
+    /// update rows, the scheduler.
+    @Published private(set) var listedAgents: [AgentInfo] = []
+
+    /// The CARRIED verdict per agent (`AgentPresence.carry`): a fresh
+    /// `.unknown` keeps the last settled answer. Absent until the first
+    /// read completes, which is what `.pending` means.
+    private var carriedVerdicts: [String: PlanAccountKind] = [:]
+    private var accountsSink: AnyCancellable? = nil
+    private var firstReloadDone = false
+
+    /// `.pending` until the first `reload` has run — the frame before
+    /// it must draw neither a section nor the ADD row.
+    func presence(for key: String) -> AgentPresence {
+        presences[key] ?? .pending
     }
 
-    /// Whether ~/.codex/auth.json holds credentials codex could
-    /// actually use: a ChatGPT-login token set, or an API key that is
-    /// at least shaped like a real one (≥ 40 characters — real OpenAI
-    /// keys are longer than that, and a shorter string is a placeholder
-    /// someone typed to get past a prompt). Treating a placeholder as
-    /// configured would offer "New session" flows that immediately
-    /// fail.
-    nonisolated static func codexAuthConfigured() -> Bool {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/auth.json")
-        guard let data = try? Data(contentsOf: url),
-              let obj = (try? JSONSerialization.jsonObject(with: data))
-                as? [String: Any] else {
-            return false
-        }
-        if let tokens = obj["tokens"] as? [String: Any], !tokens.isEmpty {
-            return true
-        }
-        if let key = obj["OPENAI_API_KEY"] as? String {
-            return key.count >= 40
-        }
-        return false
+    /// Installed, signed in and not hidden — the one question every
+    /// "can this agent be driven" site asks.
+    func isAgentReady(_ key: String) -> Bool {
+        presence(for: key) == .listed
     }
 
     func isAgentInstalled(_ key: String) -> Bool {
         installedAgents.contains(where: { $0.key == key })
     }
 
-    func isAgentAvailable(_ key: String) -> Bool {
-        availableAgents.contains(where: { $0.key == key })
+    /// The Guide's checkbox. The one writer of `hidden_agents`; the
+    /// consequences follow from `recomputePresence` in the same call.
+    func setHidden(_ hidden: Bool, for key: String) {
+        guard let config else { return }
+        var keys = Set(config.hiddenAgents)
+        if hidden { keys.insert(key) } else { keys.remove(key) }
+        config.setHiddenAgents(Array(keys))
+        recomputePresence()
+    }
+
+    /// Re-run detection with the config the manager was configured
+    /// with — the Guide's actions call this the moment an install, a
+    /// delete or a sign-in lands rather than waiting for the tick.
+    func reloadNow() {
+        guard let config else { return }
+        reload(config: config)
+    }
+
+    /// The agent's name as the user set it (Settings → Labels), else its
+    /// default — for a sentence written where no view holds the config
+    /// (the scheduler's run records). The same rule every user-visible
+    /// sentence follows: no agent named outright.
+    func agentLabel(for key: String) -> String {
+        let name = Self.registry.first { $0.key == key }?.name ?? key
+        return config?.agentLabel(for: key, defaultName: name) ?? name
+    }
+
+    private func absorbAccounts(_ accounts: [String: PlanAccountKind]) {
+        for (key, fresh) in accounts {
+            carriedVerdicts[key] = AgentPresence.carry(previous: carriedVerdicts[key], fresh: fresh)
+        }
+        recomputePresence()
+    }
+
+    /// The derivation. Publishes only on change; feeds the two other
+    /// monitors the facts they need (the shown set, the hidden set).
+    func recomputePresence() {
+        let hidden = Set(config?.hiddenAgents ?? [])
+        var next: [String: AgentPresence] = [:]
+        for agent in Self.registry {
+            next[agent.key] = AgentPresence.resolve(
+                installed: isAgentInstalled(agent.key),
+                verdict: carriedVerdicts[agent.key],
+                hidden: hidden.contains(agent.key))
+        }
+        if next != presences { presences = next }
+        let listed = Self.registry.filter { next[$0.key] == .listed }
+        if listed != listedAgents { listedAgents = listed }
+        UsageMonitor.shared.setShown(Set(listed.map(\.key)))
+        AgentCLIUpdateMonitor.shared.setHiddenAgents(
+            Set(Self.registry.map(\.key).filter { next[$0] == .hiddenByUser }))
     }
 
     /// Agent sessions discovered under `~/.claude/projects`, sorted newest-first.
     /// Empty until `reloadSessions` completes at least once.
-    @Published private(set) var sessions: [AgentSession] = []
+    @Published private(set) var sessions: [AgentSession] = [] {
+        didSet { knownSessionIds = Set(sessions.map(\.id)) }
+    }
+
+    /// Every listed session's id — what the agent composer draws on a
+    /// grey token (`SessionIdTokens`). Kept beside `sessions` rather than
+    /// derived where it is read: the composer hands it to its text view
+    /// on every keystroke. Not published on its own; it changes only
+    /// with `sessions`, which is.
+    private(set) var knownSessionIds: Set<String> = []
 
     /// Scheduled task definitions joined to their discovered run sessions.
     /// Includes task folders that have never run.
@@ -241,6 +299,94 @@ final class AgentManager: ObservableObject {
     /// OR `inFlightSends`.
     @Published private(set) var externalInFlightSessions: Set<String> = []
 
+    // MARK: - Unread runs and the open session
+
+    /// The session the centre pane shows, as ContentView reports it
+    /// (`noteOpenSession`) — nil for a chat, a note, a draft, a task
+    /// page with no runs. A run that ends while its session is open
+    /// leaves no steady dot: the user is looking at it.
+    private(set) var openSessionId: String? = nil
+
+    /// The tier the open session stood in when it was opened, raised if
+    /// it has run since. Its sidebar place is held there until the user
+    /// opens anything else — see `SidebarTier.placed`.
+    @Published private(set) var openSessionHeldTier: SidebarTier? = nil
+
+    /// Called whenever the centre pane's session changes. Opening a
+    /// session is what reads it: its unread mark goes, and its place is
+    /// held at the tier it had a moment ago.
+    func noteOpenSession(_ id: String?) {
+        guard id != openSessionId else { return }
+        openSessionId = id
+        guard let id, !id.isEmpty else {
+            openSessionHeldTier = nil
+            return
+        }
+        // Read BEFORE the clear, or an unread session would be held at
+        // the tier it has only because it was just opened.
+        openSessionHeldTier = actualTier(forSession: id)
+        config?.clearAgentSessionUnread([id])
+    }
+
+    func isSessionRunning(_ id: String) -> Bool {
+        inFlightSends[id] != nil || externalInFlightSessions.contains(id)
+    }
+
+    func isSessionUnread(_ id: String) -> Bool {
+        config?.agentUnreadSessions.contains(id) ?? false
+    }
+
+    /// What is true of a session now — the tier its DOT follows.
+    func actualTier(forSession id: String) -> SidebarTier {
+        SidebarTier.of(running: isSessionRunning(id), unread: isSessionUnread(id))
+    }
+
+    /// Where a session is PLACED: its actual tier, or for the open
+    /// session the better of that and the one it is held at.
+    func sidebarTier(forSession id: String) -> SidebarTier {
+        SidebarTier.placed(actualTier(forSession: id),
+                           heldSinceOpened: id == openSessionId ? openSessionHeldTier : nil)
+    }
+
+    /// A run of the open session started: its place may rise, and is
+    /// then held there until the user moves on.
+    private func noteRunStarted(sessionId id: String) {
+        guard !id.isEmpty, id == openSessionId else { return }
+        openSessionHeldTier = .running
+    }
+
+    /// A run of `sessionId` just ended. It leaves the steady dot unless
+    /// the user is looking at the session — by its id, or through the
+    /// draft it is still becoming — or ended the run themselves (Stop,
+    /// or quitting SipAI; the composer's Stop on a turn another process
+    /// ran) — or the run never got a session id, which leaves nothing
+    /// to open.
+    private func noteRunEnded(sessionId id: String, stoppedByUser: Bool) {
+        guard !id.isEmpty, !id.hasPrefix("draft:"), !stoppedByUser,
+              id != openSessionId, !isOpenDraftsSession(id) else { return }
+        config?.markAgentSessionUnread(id)
+    }
+
+    /// The draft the centre pane shows, as ContentView reports it
+    /// (`noteOpenDraft`). Its first turn runs under `draft:<id>` and is
+    /// migrated to its session id at `system.init`, but the pane flips
+    /// to that id only when the transcript file lands, a beat later
+    /// (`AgentRunner.awaitSessionFile`) — and a turn that ends inside
+    /// that beat (a local slash command answers in milliseconds) is one
+    /// the user is looking at. The draft key stays an alias of the
+    /// runner until the flip (`releaseDraftRunner`), which is what makes
+    /// the session it became answerable here.
+    private var openDraftKey: String? = nil
+
+    func noteOpenDraft(_ id: UUID?) {
+        openDraftKey = id.map { "draft:\($0.uuidString)" }
+    }
+
+    private func isOpenDraftsSession(_ id: String) -> Bool {
+        guard let key = openDraftKey, let runner = runners[key] else { return false }
+        return runner.key == id
+    }
+
     /// Per-session runner cache. Key is `"draft:<UUID>"` before a
     /// draft's first system.init event is seen, `"<session_id>"`
     /// thereafter. Exactly one runner per key.
@@ -265,6 +411,19 @@ final class AgentManager: ObservableObject {
     /// ONE runner observes that runner (`RunnerStreamView`), never the
     /// collection holding it.
     private(set) var runners: [String: AgentRunner] = [:]
+
+    /// A turn of this agent in flight, ours or another terminal's — what
+    /// an update of its binary waits for, from the Update button and
+    /// the automatic update alike. An external turn is attributed
+    /// through the session it is writing to; the set is empty or tiny.
+    func hasTurnInFlight(agentKey: String) -> Bool {
+        if runners.values.contains(where: { $0.agentKey == agentKey && $0.status.isRunning }) {
+            return true
+        }
+        return externalInFlightSessions.contains { id in
+            sessions.first(where: { $0.id == id })?.agentKey == agentKey
+        }
+    }
 
     /// Parsed transcript history, keyed by session id. Deliberately NOT
     /// `@Published` — it is a read-through cache for one view, and
@@ -334,6 +493,41 @@ final class AgentManager: ObservableObject {
     /// Resolve (or create) the runner for a draft. The runner
     /// inherits the draft's cwd + display name; its key is
     /// `"draft:<UUID>"` until the first send migrates it.
+    // MARK: - Kimi tool-policy heal
+
+    /// Put back any kimi session's `tool-policy/state.json` that a Chat
+    /// only turn wrote and never restored — a crash, a force-quit, a
+    /// kill mid-turn. Read from the journal config keeps
+    /// (`kimiToolPolicyRestores`), applied for every session that has
+    /// no turn of ours in flight, and cleared as it lands. Called at
+    /// launch (`sessionId` nil: every entry) and on session open (that
+    /// session's entry alone). A session left with its tools switched
+    /// off would stay that way in the user's terminal too, which is why
+    /// this exists.
+    func healKimiToolPolicies(sessionId only: String? = nil) {
+        guard let config else { return }
+        let journal = config.kimiToolPolicyRestores()
+        for (id, record) in journal {
+            if let only, only != id { continue }
+            // A turn of ours on this session is the one that will
+            // restore it; healing underneath it would put the tools
+            // back mid-turn.
+            if let runner = runners[id], runner.status.isRunning { continue }
+            guard let dir = KimiSessionScanner.sessionDirectory(forId: id) else {
+                // The session is gone — nothing to restore into.
+                config.clearKimiToolPolicyRestore(for: id)
+                continue
+            }
+            let file = KimiToolPolicy.disabledFile(sessionDir: dir)
+            do {
+                try KimiToolPolicy.restore(record, at: file)
+                config.clearKimiToolPolicyRestore(for: id)
+            } catch {
+                NSLog("%@", "SipAI: could not restore \(file.path): \(error.localizedDescription)")
+            }
+        }
+    }
+
     func runner(forDraft draft: ClaudeSessionDraft) -> AgentRunner {
         let key = "draft:\(draft.id.uuidString)"
         if let existing = runners[key] { return existing }
@@ -394,9 +588,12 @@ final class AgentManager: ObservableObject {
                 // agent has finished answers the wrong question, and
                 // "finished" can be an hour later.
                 self.stampUserMessage(sessionId: runner?.sessionId ?? key)
+                self.noteRunStarted(sessionId: runner?.sessionId ?? key)
             } else if self.inFlightSends.removeValue(forKey: key) != nil {
                 // A turn just ENDED (there was an in-flight token to
                 // clear — a plain `.idle` assignment is not a turn).
+                self.noteRunEnded(sessionId: runner?.sessionId ?? key,
+                                  stoppedByUser: runner?.turnWasStoppedByUser ?? false)
                 // The session's file mtime moved, and that timestamp is
                 // on screen: the composer's scheduled-run tag and every
                 // sidebar row's relative time. `sessions` is only
@@ -413,7 +610,25 @@ final class AgentManager: ObservableObject {
                                fileURL: fileURL,
                                draft: draft)
         }
-        runner.onExternalInProgressChange = { [weak self] sessionId, inProgress in
+        runner.onKimiToolPolicyJournal = { [weak self] sessionId, record in
+            guard let config = self?.config else { return }
+            if let record {
+                config.setKimiToolPolicyRestore(record, for: sessionId)
+            } else {
+                config.clearKimiToolPolicyRestore(for: sessionId)
+            }
+        }
+        runner.onChatOnlyTurnRecorded = { [weak self] sessionId, handle in
+            self?.config?.noteAgentChatOnlyTurn(handle, for: sessionId)
+        }
+        runner.agentLabelProvider = { [weak self, weak runner] in
+            guard let runner else { return "" }
+            let fallback = AgentManager.registry
+                .first { $0.key == runner.agentKey }?.name ?? runner.agentKey
+            return self?.config?.agentLabel(for: runner.agentKey,
+                                            defaultName: fallback) ?? fallback
+        }
+        runner.onExternalInProgressChange = { [weak self, weak runner] sessionId, inProgress in
             guard let self = self else { return }
             if inProgress {
                 self.externalInFlightSessions.insert(sessionId)
@@ -425,10 +640,42 @@ final class AgentManager: ObservableObject {
                 // it. Sessions with no runner simply wait for that
                 // scan — there is no watcher on every file.
                 self.stampUserMessage(sessionId: sessionId)
-            } else {
-                self.externalInFlightSessions.remove(sessionId)
+                self.noteRunStarted(sessionId: sessionId)
+            } else if self.externalInFlightSessions.remove(sessionId) != nil {
+                // A turn another process ran has ended — the same
+                // steady dot as one of ours, and the same exemption for
+                // one the user stopped: the composer's Stop on an
+                // orphaned headless claude ends its turn through the
+                // tailer's sweep, seconds after the click, by when the
+                // user may have moved on.
+                self.noteRunEnded(sessionId: sessionId,
+                                  stoppedByUser: runner?.externalTurnWasStoppedByUser ?? false)
             }
         }
+    }
+
+    // MARK: - Filing a new session into a custom group
+
+    /// File a session the app just created into a custom group — a
+    /// draft started from a group's +, or a branch of a session that
+    /// sits in one. The caller decides the group; this writes it, and
+    /// it is the ONLY writer on either route, so the two cannot drift.
+    ///
+    /// Membership is tested per AGENT at the moment of writing: a group
+    /// deleted (or renamed, which is the same thing — groups are keyed
+    /// by name) between the decision and the write leaves the session
+    /// simply unfiled, where writing anyway would leave config pointing
+    /// at a group that no longer exists.
+    ///
+    /// Must run BEFORE the placeholder row is inserted, on both routes
+    /// that insert one. The insert re-renders the sidebar at once;
+    /// filed after, the row appears under Ungrouped and then jumps.
+    private func fileSession(_ id: String, inGroup group: String?,
+                             agentKey: String) {
+        guard let group, let config = self.config,
+              config.agentCustomGroups(for: agentKey).contains(group)
+        else { return }
+        config.setAgentSessionGroup(group, for: id)
     }
 
     // MARK: - Draft → existing migration
@@ -466,48 +713,55 @@ final class AgentManager: ObservableObject {
         // it HAS a key to file under — a draft has no session id, and
         // the send happens under one no session will ever have.
         //
-        // Here rather than in the view's own discovery handler, for two
-        // reasons. The centre pane is torn down by any detour to a chat
-        // or a note, so a filing addressed to the view is lost exactly
-        // when the user starts a turn and looks at something else; this
-        // runs from the runner's callback with the draft captured,
-        // whether or not a view is alive. And it must land BEFORE the
-        // placeholder below, which re-renders the sidebar at once —
-        // written after, the row appears under Ungrouped and jumps.
-        //
-        // A group deleted (or renamed, which is the same thing: groups
-        // are keyed by name) between the click and the first event
-        // fails the membership test, and the session is simply
-        // unfiled. Writing the assignment anyway would leave config
-        // pointing at a group that no longer exists.
-        if let group = draft?.customGroup,
-           let config = self.config,
-           config.agentCustomGroups(for: runner.agentKey).contains(group) {
-            config.setAgentSessionGroup(group, for: newSessionId)
+        // Here rather than in the view's own discovery handler: the
+        // centre pane is torn down by any detour to a chat or a note,
+        // so a filing addressed to the view is lost exactly when the
+        // user starts a turn and looks at something else; this runs
+        // from the runner's callback with the draft captured, whether
+        // or not a view is alive. Before the placeholder — see
+        // `fileSession`.
+        fileSession(newSessionId, inGroup: draft?.customGroup,
+                    agentKey: runner.agentKey)
+
+        // A run the scheduler started belongs to its task from now on,
+        // not from the scan that first reads its marker off disk — the
+        // transcript is written a beat after the id arrives, and until a
+        // scan has read it the row would sit among the ordinary sessions
+        // and only move into its task at the turn's end.
+        if let run = draft?.scheduledRun {
+            liveScheduledRuns[newSessionId] = ScheduledAgentTaskScanner.LiveScheduledRun(
+                taskName: run.taskName, title: run.title, startedAt: Date())
         }
 
         // Inject a placeholder session so the view can resolve it
         // synchronously; the async reloadSessions() below will
         // replace the placeholder with the real parsed row.
         if !sessions.contains(where: { $0.id == newSessionId }) {
-            let placeholderTitle = draft?.name ?? String(
+            let placeholderTitle = draft?.scheduledRun?.title ?? draft?.name ?? String(
                 localized: "New session",
                 comment: "Placeholder title for a just-migrated session before JSONL parse")
-            let placeholder = AgentSession(
+            var placeholder = AgentSession(
                 id: newSessionId,
                 fileURL: fileURL ?? SipaiPaths.dataDir
-                    .appendingPathComponent("_unresolved_\(newSessionId).jsonl"),
+                    .appendingPathComponent("\(Self.unresolvedPlaceholderPrefix)\(newSessionId).jsonl"),
                 title: placeholderTitle,
                 modifiedAt: Date(),
                 projectPath: runner.cwd,
-                scheduledTaskName: nil,
+                scheduledTaskName: draft?.scheduledRun?.taskName,
                 // Without this a codex draft's placeholder row files
                 // itself under the Claude section until the next scan
                 // corrects it — the row visibly jumps sections.
                 agentKey: runner.agentKey
             )
+            if placeholder.scheduledTaskName != nil { placeholder.origin = .scheduled }
             sessions.insert(placeholder, at: 0)
         }
+        // Among its task's runs too, before the stamp below re-sorts them.
+        // No scan has spoken here, so nothing counts as filed by the disk.
+        let filed = filingLiveScheduledRuns(sessions: sessions, tasks: scheduledTasks,
+                                            diskFiled: [])
+        sessions = filed.sessions
+        scheduledTasks = filed.tasks
         // The send that revealed this id happened under the DRAFT key,
         // so the stamp `onStatusChange` recorded is filed under a name
         // no session will ever have. Re-file it now that the session
@@ -519,8 +773,9 @@ final class AgentManager: ObservableObject {
 
     // MARK: - Branches
 
-    /// Adopt a session file this app just wrote (`AgentSessionFork`) and
-    /// hand back its runner, ready to send.
+    /// Adopt a session a branch just created (`AgentSessionFork`,
+    /// `CodexSessionFork`, `KimiSessionFork`) and hand back its runner,
+    /// ready to send.
     ///
     /// Same shape as `migrateRunner`'s placeholder injection, and for the
     /// same two reasons — one cosmetic, one a correctness trap:
@@ -535,9 +790,23 @@ final class AgentManager: ObservableObject {
     ///    scan has not seen would therefore pin the branch's subprocess
     ///    to the home folder permanently. Creating the runner HERE, with
     ///    the cwd handed in, closes that window whatever the scan does.
+    ///
+    /// `agentKey` rides both: the placeholder row files itself under
+    /// that agent's section (defaulted, a codex branch sat under the
+    /// Claude section until the next scan moved it — the row visibly
+    /// jumping), and the runner spawns that agent's CLI.
+    ///
+    /// `customGroup` is the group the branch belongs in — its parent's,
+    /// decided by the caller — and is written here, before the row,
+    /// for the reasons on `fileSession`. Without it a branch is only
+    /// half where its parent is: it keeps the parent's working folder,
+    /// so Folder grouping looks right, and lands under Ungrouped in
+    /// Custom.
     @discardableResult
     func registerBranchedSession(id: String, fileURL: URL, cwd: URL,
-                                 title: String) -> AgentRunner {
+                                 title: String, agentKey: String,
+                                 customGroup: String? = nil) -> AgentRunner {
+        fileSession(id, inGroup: customGroup, agentKey: agentKey)
         if !sessions.contains(where: { $0.id == id }) {
             var placeholder = AgentSession(
                 id: id,
@@ -545,7 +814,8 @@ final class AgentManager: ObservableObject {
                 title: title,
                 modifiedAt: Date(),
                 projectPath: cwd,
-                scheduledTaskName: nil
+                scheduledTaskName: nil,
+                agentKey: agentKey
             )
             // A branch is born at the top of the list: the user just
             // sent into it. Without this the row sorts on `modifiedAt`
@@ -555,32 +825,66 @@ final class AgentManager: ObservableObject {
             sessions.insert(placeholder, at: 0)
         }
         stampUserMessage(sessionId: id)
-        let runner = runner(forSessionId: id, fileURL: fileURL, cwd: cwd)
+        let runner = runner(forSessionId: id, fileURL: fileURL, cwd: cwd,
+                            agentKey: agentKey)
         reloadSessions()
         return runner
     }
 
     /// Refresh detection. Call on app launch and when returning to main view.
     func reload(config: ConfigManager) {
-        let seen = config.seenAgents
+        if self.config == nil { self.config = config }
         var installed: [AgentInfo] = []
-        var available: [AgentInfo] = []
-        for agent in Self.registry {
-            let hasCli = Self.isInstalled(agent.cmd)
-            if hasCli {
-                installed.append(agent)
-            }
-            if hasCli || Self.storeExists(agent) {
-                available.append(agent)
-            }
+        // A tool SipAI is updating stays installed while its binary is
+        // missing mid-update (`AgentCLIUpdateRules.countsAsInstalled`):
+        // judged on the binary alone, an npm update took the section
+        // away — and with it any open page and the scheduler's runs —
+        // for the whole download.
+        let updates = AgentCLIUpdateMonitor.shared
+        for agent in Self.registry where AgentCLIUpdateRules.countsAsInstalled(
+            binaryFound: Self.isInstalled(agent.cmd),
+            updating: updates.isUpdating(agent.key)) {
+            installed.append(agent)
         }
         // Assign only on change — this also runs from the 5 s
         // re-detection tick, and identical reassignment would trigger a
         // needless sidebar re-render every cycle.
-        if installedAgents != installed { installedAgents = installed }
-        if availableAgents != available { availableAgents = available }
-        let unseen = available.filter { !seen.contains($0.key) }
-        if unseenAgents != unseen { unseenAgents = unseen }
+        if installedAgents != installed {
+            // A binary that went takes its verdict with it, so a
+            // reinstall starts from a fresh read rather than the old
+            // answer.
+            let gone = Set(Self.registry.map(\.key)).subtracting(installed.map(\.key))
+            for key in gone { carriedVerdicts[key] = nil }
+            installedAgents = installed
+        }
+        if accountsSink == nil {
+            // ASYNCHRONOUS on purpose. `@Published` emits from `willSet`,
+            // and a synchronous sink would run `recomputePresence` —
+            // which feeds the monitor's shown set, which calls the
+            // monitor's `recompute` — INSIDE the monitor's own
+            // `accounts = next` assignment: a nested recompute over the
+            // half-assigned value, and the same value published twice.
+            // The launch pass does not wait for this: it PULLS below.
+            accountsSink = UsageMonitor.shared.$accounts
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] accounts in self?.absorbAccounts(accounts) }
+        }
+        // The account verdict — the file layer the usage coin reads —
+        // is what decides "signed in". The FIRST pass reads it NOW so
+        // the first frame the sidebar draws already knows; every later
+        // tick reads detached and publishes only on a changed digest.
+        // Every INSTALLED agent is read, listed or not: skipping an
+        // unlisted one would mean it could never be listed again.
+        if !firstReloadDone {
+            firstReloadDone = true
+            UsageMonitor.shared.readAccountsNow(installed: installed)
+        } else {
+            UsageMonitor.shared.refreshAccounts(installed: installed)
+        }
+        // The pull: whatever the monitor holds right now (the launch
+        // read just landed; a probe verdict from the Guide too) decides
+        // presence in this same call, not a run-loop turn later.
+        absorbAccounts(UsageMonitor.shared.accounts)
     }
 
     /// Re-check CLI availability every few seconds so installing an
@@ -598,35 +902,6 @@ final class AgentManager: ObservableObject {
                 self.reload(config: config)
             }
         }
-    }
-
-    nonisolated private static func storeExists(_ agent: AgentInfo) -> Bool {
-        // Kimi's store is relocatable (`KIMI_CODE_HOME`), so the
-        // registry's home-relative default is not authoritative for it.
-        if agent.key == "kimi" { return KimiSessionScanner.storeExists }
-        let path = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(agent.storeDir, isDirectory: true).path
-        var isDir: ObjCBool = false
-        return FileManager.default.fileExists(atPath: path, isDirectory: &isDir)
-            && isDir.boolValue
-    }
-
-    /// Mark agents as seen so hints don't repeat.
-    func markSeen(_ keys: [String], config: ConfigManager) {
-        config.addSeenAgents(keys)
-        let seen = config.seenAgents
-        // Same universe as reload(): available = CLI installed OR a
-        // desktop store exists. Filtering `installedAgents` here would
-        // make store-only agents (codex Desktop without the CLI)
-        // vanish from the unseen list the moment anything else is
-        // marked, then flicker back on the next reload tick.
-        unseenAgents = availableAgents.filter { !seen.contains($0.key) }
-    }
-
-    /// Mark all installed agents as seen + save to config.
-    func markAllInstalledSeen(config: ConfigManager) {
-        let keys = installedAgents.map(\.key)
-        markSeen(keys, config: config)
     }
 
     // MARK: - Sessions
@@ -658,12 +933,74 @@ final class AgentManager: ObservableObject {
             // claude flushing the user record would otherwise hand back
             // a row dated BEFORE the message the user just watched
             // themselves send, and drop it back down the list.
-            self.sessions = self.preservingLiveSessions(
-                self.applyingPendingStamps(result.sessions))
-            self.scheduledTasks =
-                self.applyingPendingStamps(tasks: result.scheduledTasks)
+            // What the transcripts themselves said, read BEFORE any
+            // placeholder joins the list: only that retires a live run.
+            let diskFiled = Set(result.sessions
+                .filter { $0.scheduledTaskName != nil }.map(\.id))
+            let filed = self.filingLiveScheduledRuns(
+                sessions: self.preservingLiveSessions(
+                    self.applyingPendingStamps(result.sessions)),
+                tasks: self.applyingPendingStamps(tasks: result.scheduledTasks),
+                diskFiled: diskFiled)
+            // A delete still under way: its rows stay off the lists
+            // until its files are gone (see `delete(_:task:)`).
+            let deleting = self.deletingSessionIds
+            self.sessions = deleting.isEmpty ? filed.sessions
+                : filed.sessions.filter { !deleting.contains($0.id) }
+            self.scheduledTasks = deleting.isEmpty && self.deletingTaskNames.isEmpty
+                ? filed.tasks
+                : Self.leaving(filed.tasks, sessionIds: deleting,
+                               taskNames: self.deletingTaskNames)
             self.isScanning = false
         }
+    }
+
+    /// The composer has just written a scheduled task. List it NOW — at
+    /// the top of its group, which is where its creation date sorts it
+    /// (`ScheduledAgentTask.lastActive`) — and rescan for the rest.
+    ///
+    /// The rescan walks every agent's store and can take a moment on a
+    /// large one; without this the task appears only when it lands. A
+    /// scan that finishes first already holds the task and is kept.
+    func noteScheduledTaskCreated(named name: String) {
+        reloadSessions()
+        Task { [weak self] in
+            let task = await Task.detached(priority: .userInitiated) {
+                ScheduledAgentTaskScanner.newTask(named: name)
+            }.value
+            guard let self, let task,
+                  !self.scheduledTasks.contains(where: { $0.name == name })
+            else { return }
+            self.scheduledTasks.append(task)
+        }
+    }
+
+    // MARK: - Scheduled runs in flight
+
+    /// Runs the scheduler started whose transcripts may not name their
+    /// task yet, keyed by session id. Written by `migrateRunner`, pruned
+    /// by `filingLiveScheduledRuns` — an entry lives only until the disk
+    /// says the same thing, like `pendingUserStamps`.
+    private var liveScheduledRuns: [String: ScheduledAgentTaskScanner.LiveScheduledRun] = [:]
+
+    /// File every run in `liveScheduledRuns` under its task in the given
+    /// lists (`ScheduledAgentTaskScanner.overlaying`, the pure rule) and
+    /// retire the entries the disk has caught up with — `diskFiled`, the
+    /// ids a scan read a task marker for.
+    private func filingLiveScheduledRuns(sessions: [AgentSession],
+                                         tasks: [ScheduledAgentTask],
+                                         diskFiled: Set<String>)
+    -> (sessions: [AgentSession], tasks: [ScheduledAgentTask]) {
+        guard !liveScheduledRuns.isEmpty else { return (sessions, tasks) }
+        var running: Set<String> = []
+        for runner in runners.values where runner.status.isRunning {
+            if let id = runner.sessionId, !id.isEmpty { running.insert(id) }
+        }
+        let result = ScheduledAgentTaskScanner.overlaying(
+            liveScheduledRuns, sessions: sessions, tasks: tasks,
+            diskFiled: diskFiled, running: running, now: Date())
+        liveScheduledRuns = result.runs
+        return (result.sessions, result.tasks)
     }
 
     // MARK: - User-message stamps
@@ -786,23 +1123,44 @@ final class AgentManager: ObservableObject {
             if let idx = out.firstIndex(where: { $0.id == id }) {
                 out[idx].isEmptyShell = false
             } else if let runner = runners[id] {
-                let placeholder = AgentSession(
+                // A scheduled run keeps the title and the task it was
+                // started with — the same placeholder `migrateRunner`
+                // made, not a generic one the next line then has to fix.
+                let run = liveScheduledRuns[id]
+                var placeholder = AgentSession(
                     id: id,
                     fileURL: runner.sessionFileURL ?? SipaiPaths.dataDir
-                        .appendingPathComponent("_unresolved_\(id).jsonl"),
-                    title: runner.initialName ?? String(
+                        .appendingPathComponent("\(Self.unresolvedPlaceholderPrefix)\(id).jsonl"),
+                    title: run?.title ?? runner.initialName ?? String(
                         localized: "New session",
                         comment: "Placeholder title for a just-migrated session before JSONL parse"),
                     modifiedAt: Date(),
                     projectPath: runner.cwd,
-                    scheduledTaskName: nil,
+                    scheduledTaskName: run?.taskName,
                     agentKey: runner.agentKey
                 )
+                if run != nil { placeholder.origin = .scheduled }
                 out.insert(placeholder, at: 0)
             }
         }
         return out
     }
+
+    // MARK: - Deleting sessions
+
+    /// Sessions and scheduled tasks whose delete has not finished. A scan
+    /// that lands in the meantime would list them again — one already in
+    /// flight read the disk before the delete, and a run stopped for it
+    /// rescans as it ends — so `reloadSessions` leaves them out until
+    /// their files are gone.
+    private var deletingSessionIds: Set<String> = []
+    private var deletingTaskNames: Set<String> = []
+
+    /// The longest a delete waits for a run it stopped to END before
+    /// removing the run's files: past `AgentRunner`'s own stop bound
+    /// (4 s), by which a stopped turn has ended whether or not its child
+    /// answered SIGTERM.
+    private static let deletionStopWait: TimeInterval = 6
 
     /// Delete a session's on-disk transcript(s) and forget its runner.
     /// Claude sessions are one JSONL; codex sessions can own several
@@ -812,51 +1170,208 @@ final class AgentManager: ObservableObject {
     /// agent), so removing the file the row points at would leave the
     /// session listed and unreadable.
     func deleteSession(_ session: AgentSession) {
-        if let runner = runners[session.id] {
-            runner.cancel()
-            runners.removeValue(forKey: session.id)
+        delete([session], task: nil)
+    }
+
+    /// A scheduled task's "Delete all": its definition and every run it
+    /// made. The task leaves the sidebar at once and in one piece —
+    /// deleted run by run, and definition apart, it would first shrink
+    /// and then turn into an orphan (runs listed under a definition that
+    /// is gone) before it went.
+    ///
+    /// `startingRun` is the runner key the scheduler filed its run in
+    /// flight under (`ScheduledTaskScheduler.inFlight`). A run fired a
+    /// moment ago has no session id yet, so it is not among the task's
+    /// runs; left going, its transcript would bring the task straight
+    /// back as an orphan. It is stopped with the others, and its files go
+    /// with theirs once it has ended.
+    func deleteScheduledTaskAndRuns(_ task: ScheduledAgentTask,
+                                    startingRun: String? = nil) {
+        delete(task.sessions, task: task,
+               starting: startingRun.flatMap { runners[$0] })
+    }
+
+    /// The one way sessions are deleted.
+    ///
+    /// The rows leave the lists NOW, and stay off them until the files
+    /// are gone (`deletingSessionIds`). A run that is still going is
+    /// stopped FIRST and its files removed only once it has ended:
+    /// measured on claude 2.1.283, a transcript deleted under a live turn
+    /// is written again the moment the stopped process exits — a stray
+    /// file of claude's bookkeeping records — while one deleted after
+    /// the exit stays gone. A task's definition goes before any of that,
+    /// so nothing can fire the task again while its runs are stopping.
+    private func delete(_ doomed: [AgentSession], task: ScheduledAgentTask?,
+                        starting: AgentRunner? = nil) {
+        let ids = Set(doomed.map(\.id))
+        deletingSessionIds.formUnion(ids)
+        if let task { deletingTaskNames.insert(task.name) }
+        sessions.removeAll { ids.contains($0.id) }
+        scheduledTasks = Self.leaving(scheduledTasks, sessionIds: ids,
+                                      taskNames: task.map { [$0.name] } ?? [])
+        liveScheduledRuns = liveScheduledRuns.filter { id, run in
+            !ids.contains(id) && run.taskName != task?.name
         }
-        // The tailer dies with the runner without firing its false
-        // callback, so these would otherwise hold the deleted id until
-        // relaunch — a phantom activity dot on any future row that
-        // matches it.
-        externalInFlightSessions.remove(session.id)
-        inFlightSends.removeValue(forKey: session.id)
-        // Disk work off the MainActor: the codex branch walks the
-        // whole rollout store re-reading up to 512 KB per file to find
-        // a session's siblings — done synchronously that is a hard
-        // main-thread stall on every codex delete.
-        let agentKey = session.agentKey
-        let sessionId = session.id
-        let fileURL = session.fileURL
+
+        var stopping: [AgentRunner] = []
+        var handled: [AgentRunner] = []
+        for session in doomed {
+            if let runner = runners[session.id] {
+                if runner.status.isRunning { stopping.append(runner) }
+                handled.append(runner)
+                runner.cancel()
+                runners.removeValue(forKey: session.id)
+            }
+            // The tailer dies with the runner without firing its false
+            // callback, so these would otherwise hold the deleted id
+            // until relaunch — a phantom activity dot on any future row
+            // that matches it.
+            externalInFlightSessions.remove(session.id)
+            inFlightSends.removeValue(forKey: session.id)
+            // Its Chat only record describes turns that no longer exist.
+            config?.clearAgentChatOnlyTurns(for: session.id)
+            // And there is nothing left to open.
+            config?.clearAgentSessionUnread([session.id])
+        }
+        // A run with no session id yet: stopped the same way, under
+        // whatever keys it is filed. Its id may still arrive — a
+        // `system.init` already on the way when the stop landed — and
+        // must not re-file the run: `migrateRunner` would put its row,
+        // its live entry and its task back on the lists. The runner
+        // records the id and the file all the same, for the tail below.
+        var unnamed: [AgentRunner] = []
+        if let starting, !handled.contains(where: { $0 === starting }) {
+            if starting.status.isRunning { stopping.append(starting) }
+            starting.onSessionIdDiscovered = nil
+            starting.cancel()
+            runners = runners.filter { $0.value !== starting }
+            unnamed.append(starting)
+        }
+
+        // A placeholder row's URL names no file; the remover looks the
+        // session up by id then.
+        let files = doomed.map {
+            SessionFiles(agentKey: $0.agentKey, sessionId: $0.id,
+                         fileURL: Self.isUnresolvedPlaceholder($0.fileURL) ? nil : $0.fileURL)
+        }
+        let definition = task.map { (name: $0.name, directory: $0.directoryURL) }
         Task { [weak self] in
+            if let definition {
+                await Task.detached(priority: .userInitiated) {
+                    ScheduledTaskCreator.deleteTask(named: definition.name,
+                                                    directory: definition.directory)
+                }.value
+            }
+            let deadline = Date().addingTimeInterval(Self.deletionStopWait)
+            while stopping.contains(where: { $0.status.isRunning }), Date() < deadline {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            // The unnamed run has ended. Whatever session it became is
+            // held and removed like the rest: its id came after the lists
+            // were cut, so nothing above knew it, and its live entry
+            // (`liveScheduledRuns`) would otherwise file a run whose file
+            // is going under the task — as an orphan — for the settle
+            // window, with nothing on disk to retire it against. Its
+            // file may not have been found before the stop; the remover
+            // looks it up by id then.
+            var doomedFiles = files
+            var lateIds: Set<String> = []
+            for runner in unnamed {
+                guard let self else { break }
+                self.runners = self.runners.filter { $0.value !== runner }
+                guard let id = runner.sessionId, !id.isEmpty else { continue }
+                lateIds.insert(id)
+                self.deletingSessionIds.insert(id)
+                self.sessions.removeAll { $0.id == id }
+                self.liveScheduledRuns.removeValue(forKey: id)
+                self.inFlightSends.removeValue(forKey: id)
+                self.externalInFlightSessions.remove(id)
+                self.config?.clearAgentChatOnlyTurns(for: id)
+                self.config?.clearAgentSessionUnread([id])
+                doomedFiles.append(SessionFiles(agentKey: runner.agentKey,
+                                                sessionId: id, fileURL: runner.sessionFileURL))
+            }
+            if let self, !lateIds.isEmpty {
+                self.scheduledTasks = Self.leaving(self.scheduledTasks, sessionIds: lateIds,
+                                                   taskNames: self.deletingTaskNames)
+            }
+            let allFiles = doomedFiles
+            // Disk work off the MainActor: the codex branch walks the
+            // whole rollout store re-reading up to 512 KB per file to
+            // find a session's siblings — done synchronously that is a
+            // hard main-thread stall on every codex delete.
             await Task.detached(priority: .userInitiated) {
-                let fm = FileManager.default
-                switch agentKey {
-                case "codex":
-                    let files = CodexSessionScanner.rolloutFiles(
-                        forSessionId: sessionId)
-                    for url in files { try? fm.removeItem(at: url) }
-                    // Belt and braces: the scanned URL always goes even
-                    // if the meta re-read failed for it.
-                    try? fm.removeItem(at: fileURL)
-                case "kimi":
-                    // The whole `<sessionId>/` tree, resolved by shape
-                    // from the wire file the row carries. If that walk
-                    // fails the wire file alone goes — a half-deleted
-                    // session still stops listing (its wire is gone, so
-                    // the scan reads it as an empty shell), which beats
-                    // deleting nothing.
-                    if let dir = KimiSessionScanner.sessionDirectory(of: fileURL) {
-                        try? fm.removeItem(at: dir)
-                    } else {
-                        try? fm.removeItem(at: fileURL)
-                    }
-                default:
-                    try? fm.removeItem(at: fileURL)
-                }
+                for file in allFiles { Self.removeFiles(of: file) }
             }.value
-            self?.reloadSessions()
+            guard let self else { return }
+            self.deletingSessionIds.subtract(ids)
+            self.deletingSessionIds.subtract(lateIds)
+            if let definition { self.deletingTaskNames.remove(definition.name) }
+            self.reloadSessions()
+        }
+    }
+
+    /// `tasks` without the named tasks and without the named runs — and
+    /// without an orphan whose last run just went, since an orphan (a
+    /// task whose definition is gone) is nothing but its runs.
+    private static func leaving(_ tasks: [ScheduledAgentTask],
+                                sessionIds: Set<String>,
+                                taskNames: Set<String>) -> [ScheduledAgentTask] {
+        var kept: [ScheduledAgentTask] = []
+        for var task in tasks where !taskNames.contains(task.name) {
+            let runs = task.sessions.count
+            task.sessions.removeAll { sessionIds.contains($0.id) }
+            if task.definition == nil, runs > 0, task.sessions.isEmpty { continue }
+            kept.append(task)
+        }
+        return kept
+    }
+
+    /// What deleting a session removes from disk, taken on the MainActor.
+    private struct SessionFiles: Sendable {
+        let agentKey: String
+        let sessionId: String
+        /// Nil for a session whose transcript was never found — a run
+        /// stopped before its file landed, a placeholder row — which the
+        /// remover looks up by id.
+        let fileURL: URL?
+    }
+
+    /// The stand-in `fileURL` a row carries until its transcript is
+    /// found (`migrateRunner`, `preservingLiveSessions`). Removing it
+    /// removes nothing, so a delete treats it as no URL at all.
+    nonisolated private static let unresolvedPlaceholderPrefix = "_unresolved_"
+
+    nonisolated private static func isUnresolvedPlaceholder(_ url: URL) -> Bool {
+        url.lastPathComponent.hasPrefix(unresolvedPlaceholderPrefix)
+    }
+
+    nonisolated private static func removeFiles(of session: SessionFiles) {
+        let fm = FileManager.default
+        let fileURL = session.fileURL
+            ?? AgentRunner.locateSessionFile(id: session.sessionId, agentKey: session.agentKey)
+        switch session.agentKey {
+        case "codex":
+            let files = CodexSessionScanner.rolloutFiles(
+                forSessionId: session.sessionId)
+            for url in files { try? fm.removeItem(at: url) }
+            // Belt and braces: the scanned URL always goes even if the
+            // meta re-read failed for it.
+            if let fileURL { try? fm.removeItem(at: fileURL) }
+        case "kimi":
+            guard let fileURL else { return }
+            // The whole `<sessionId>/` tree, resolved by shape from the
+            // wire file the row carries. If that walk fails the wire file
+            // alone goes — a half-deleted session still stops listing
+            // (its wire is gone, so the scan reads it as an empty shell),
+            // which beats deleting nothing.
+            if let dir = KimiSessionScanner.sessionDirectory(of: fileURL) {
+                try? fm.removeItem(at: dir)
+            } else {
+                try? fm.removeItem(at: fileURL)
+            }
+        default:
+            if let fileURL { try? fm.removeItem(at: fileURL) }
         }
     }
 

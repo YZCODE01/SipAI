@@ -17,5 +17,6 @@ out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
 swiftc -O -o "$out/codexctxharness" \
   "$here/Stubs.swift" "$here/main.swift" \
+  "$here/../../SipAI/Models/AttachmentInline.swift" \
   "$here/../../SipAI/Models/CodexSessions.swift"
 "$out/codexctxharness" "$@"

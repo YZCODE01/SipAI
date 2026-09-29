@@ -49,7 +49,11 @@ enum CodexEventParser {
     ///   - line: raw stdout line (trailing newline already stripped).
     ///   - fallbackCwd: cwd reported on `.systemInit` — codex's
     ///     `thread.started` carries no cwd of its own.
-    static func parse(line: String, fallbackCwd: URL) -> Parsed {
+    ///   - includeThinking: emit `.thinking` for a `reasoning` item that
+    ///     carries a summary. Only a Chat only turn asks, so every other
+    ///     turn's events are what they always were.
+    static func parse(line: String, fallbackCwd: URL,
+                      includeThinking: Bool = false) -> Parsed {
         guard let obj = decode(line) else { return Parsed() }
 
         switch (obj["type"] as? String) ?? "" {
@@ -85,6 +89,16 @@ enum CodexEventParser {
             if let item = obj["item"] as? [String: Any],
                (item["type"] as? String) == "error" {
                 return Parsed(notice: noticeMessage(item["message"]))
+            }
+            // A reasoning SUMMARY, when codex was asked for one and the
+            // model returned it. Empty text is reasoning with nothing
+            // readable to show, and draws nothing.
+            if includeThinking, let item = obj["item"] as? [String: Any],
+               (item["type"] as? String) == "reasoning" {
+                let text = (item["text"] as? String) ?? ""
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                else { return Parsed() }
+                return Parsed(events: [StreamEvent(kind: .thinking(text: text))])
             }
             return Parsed(events: completedItemEvents(from: obj))
 
@@ -140,9 +154,9 @@ enum CodexEventParser {
 
     // MARK: - Items
 
-    /// Item types that are conversation or private thinking, never a
-    /// tool row. `reasoning` is dropped exactly as the claude parser
-    /// drops `thinking` blocks.
+    /// Item types that are conversation or thinking, never a tool row.
+    /// `reasoning` becomes a thought only on a Chat only turn (see
+    /// `parse`), exactly as the claude parser treats `thinking` blocks.
     private static let nonToolItemTypes: Set<String> = [
         "agent_message", "user_message", "reasoning",
         // Codex compacting itself. It carries none of the fields a
@@ -178,7 +192,8 @@ enum CodexEventParser {
                                                   postTokens: nil))]
         }
         // A user_message echo would double the bubble `send()` already
-        // drew; reasoning is private. Both are dropped.
+        // drew, and reasoning outside a Chat only turn draws nothing.
+        // Both are dropped.
         if nonToolItemTypes.contains(type) { return [] }
 
         let id = (item["id"] as? String) ?? UUID().uuidString
@@ -213,6 +228,16 @@ enum CodexEventParser {
 
     /// Human-visible output of a finished tool item.
     private static func toolOutput(from item: [String: Any]) -> String {
+        // A web search names what it looked up only when it completes —
+        // under codex's code mode its start carries an empty query — so
+        // its result is that spelling (the terms, the page, `'pattern'
+        // in <url>`), the same one the rollout keeps for a reopen.
+        if (item["type"] as? String) == "web_search",
+           let query = (item["query"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !query.isEmpty {
+            return query
+        }
         for key in ["aggregated_output", "output", "result", "text"] {
             if let value = item[key] as? String, !value.isEmpty {
                 return value

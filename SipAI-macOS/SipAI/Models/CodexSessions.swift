@@ -7,6 +7,13 @@
 // ~/.codex/session_index.jsonl maps id → thread_name — the display
 // name Codex Desktop shows, so reading it gives SipAI the same names.
 //
+// A FORKED thread — codex's own `codex fork`, or a SipAI branch made
+// through `CodexSessionFork` — holds no copy of its history. Its
+// rollout's `session_meta` names the parent and the first parent
+// ordinal that is not inherited, and codex rebuilds the prefix from the
+// parent's file on every resume; `readHistory` follows the same
+// reference (`forkOrigin` / `inheritedLines`), so a fork renders whole.
+//
 // History items reuse `AgentSessionHistoryItem`, so codex transcripts
 // render through the exact same rows as Claude Code history.
 
@@ -48,6 +55,12 @@ enum CodexSessionScanner {
     /// context by `isContextText`, which is correct — there is no
     /// message in it.
     static func strippedTaskMarker(_ text: String) -> String {
+        // Inlined attachment blocks go first, matched as a pair
+        // (`AttachmentInline`): this is codex's one user-text cleaner,
+        // so the row, the derived title and the fork's text match all
+        // see the user's own words. The names the paperclip line prints
+        // are read off the raw text by the caller before this runs.
+        let text = AttachmentInline.stripping(text)
         guard text.contains("<scheduled-task") else { return text }
         let pattern = "<scheduled-task[^>]*>[\\s\\S]*?</scheduled-task>"
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
@@ -78,6 +91,33 @@ enum CodexSessionScanner {
         if contextPrefixes.contains(where: body.hasPrefix) { return true }
         let range = NSRange(location: 0, length: (body as NSString).length)
         return contextHeadingRegex.firstMatch(in: body, range: range) != nil
+    }
+
+    /// The words of a user record's content blocks, joined. Codex wraps
+    /// every image it is handed (`exec -i`, a paste in its terminal) in
+    /// text blocks of its own — `<image name=[Image #1] path="…">`, the
+    /// image, `</image>` (measured) — which are its bookkeeping, not the
+    /// user's words: read as text they title a session with a temp path,
+    /// put the tags in the bubble, and defeat every match against the
+    /// words the user sent. Dropped as a PAIR around the image block, so
+    /// a message that merely quotes such a tag keeps it. The one joiner
+    /// for every user-text read here.
+    static func userText(fromContent content: [Any]) -> String {
+        func isImage(_ index: Int) -> Bool {
+            guard content.indices.contains(index) else { return false }
+            return ((content[index] as? [String: Any])?["type"] as? String) == "input_image"
+        }
+        var parts: [String] = []
+        for (index, block) in content.enumerated() {
+            guard let dict = block as? [String: Any],
+                  let text = dict["text"] as? String, !text.isEmpty else { continue }
+            let bare = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if isImage(index + 1), bare.hasPrefix("<image name="), bare.hasSuffix(">") { continue }
+            if isImage(index - 1), bare == "</image>" { continue }
+            parts.append(text)
+        }
+        return parts.joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// The cron-automation header a scheduled run opens with:
@@ -232,15 +272,7 @@ enum CodexSessionScanner {
                   payload["role"] as? String == "user",
                   let content = payload["content"] as? [Any]
             else { continue }
-            var parts: [String] = []
-            for block in content {
-                if let dict = block as? [String: Any],
-                   let t = dict["text"] as? String, !t.isEmpty {
-                    parts.append(t)
-                }
-            }
-            let joined = parts.joined(separator: "\n")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let joined = userText(fromContent: content)
             guard !joined.isEmpty, !isContextText(joined) else { continue }
             return AgentSessionScanner.isoDate(obj["timestamp"])
         }
@@ -369,7 +401,7 @@ enum CodexSessionScanner {
             }
             // The filename embeds the session UUID — cheap pre-filter;
             // the meta read confirms (older files could clash on names).
-            if name.contains(sessionId) {
+            if rolloutName(name, isFor: sessionId) {
                 found.append(url)
             } else if let meta = readMeta(of: url), meta.id == sessionId {
                 found.append(url)
@@ -455,15 +487,7 @@ enum CodexSessionScanner {
                           payload["role"] as? String == "user",
                           let content = payload["content"] as? [Any]
                     else { continue }
-                    var parts: [String] = []
-                    for block in content {
-                        if let dict = block as? [String: Any],
-                           let t = dict["text"] as? String, !t.isEmpty {
-                            parts.append(t)
-                        }
-                    }
-                    let joined = parts.joined(separator: "\n")
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let joined = userText(fromContent: content)
                     guard !isContextText(joined) else { continue }
                     // A run SipAI fired carries the same marker the
                     // claude scanner reads, and is filed under the same
@@ -551,35 +575,521 @@ enum CodexSessionScanner {
                       comment: "Fallback title for a codex session with no name")
     }
 
+    // MARK: - Turn markers
+
+    /// The records that open and close a turn in a rollout, read in ONE
+    /// place: the history reader stamps user rows with them, the fork
+    /// cuts on them, and a live watcher of an external turn would flip
+    /// on them. Two spellings of this vocabulary is how those drift.
+    ///
+    /// A turn opens with `event_msg` → `task_started {turn_id}`; the
+    /// `turn_context` and the user's `message` follow it. It closes
+    /// with `task_complete {turn_id}`, or `turn_aborted {turn_id,
+    /// reason}` for one that was interrupted.
+    static func turnStarted(_ obj: [String: Any]) -> String? {
+        guard (obj["type"] as? String) == "event_msg",
+              let payload = obj["payload"] as? [String: Any],
+              (payload["type"] as? String) == "task_started",
+              let id = payload["turn_id"] as? String, !id.isEmpty
+        else { return nil }
+        return id
+    }
+
+    static func turnEnded(_ obj: [String: Any]) -> String? {
+        guard (obj["type"] as? String) == "event_msg",
+              let payload = obj["payload"] as? [String: Any],
+              let kind = payload["type"] as? String,
+              kind == "task_complete" || kind == "turn_aborted",
+              let id = payload["turn_id"] as? String, !id.isEmpty
+        else { return nil }
+        return id
+    }
+
+    /// The newest turn the rollout's tail records (see `RecordedTurn`),
+    /// through the two markers above: open after a `task_started` with
+    /// no end behind it. Its start is codex's own `started_at` (epoch
+    /// seconds), else the record's timestamp; its length codex's own
+    /// `duration_ms`. Nil when the tail holds no marker at all.
+    ///
+    /// Only lines naming a marker are parsed — the read runs when a
+    /// watcher starts and at every turn's end, and a tail is mostly
+    /// tool output.
+    static func latestTurn(of url: URL, budget: Int = 1024 * 1024) -> RecordedTurn? {
+        // Escalating window, the rule every tail reader here follows: a
+        // session opened mid-turn asks with the whole turn's output
+        // between its start marker and EOF, and one tool-heavy turn can
+        // push that marker past the first window — read as "no turn",
+        // the session would sit unlit and ungated through it. Only a
+        // file with no marker in the first window pays for the second.
+        let size = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size]
+                    as? NSNumber)?.uint64Value
+        let wide = 8 * 1024 * 1024
+        for window in (budget < wide ? [budget, wide] : [budget]) {
+            if let found = latestTurnScan(of: url, budget: window) { return found }
+            if let size, size <= UInt64(window) { break }
+        }
+        return nil
+    }
+
+    private static func latestTurnScan(of url: URL, budget: Int) -> RecordedTurn? {
+        guard let text = AgentSessionScanner.boundedTail(of: url, budget: budget)
+        else { return nil }
+        var latest: RecordedTurn? = nil
+        text.enumerateLines { line, _ in
+            guard line.contains("task_started") || line.contains("task_complete")
+                    || line.contains("turn_aborted"),
+                  let data = line.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data))
+                    as? [String: Any]
+            else { return }
+            let payload = obj["payload"] as? [String: Any]
+            if turnStarted(obj) != nil {
+                let started = (payload?["started_at"] as? NSNumber)
+                    .map { Date(timeIntervalSince1970: $0.doubleValue) }
+                    ?? AgentSessionScanner.isoDate(obj["timestamp"])
+                latest = RecordedTurn(open: true, startedAt: started, seconds: nil)
+            } else if turnEnded(obj) != nil {
+                var turn = latest ?? RecordedTurn(open: false, startedAt: nil, seconds: nil)
+                turn.open = false
+                if let ms = (payload?["duration_ms"] as? NSNumber)?.doubleValue, ms > 0 {
+                    turn.seconds = ms / 1000
+                } else if let start = turn.startedAt,
+                          let end = AgentSessionScanner.isoDate(obj["timestamp"]) {
+                    turn.seconds = end.timeIntervalSince(start)
+                }
+                latest = turn
+            }
+        }
+        return latest
+    }
+
+    // MARK: - Fork reference
+
+    /// Where a forked rollout's history begins: the parent thread and
+    /// the parent's first ordinal that is NOT inherited.
+    ///
+    /// Codex's own fork copies nothing. The new rollout's `session_meta`
+    /// names `forked_from_id` and `forked_from_ordinal_exclusive`, and
+    /// codex rebuilds the prefix from the parent's file on every resume
+    /// — so a reader that opens the one file sees a conversation that
+    /// starts mid-way, and a fork made in a terminal renders as an
+    /// empty transcript. This reader follows the reference the same
+    /// way codex does.
+    ///
+    /// BOTH fields are required. A subagent's rollout carries
+    /// `forked_from_id` too (its parent thread) with a
+    /// `subagent_history_start_ordinal` instead of the exclusive
+    /// ordinal, and it is not a prefix of its parent: splicing one
+    /// would replay the parent's whole conversation above every
+    /// subagent row.
+    struct ForkOrigin: Equatable {
+        let parentId: String
+        let exclusiveOrdinal: Int
+    }
+
+    static func forkOrigin(ofHeadLine line: String) -> ForkOrigin? {
+        guard let data = line.trimmingCharacters(in: .whitespaces)
+                .data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data))
+                as? [String: Any],
+              (obj["type"] as? String) == "session_meta",
+              let payload = obj["payload"] as? [String: Any],
+              let parent = payload["forked_from_id"] as? String,
+              !parent.isEmpty,
+              let exclusive = (payload["forked_from_ordinal_exclusive"]
+                                as? NSNumber)?.intValue
+        else { return nil }
+        return ForkOrigin(parentId: parent, exclusiveOrdinal: exclusive)
+    }
+
+    static func forkOrigin(of url: URL) -> ForkOrigin? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return nil
+        }
+        defer { try? handle.close() }
+        // The meta record alone can run tens of KB (base instructions
+        // ride in it); the window only has to reach its end.
+        let head = handle.readData(ofLength: 512 * 1024)
+        let text = String(decoding: head, as: UTF8.self)
+        guard let first = text.split(separator: "\n",
+                                     omittingEmptySubsequences: true).first
+        else { return nil }
+        return forkOrigin(ofHeadLine: String(first))
+    }
+
+    /// Whether `name` is the file codex writes for session `id`:
+    /// `rollout-<timestamp>-<id>.jsonl`. Exact, never a substring — an
+    /// id is read out of file content, and one as short as `-` is in
+    /// every rollout's name, which on the delete path means every
+    /// rollout in the store.
+    static func rolloutName(_ name: String, isFor id: String) -> Bool {
+        !id.isEmpty && name.hasPrefix("rollout-") && name.hasSuffix("-\(id).jsonl")
+    }
+
+    /// Newest rollout whose FILENAME carries this thread id.
+    ///
+    /// Filename-only on purpose. `rolloutFiles(forSessionId:)` answers
+    /// the same question authoritatively, but falls back to reading a
+    /// 512 KB head from every rollout that doesn't match — hundreds of
+    /// files, at the end of every turn and on every open of a branch.
+    /// Codex always embeds the id in the name
+    /// (`rollout-<stamp>-<uuid>.jsonl`), so the cheap check is the
+    /// right one here; the authoritative walk stays where deletion
+    /// needs it.
+    ///
+    /// `root` is the store to look in; the default is the real one, and
+    /// a harness hands in a throwaway.
+    static func rolloutFile(namedForId id: String,
+                            root: URL = sessionRoot) -> URL? {
+        guard !id.isEmpty,
+              let walker = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles])
+        else { return nil }
+        var newest: (url: URL, at: Date)? = nil
+        for case let url as URL in walker {
+            let name = url.lastPathComponent
+            guard rolloutName(name, isFor: id) else { continue }
+            let at = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+            if newest == nil || at > newest!.at { newest = (url, at) }
+        }
+        return newest?.url
+    }
+
+    /// A record's `ordinal`, read off the line's head without a full
+    /// parse — the field sits second on every rollout line
+    /// (`{"timestamp":…,"ordinal":N,…}`), and the prefix scan below
+    /// visits every line of a parent up to the cut, which on a long
+    /// session is most of a very large file. Falls back to a parse when
+    /// the head does not carry it, and to `index` for a record with no
+    /// ordinal at all (an older codex).
+    static func ordinal(ofLine line: Substring, index: Int) -> Int {
+        let head = line.prefix(96)
+        if let r = head.range(of: "\"ordinal\":") {
+            // ASCII digits only, and never more than fit: a line is file
+            // content, and an unbounded run of digits would overflow the
+            // accumulation and trap. Anything else falls to the parse.
+            var n = 0
+            var digits = 0
+            for ch in head[r.upperBound...] {
+                guard ch.isASCII, let d = ch.wholeNumberValue, digits < 18 else { break }
+                n = n * 10 + d
+                digits += 1
+            }
+            if digits > 0, digits < 18 { return n }
+        }
+        if let data = line.data(using: .utf8),
+           let obj = (try? JSONSerialization.jsonObject(with: data))
+            as? [String: Any],
+           let n = (obj["ordinal"] as? NSNumber)?.intValue {
+            return n
+        }
+        return index
+    }
+
+    /// The parent's records BELOW the cut, newest `budget` bytes of
+    /// them, and the byte offset the cut sits at.
+    ///
+    /// Ordinals are monotone in a rollout, so the inherited part is a
+    /// PREFIX of the parent's file and the scan can stop at the first
+    /// record at or past the cut. The window drops its OLDEST lines to
+    /// stay under budget, so the turns nearest the cut — the ones the
+    /// branch diverged from — are what survives a bound. Streamed a
+    /// chunk at a time: the parent can be hundreds of MB, and a whole-
+    /// file read is the freeze every other reader here avoids.
+    private static let prefixChunk = 1 << 20
+
+    static func inheritedPrefix(of parent: URL, belowOrdinal cut: Int,
+                                budget: Int)
+    -> (lines: [String], bytes: Int, cutOffset: UInt64) {
+        guard let reader = try? FileHandle(forReadingFrom: parent) else {
+            return ([], 0, 0)
+        }
+        defer { try? reader.close() }
+        // The budget window drops its OLDEST lines from a moving head:
+        // `removeFirst` shifts every line kept, once per line read.
+        var kept: [String] = []
+        var head = 0
+        var keptBytes = 0
+        var offset: UInt64 = 0
+        var index = 0
+        var leftover = Data()
+        var reachedCut = false
+
+        func take(_ lineData: Data) -> Bool {
+            // Lossy on purpose — a read can land inside a multibyte
+            // character of a file codex is still writing.
+            let line = String(decoding: lineData, as: UTF8.self)
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            defer { index += 1 }
+            guard !trimmed.isEmpty else { return true }
+            if ordinal(ofLine: Substring(trimmed), index: index) >= cut {
+                return false
+            }
+            kept.append(trimmed)
+            keptBytes += trimmed.utf8.count + 1
+            while keptBytes > budget, head < kept.count {
+                keptBytes -= kept[head].utf8.count + 1
+                head += 1
+            }
+            if head > 4096, head * 2 > kept.count {
+                kept.removeFirst(head)
+                head = 0
+            }
+            return true
+        }
+
+        // Lines are consumed by a cursor and the buffer is compacted once
+        // per chunk: removing each line from the front shifts the rest of
+        // the chunk, once per line — quadratic in a chunk of short lines.
+        outer: while true {
+            let chunk = (try? reader.read(upToCount: prefixChunk)) ?? Data()
+            if chunk.isEmpty { break }
+            leftover.append(chunk)
+            var start = leftover.startIndex
+            while let nl = leftover[start...].firstIndex(of: 0x0A) {
+                let lineData = leftover.subdata(in: start..<nl)
+                let consumed = UInt64(nl - start + 1)
+                start = nl + 1
+                if !take(lineData) { reachedCut = true; break outer }
+                offset += consumed
+            }
+            leftover.removeSubrange(leftover.startIndex..<start)
+        }
+        if !reachedCut, !leftover.isEmpty, take(leftover) {
+            offset += UInt64(leftover.count)
+        }
+        return (Array(kept[head...]), keptBytes, offset)
+    }
+
+    /// Everything a forked rollout inherits, oldest first, following
+    /// the chain up through a fork of a fork. Each level contributes
+    /// the parent's records below THAT level's cut, and a parent that
+    /// is itself a fork is cut at the smaller of the two bounds. A
+    /// missing parent (deleted, in codex or here) contributes nothing:
+    /// the branch then shows its own turns alone, exactly as codex's
+    /// own picker would. Depth-capped so a cycle written by a broken
+    /// store cannot recurse forever.
+    static let forkDepthCap = 8
+
+    static func inheritedLines(for origin: ForkOrigin, budget: Int,
+                               root: URL = sessionRoot,
+                               depth: Int = 0) -> [String] {
+        guard depth < forkDepthCap,
+              let parent = rolloutFile(namedForId: origin.parentId, root: root)
+        else { return [] }
+        var lines: [String] = []
+        if let grand = forkOrigin(of: parent) {
+            let bound = ForkOrigin(
+                parentId: grand.parentId,
+                exclusiveOrdinal: min(grand.exclusiveOrdinal,
+                                      origin.exclusiveOrdinal))
+            lines = inheritedLines(for: bound, budget: budget, root: root,
+                                   depth: depth + 1)
+        }
+        lines.append(contentsOf: inheritedPrefix(
+            of: parent, belowOrdinal: origin.exclusiveOrdinal,
+            budget: budget).lines)
+        // ONE budget for the whole chain, not one per level: the
+        // grandparent's lines are the oldest, so they are the ones a
+        // bound drops first — the same newest-wins rule each level
+        // applies to itself.
+        var total = lines.reduce(0) { $0 + $1.utf8.count + 1 }
+        var drop = 0
+        while total > budget, drop < lines.count {
+            total -= lines[drop].utf8.count + 1
+            drop += 1
+        }
+        return drop == 0 ? lines : Array(lines[drop...])
+    }
+
+    /// Every turn a rollout opened, oldest first, by the id its
+    /// `task_started` carries — streamed over the WHOLE file with no
+    /// line retained, so a multi-hundred-MB rollout costs a pass and
+    /// no memory. `belowOrdinal` stops at a fork's cut for a parent.
+    static func turnIds(of url: URL, belowOrdinal cut: Int? = nil) -> [String] {
+        guard let reader = try? FileHandle(forReadingFrom: url) else { return [] }
+        defer { try? reader.close() }
+        var ids: [String] = []
+        var index = 0
+        var leftover = Data()
+        var stop = false
+
+        func take(_ lineData: Data) {
+            let line = String(decoding: lineData, as: UTF8.self)
+                .trimmingCharacters(in: .whitespaces)
+            defer { index += 1 }
+            guard !line.isEmpty else { return }
+            if let cut, ordinal(ofLine: Substring(line), index: index) >= cut {
+                stop = true
+                return
+            }
+            // Cheap pre-filter; correctness comes from the parse.
+            guard line.contains("\"task_started\""),
+                  let data = line.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data))
+                    as? [String: Any],
+                  let id = turnStarted(obj) else { return }
+            if ids.last != id { ids.append(id) }
+        }
+
+        // Consumed by a cursor, compacted once per chunk (see
+        // `inheritedPrefix`).
+        outer: while !stop {
+            let chunk = (try? reader.read(upToCount: prefixChunk)) ?? Data()
+            if chunk.isEmpty { break }
+            leftover.append(chunk)
+            var start = leftover.startIndex
+            while let nl = leftover[start...].firstIndex(of: 0x0A) {
+                let lineData = leftover.subdata(in: start..<nl)
+                start = nl + 1
+                take(lineData)
+                if stop { break outer }
+            }
+            leftover.removeSubrange(leftover.startIndex..<start)
+        }
+        if !stop, !leftover.isEmpty { take(leftover) }
+        return ids
+    }
+
+    /// The turns a forked rollout inherits, oldest first, up the same
+    /// chain `inheritedLines` walks — for the fork, which has to name
+    /// the turn BEFORE a cut and must not be bounded by a read budget:
+    /// a cut whose predecessor fell outside a window would read as the
+    /// first turn, and "nothing to branch from" starts a NEW session.
+    static func inheritedTurnIds(for origin: ForkOrigin,
+                                 root: URL = sessionRoot,
+                                 depth: Int = 0) -> [String] {
+        guard depth < forkDepthCap,
+              let parent = rolloutFile(namedForId: origin.parentId, root: root)
+        else { return [] }
+        var ids: [String] = []
+        if let grand = forkOrigin(of: parent) {
+            let bound = ForkOrigin(
+                parentId: grand.parentId,
+                exclusiveOrdinal: min(grand.exclusiveOrdinal,
+                                      origin.exclusiveOrdinal))
+            ids = inheritedTurnIds(for: bound, root: root, depth: depth + 1)
+        }
+        for id in turnIds(of: parent, belowOrdinal: origin.exclusiveOrdinal)
+        where ids.last != id {
+            ids.append(id)
+        }
+        return ids
+    }
+
+    /// The bytes a history read of this rollout actually covers: its
+    /// own size plus, for a fork, the inherited prefix up the chain.
+    /// What the transcript's "Show earlier" and the find bar's scope
+    /// note judge partiality against — a branch's own file is tiny,
+    /// and judged on that alone a long inherited prefix bounded by the
+    /// read would pass for the whole conversation.
+    static func historyExtent(of url: URL, root: URL = sessionRoot) -> UInt64 {
+        let own = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size]
+                   as? NSNumber)?.uint64Value ?? 0
+        var total = own
+        var origin = forkOrigin(of: url)
+        var depth = 0
+        while let o = origin, depth < forkDepthCap,
+              let parent = rolloutFile(namedForId: o.parentId, root: root) {
+            // A zero budget keeps no lines; only the offset is wanted.
+            total += inheritedPrefix(of: parent, belowOrdinal: o.exclusiveOrdinal,
+                                     budget: 0).cutOffset
+            let grand = forkOrigin(of: parent)
+            origin = grand.map {
+                ForkOrigin(parentId: $0.parentId,
+                           exclusiveOrdinal: min($0.exclusiveOrdinal,
+                                                 o.exclusiveOrdinal))
+            }
+            depth += 1
+        }
+        return total
+    }
+
     // MARK: - History
 
-    /// Walk a rollout and emit history items in chronological order.
-    /// The conversation lives in payloads carrying `role` + `content`
-    /// blocks; tool activity (`function_call` and friends) becomes
-    /// `.toolUse` markers so the shared renderers show it inline.
-    static func readHistory(of url: URL, maxTurns: Int = 50,
-                            byteBudget: Int? = nil)
-    -> [AgentSessionHistoryItem] {
-        // Same contract as AgentSessionScanner.readHistory: bounded
-        // tail + lossy decode, so a live rollout mid-write can lose at
-        // most one edge line — never the whole transcript — and an
-        // oversized file can't freeze the open. `byteBudget` widens the
-        // tail for whole-conversation callers (search); it never
-        // removes the bound.
-        guard let text = AgentSessionScanner.boundedTail(
-            of: url, budget: byteBudget ?? (8 * 1024 * 1024))
-        else {
-            return []
+    /// One rollout record at a time into history rows.
+    ///
+    /// A struct rather than a function over the whole file so the
+    /// same decoder can be fed the parent's inherited prefix and then
+    /// the branch's own records, and — later — the lines a live
+    /// watcher of an external turn appends. It remembers the turn it
+    /// is inside: a user row's handle back into the transcript
+    /// (`AgentSessionHistoryItem.recordUuid`) is the `turn_id` of the
+    /// `task_started` that opened it, which is what a fork cuts on.
+    struct RolloutDecoder {
+        private(set) var currentTurnId: String? = nil
+        /// Web searches already given a row, by id — see the search case
+        /// in `items(forLine:)`.
+        private var seenWebSearchIds: Set<String> = []
+        /// Searches given a row in the turn under way whose OTHER record
+        /// has not arrived yet, by kind. A search is recorded twice: its
+        /// `item_completed` and, one ordinal later, a `web_search_call`
+        /// — and the call carries no `id` at all, so the pair cannot be
+        /// matched by id. It is matched by COUNT within the turn: the
+        /// second record of a pair is skipped whichever kind it is, and
+        /// two searches for one query stay two rows.
+        private var unpairedSearchItems = 0
+        private var unpairedSearchCalls = 0
+        /// Keep reasoning summaries as `.thinking` rows (see
+        /// `readHistory`). Off, a reasoning record reads as nothing.
+        var includeThinking = false
+
+        init(includeThinking: Bool = false) {
+            self.includeThinking = includeThinking
         }
-        var items: [AgentSessionHistoryItem] = []
-        text.enumerateLines { line, _ in
+
+        mutating func items(forLine line: String) -> [AgentSessionHistoryItem] {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty,
                   let lineData = trimmed.data(using: .utf8),
                   let obj = (try? JSONSerialization.jsonObject(with: lineData))
-                    as? [String: Any],
-                  let payload = obj["payload"] as? [String: Any]
-            else { return }
+                    as? [String: Any]
+            else { return [] }
+            if let turn = CodexSessionScanner.turnStarted(obj) {
+                currentTurnId = turn
+                unpairedSearchItems = 0
+                unpairedSearchCalls = 0
+                return []
+            }
+            guard let payload = obj["payload"] as? [String: Any] else {
+                return []
+            }
+
+            // A web search's own record (`item_completed`, a `WebSearch`
+            // item, or an `Extension` of kind `web.search`). Under codex's
+            // code mode it is the ONLY record of a search — the call that
+            // ran it is an `exec` script — and it carries the spelling the
+            // live feed shows (the terms, or the page). Beside the older
+            // `web_search_call` the same search has both records:
+            // whichever comes first is the row, and the other is skipped
+            // — by id where the records carry one, else by count within
+            // the turn — so a search is never drawn or counted twice.
+            if (obj["type"] as? String) == "event_msg",
+               (payload["type"] as? String) == "item_completed",
+               let item = payload["item"] as? [String: Any],
+               CodexSessionScanner.isWebSearchItem(item) {
+                if let id = item["id"] as? String, !id.isEmpty,
+                   !seenWebSearchIds.insert(id).inserted {
+                    if unpairedSearchCalls > 0 { unpairedSearchCalls -= 1 }
+                    return []
+                }
+                guard let summary = CodexSessionScanner.compactValue(item["query"])
+                        ?? CodexSessionScanner.webSearchSummary(
+                            item["action"] as? [String: Any] ?? [:])
+                else { return [] }
+                if unpairedSearchCalls > 0 {
+                    unpairedSearchCalls -= 1
+                    return []
+                }
+                unpairedSearchItems += 1
+                return [AgentSessionHistoryItem(
+                    kind: .toolUse(id: UUID().uuidString,
+                                   name: "web_search_call",
+                                   input: ["command": summary]))]
+            }
 
             // The agent summarised the conversation and carried on.
             // Codex states no before/after figures, so the row says so
@@ -592,55 +1102,114 @@ enum CodexSessionScanner {
             // those turns above this record. Rendering it would replay
             // the conversation a second time.
             if (obj["type"] as? String) == "compacted" {
-                items.append(AgentSessionHistoryItem(
-                    kind: .compaction(preTokens: nil, postTokens: nil)))
-                return
+                return [AgentSessionHistoryItem(
+                    kind: .compaction(preTokens: nil, postTokens: nil))]
             }
 
             if let role = payload["role"] as? String,
                let content = payload["content"] as? [Any],
                role == "user" || role == "assistant" {
-                var parts: [String] = []
-                for block in content {
-                    if let dict = block as? [String: Any],
-                       let t = dict["text"] as? String, !t.isEmpty {
-                        parts.append(t)
-                    }
-                }
-                let joined = parts.joined(separator: "\n")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !joined.isEmpty else { return }
+                let joined = CodexSessionScanner.userText(fromContent: content)
+                guard !joined.isEmpty else { return [] }
                 if role == "user" {
-                    if isContextText(joined) {
-                        return
+                    if CodexSessionScanner.isContextText(joined) {
+                        return []
                     }
                     // Show the prompt, not the bookkeeping tag that
-                    // filed the run under its task.
-                    items.append(AgentSessionHistoryItem(
-                        kind: .userText(strippedTaskMarker(joined))))
-                } else {
-                    items.append(AgentSessionHistoryItem(
-                        kind: .assistantText(joined)))
+                    // filed the run under its task — nor the inlined
+                    // attachment blocks, whose names ride the row.
+                    var item = AgentSessionHistoryItem(
+                        kind: .userText(CodexSessionScanner.strippedTaskMarker(joined)),
+                        recordUuid: currentTurnId)
+                    item.attachedFiles = AttachmentInline.names(in: joined)
+                    return [item]
                 }
-                return
+                return [AgentSessionHistoryItem(kind: .assistantText(joined))]
             }
 
             switch payload["type"] as? String {
+            case "reasoning" where includeThinking:
+                // The readable part is the SUMMARY; the rest of the
+                // record is encrypted. A reasoning record whose summary
+                // came back empty has nothing to draw.
+                let summary = (payload["summary"] as? [Any] ?? [])
+                    .compactMap { ($0 as? [String: Any])?["text"] as? String }
+                    .joined(separator: "\n\n")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !summary.isEmpty else { return [] }
+                return [AgentSessionHistoryItem(kind: .thinking(summary))]
             case "function_call", "local_shell_call", "custom_tool_call",
                  "web_search_call":
+                // The same search already read off its `item_completed`
+                // record — see above.
+                let isSearchCall = payload["type"] as? String == "web_search_call"
+                if isSearchCall,
+                   let id = payload["id"] as? String, !id.isEmpty,
+                   !seenWebSearchIds.insert(id).inserted {
+                    if unpairedSearchItems > 0 { unpairedSearchItems -= 1 }
+                    return []
+                }
                 // A tool row with nothing to say is pure noise in a
                 // read-only transcript — show it with its arguments or
                 // not at all.
-                guard let summary = toolCallSummary(payload) else { break }
+                guard let summary = CodexSessionScanner.toolCallSummary(payload)
+                else { return [] }
+                if isSearchCall {
+                    if unpairedSearchItems > 0 {
+                        unpairedSearchItems -= 1
+                        return []
+                    }
+                    unpairedSearchCalls += 1
+                }
                 let name = (payload["name"] as? String)
                     ?? (payload["type"] as? String) ?? "tool"
-                items.append(AgentSessionHistoryItem(
+                return [AgentSessionHistoryItem(
                     kind: .toolUse(id: UUID().uuidString,
                                    name: name,
-                                   input: ["command": summary])))
+                                   input: ["command": summary]))]
             default:
-                break
+                return []
             }
+        }
+    }
+
+    /// Walk a rollout and emit history items in chronological order.
+    /// The conversation lives in payloads carrying `role` + `content`
+    /// blocks; tool activity (`function_call` and friends) becomes
+    /// `.toolUse` markers so the shared renderers show it inline.
+    ///
+    /// A forked rollout is read as codex reads it: the parent's
+    /// records below the cut first (`inheritedLines`), then its own.
+    ///
+    /// `includeThinking` keeps reasoning summaries as `.thinking` rows,
+    /// for a session with Chat only turns in it; the caller then applies
+    /// `AgentSessionHistoryItem.keepingThoughts`.
+    static func readHistory(of url: URL, maxTurns: Int = 50,
+                            byteBudget: Int? = nil,
+                            root: URL = sessionRoot,
+                            includeThinking: Bool = false)
+    -> [AgentSessionHistoryItem] {
+        // Same contract as AgentSessionScanner.readHistory: bounded
+        // tail + lossy decode, so a live rollout mid-write can lose at
+        // most one edge line — never the whole transcript — and an
+        // oversized file can't freeze the open. `byteBudget` widens the
+        // tail for whole-conversation callers (search); it never
+        // removes the bound. The inherited prefix of a fork is held to
+        // the same budget.
+        let budget = byteBudget ?? (8 * 1024 * 1024)
+        guard let text = AgentSessionScanner.boundedTail(of: url, budget: budget)
+        else {
+            return []
+        }
+        var decoder = RolloutDecoder(includeThinking: includeThinking)
+        var items: [AgentSessionHistoryItem] = []
+        if let origin = forkOrigin(of: url) {
+            for line in inheritedLines(for: origin, budget: budget, root: root) {
+                items.append(contentsOf: decoder.items(forLine: line))
+            }
+        }
+        text.enumerateLines { line, _ in
+            items.append(contentsOf: decoder.items(forLine: line))
         }
 
         // Same turn-based cap as the Claude reader.
@@ -670,6 +1239,9 @@ enum CodexSessionScanner {
             let action = payload["action"] as? [String: Any] ?? [:]
             return compactValue(action["command"])
         }
+        if payload["type"] as? String == "web_search_call" {
+            return webSearchSummary(payload["action"] as? [String: Any] ?? [:])
+        }
         let raw = payload["arguments"] ?? payload["input"]
         var parsed: [String: Any]? = nil
         if let dict = raw as? [String: Any] {
@@ -693,6 +1265,39 @@ enum CodexSessionScanner {
             if let summary = compactValue(value) { return summary }
         }
         return nil
+    }
+
+    /// A web search's `item_completed` item: `WebSearch`, or code mode's
+    /// `Extension` of kind `web.search`.
+    static func isWebSearchItem(_ item: [String: Any]) -> Bool {
+        switch item["type"] as? String {
+        case "WebSearch": return true
+        case "Extension": return (item["kind"] as? String) == "web.search"
+        default: return false
+        }
+    }
+
+    /// A web search call's line. The rollout records only its `action`,
+    /// and the live feed (`codex exec --json`) spells the same call's
+    /// `query` as the search terms, the page opened, or
+    /// `'pattern' in <url>` (measured) — so the row is spelled that way
+    /// here too, and reads the same live and on reopen. Without this the
+    /// call has no `arguments` to summarise and the row is dropped.
+    private static func webSearchSummary(_ action: [String: Any]) -> String? {
+        // The `item_completed` records spell the action camelCased.
+        switch action["type"] as? String {
+        case "open_page", "openPage":
+            return compactValue(action["url"])
+        case "find_in_page", "findInPage":
+            let pattern = (action["pattern"] as? String) ?? ""
+            let url = (action["url"] as? String) ?? ""
+            guard !pattern.isEmpty, !url.isEmpty else {
+                return compactValue(pattern.isEmpty ? url : pattern)
+            }
+            return compactValue("'\(pattern)' in \(url)")
+        default:
+            return compactValue(action["query"]) ?? compactValue(action["queries"])
+        }
     }
 
     /// Collapse a scalar (or scalar list) into one ≤80-char line.

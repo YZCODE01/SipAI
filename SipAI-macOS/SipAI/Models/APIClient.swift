@@ -577,7 +577,7 @@ final class APIClient {
         let trimmed = base.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, let url = URL(string: trimmed + path) else {
             throw APIError.transport(
-                "Invalid provider base URL \"\(trimmed)\" — fix it in Settings → Models.")
+                "Invalid provider base URL \"\(trimmed)\" — fix it in Settings → Chat models.")
         }
         return url
     }

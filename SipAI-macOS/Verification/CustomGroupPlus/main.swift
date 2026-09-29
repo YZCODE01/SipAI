@@ -101,7 +101,9 @@ check("a named group with rows renders them",
 check("empty Ungrouped is still dropped",
       !made.contains { $0.key == AgentSessionGrouping.ungroupedKey },
       "— nobody named it, and an empty one says nothing")
-check("the user's own order is kept",
+// The ORDER of custom groups is pinned by SidebarGroupActivity; here
+// only that an empty named group still takes its place in it.
+check("an empty named group sorts after one holding a session",
       made.map(\.key) == ["Work", "Personal"])
 
 // An assignment naming a group that is gone reads as unfiled, and
@@ -252,17 +254,54 @@ check("the + and the list read ONE ordering",
 check("the filing happens where the session id is born",
       manager.contains("setAgentSessionGroup("),
       "— a draft has no key to file under, and the send happens under one no session will ever have")
-if let filing = manager.range(of: "setAgentSessionGroup("),
-   let placeholder = manager.range(of: "sessions.insert(placeholder") {
-    check("…BEFORE the placeholder row is inserted",
-          filing.lowerBound < placeholder.lowerBound,
-          "— the insert re-renders the sidebar; filed after, the row shows under Ungrouped and jumps")
-} else {
-    check("…BEFORE the placeholder row is inserted", false, "— one of the two calls is missing")
+
+/// The body of `func name(` up to the next `func ` at the same
+/// indentation — enough to ask whether one call precedes another
+/// INSIDE a function, which a whole-file search cannot.
+func body(of name: String, in text: String) -> Substring? {
+    guard let start = text.range(of: "func " + name) else { return nil }
+    let rest = text[start.upperBound...]
+    // The NEARER of the two spellings, not the first one found: a
+    // `func` far below must not swallow a `private func` in between.
+    let ends = ["\n    func ", "\n    private func ", "\n    @discardableResult"]
+        .compactMap { rest.range(of: $0)?.lowerBound }
+    let end = ends.min() ?? rest.endIndex
+    return rest[..<end]
 }
+func precedes(_ first: String, _ second: String, in fn: String) -> Bool {
+    guard let text = body(of: fn, in: manager),
+          let a = text.range(of: first), let b = text.range(of: second) else { return false }
+    return a.lowerBound < b.lowerBound
+}
+check("…BEFORE the placeholder row is inserted (the draft route)",
+      precedes("fileSession(", "sessions.insert(placeholder", in: "migrateRunner("),
+      "— the insert re-renders the sidebar; filed after, the row shows under Ungrouped and jumps")
 check("a group deleted mid-draft is not resurrected",
-      manager.contains("agentCustomGroups(for: runner.agentKey).contains(group)"),
+      manager.contains("agentCustomGroups(for: agentKey).contains(group)"),
       "— per AGENT, and membership-tested, so config never points at a group that is gone")
+check("ONE writer files both routes",
+      manager.components(separatedBy: "setAgentSessionGroup(").count == 2,
+      "— a second spelling of the guard is how the + and the branch drift")
+
+// A branch is the same conversation continued elsewhere; it keeps its
+// parent's folder already, and under Custom it landed in Ungrouped.
+check("a branch is filed into its parent's group",
+      manager.contains("customGroup: String? = nil) -> AgentRunner")
+        && sessionView.contains("customGroup: customGroup"),
+      "— the reported gap: Create Branch on a grouped session made an unfiled one")
+check("…BEFORE the placeholder row is inserted (the branch route)",
+      precedes("fileSession(", "sessions.insert(placeholder", in: "registerBranchedSession("),
+      "— same rule, same reason, as the draft route")
+check("…the view DECIDES the group and the manager writes it",
+      sessionView.contains("private var branchCustomGroup"),
+      "— the filing stays where a detour cannot lose it")
+check("…a branch of a scheduled RUN takes its task's group",
+      sessionView.contains("AgentListItem.groupItemKey(forScheduledTaskName: task)"),
+      "— a run carries no filing of its own; its task does")
+check("…and the first-message branch rides the draft",
+      sessionView.contains("ClaudeSessionDraft(cwd: cwd, agentKey: sessionAgentKey,")
+        && sessionView.contains("customGroup: customGroup)"),
+      "— editing a session's FIRST message makes a fresh draft, which migrateRunner files")
 check("the manager is given the config it writes through",
       manager.contains("func configure(bridge: MCPBridge, config: ConfigManager)")
         && app.contains("configure(bridge: mcpBridge, config: configManager)"))
@@ -270,8 +309,8 @@ check("the filing is NOT left to the view",
       !sessionView.contains("setAgentSessionGroup("),
       "— the centre pane is torn down by any detour, so a filing addressed to it is lost mid-turn")
 
-// The three findings of the implementation audit, each of which the
-// first cut got wrong and none of which a compile can catch.
+// Three rules of the filing, each easy to get wrong and none of which
+// a compile can catch.
 check("the launch scan still reads \"Scanning…\" under Custom",
       section.contains("(agents.isScanning || !namedGroupsToDraw)"),
       "— `sessions` is empty until the first scan lands; without this every group sits at 0 for the length of it")

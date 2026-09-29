@@ -1,30 +1,55 @@
 // AgentSessionTailer.swift
-// DispatchSource-based monitor that tails a single Claude Code session
-// JSONL and streams new NDJSON records out as `StreamEvent`s via a
-// MainActor callback.
+// DispatchSource-based monitor that tails a single agent session's
+// transcript — a Claude Code session JSONL, a Codex rollout, a Kimi
+// Code wire file (`Format`) — and streams new records out as
+// `StreamEvent`s via a MainActor callback: the turn some OTHER process
+// is running on the session, drawn live, with the sidebar's dot and
+// the composer's gate following it.
 //
 // Ownership: one tailer per live `AgentRunner`. The runner suspends
-// the tailer for the duration of its own `claude -p` subprocess run
-// and resumes it at the current EOF afterwards so records the
-// subprocess just wrote aren't re-rendered.
+// the tailer for the duration of its own subprocess run and resumes it
+// at the current EOF afterwards so records the subprocess just wrote
+// aren't re-rendered.
 //
-// External-in-progress tracking follows one canonical rule set: the
-// flag may flip false ONLY on a result record, an assistant record
-// with a terminating stop_reason, a system record with a turn-end
-// subtype, or the synthetic "[Request interrupted by user…]" user
-// message. Metadata records and mid-turn narration carry no signal.
-// Three fallbacks close the gaps, all on the 3s sweep: the
+// External-in-progress tracking follows one canonical rule set per
+// format. Claude: the flag may flip false ONLY on a result record, an
+// assistant record with a terminating stop_reason, a system record
+// with a turn-end subtype, or the synthetic "[Request interrupted by
+// user…]" user message. Metadata records and mid-turn narration carry
+// no signal. Three fallbacks close the gaps, all on the 3s sweep: the
 // ~/.claude/sessions status files force TRUE while a busy record's
 // pid lives; the same store saying "not busy" for the session (plus
 // 3s of JSONL quiet) is the canonical tie-breaker that flips FALSE;
 // and a 300s staleness guard covers writers that die leaving no
 // status record at all. Do NOT reintroduce text-only/tool_use
 // heuristics here — they would un-gate Send mid-external-turn.
+//
+// Codex and Kimi Code flip on their turn markers alone (codex
+// `task_started` / `task_complete` / `turn_aborted`, kimi `turn.prompt`
+// / `turn.ended` / `prompt.completed`, each spelled once in its
+// scanner), and the sweep asks whether the WRITER still lives
+// (`ExternalWriterProbe`): codex's own thread writer lock, a kimi
+// process running in the session's folder. A writer seen and then gone
+// ends the turn 3s later — a process killed mid-turn writes no end
+// marker; one never seen falls back to the 300s guard.
 
 import Foundation
 import Darwin
 
 final class AgentSessionTailer: @unchecked Sendable {
+
+    /// Which CLI wrote the tailed file: how its records decode, which of
+    /// them open and close a turn, and how a live writer is told from a
+    /// dead one.
+    enum Format: Equatable {
+        case claude
+        /// `threadId` names the thread's writer lock in `sessionRoot`'s
+        /// codex home (`ExternalWriterProbe.codexThreadLocked`).
+        case codex(threadId: String, sessionRoot: URL)
+        /// `workDir` is the session's folder as a REAL path — how kimi
+        /// records it, and how a running process reports its own.
+        case kimi(workDir: String)
+    }
 
     // MARK: - Callbacks
 
@@ -41,8 +66,11 @@ final class AgentSessionTailer: @unchecked Sendable {
 
     // MARK: - Fixed config
 
-    /// JSONL path being tailed.
+    /// Transcript being tailed.
     let fileURL: URL
+
+    /// What wrote it — see `Format`.
+    let format: Format
 
     /// cwd used as a fallback when a system.init event carries no `cwd`.
     private let fallbackCwd: URL
@@ -65,7 +93,7 @@ final class AgentSessionTailer: @unchecked Sendable {
     /// time (file doesn't exist yet).
     private var fallbackTimer: DispatchSourceTimer?
 
-    /// Staleness sweep timer. Fires every 10s; clears
+    /// Staleness sweep timer. Fires every 3s; clears
     /// `externalInProgress` after `staleAfter` of quiet.
     private var staleTimer: DispatchSourceTimer?
 
@@ -98,13 +126,29 @@ final class AgentSessionTailer: @unchecked Sendable {
     /// see the `.unknown` branch of the sweep.
     private var sawStatusRecord: Bool = false
 
+    /// Codex and kimi: the stateful per-record readers the reopened
+    /// transcript uses, fed the appended lines — so a turn watched live
+    /// and the same turn reopened read alike, and each format is spelled
+    /// once, in its scanner.
+    private var rollout = CodexSessionScanner.RolloutDecoder()
+    private var wire = KimiSessionScanner.WireDecoder()
+
+    /// Codex and kimi: the writer of the turn now running has been seen
+    /// alive. Its disappearance then ends the turn in 3s; a writer never
+    /// seen (a codex that keeps no lock, a kimi run from another folder
+    /// with `-w`) leaves the turn to the `staleAfter` guard instead.
+    /// Cleared at every turn start — it describes one turn's writer.
+    private var sawWriter: Bool = false
+
     // MARK: - Init
 
     init(fileURL: URL,
          fallbackCwd: URL,
+         format: Format = .claude,
          onEvents: @escaping @MainActor ([StreamEvent]) -> Void,
          onExternalInProgressChange: @escaping @MainActor (Bool) -> Void) {
         self.fileURL = fileURL
+        self.format = format
         self.fallbackCwd = fallbackCwd
         self.onEvents = onEvents
         self.onExternalInProgressChange = onExternalInProgressChange
@@ -143,10 +187,53 @@ final class AgentSessionTailer: @unchecked Sendable {
             guard self.source == nil, !self.isStopped else { return }
             self.offset = initialOffset
             self.lastActivityAt = Date()
+            self.openTurnCheckPending = self.format != .claude
             self.installStaleTimer()
             if !self.openAndInstallSource() {
                 self.installFallbackTimer()
             }
+        }
+    }
+
+    /// Codex and kimi: a turn another process started BEFORE this watcher
+    /// did has its start marker behind `initialOffset`, so nothing read
+    /// from here on would ever say it is running. The first sweep reads
+    /// the file's tail for it instead (`adoptOpenTurn`). Never done in
+    /// `start` itself: a draft's first turn starts its watcher while OUR
+    /// OWN turn is open in the file under a live writer, and only the
+    /// suspend that follows — which the sweep waits out — tells the two
+    /// apart. Claude's own sweep answers the same question from its
+    /// heartbeat files.
+    private var openTurnCheckPending = false
+
+    /// Live if the file's newest turn is still open AND its writer is
+    /// alive — an open turn with no writer is the residue of a process
+    /// killed mid-turn.
+    private func adoptOpenTurn() {
+        let turn: RecordedTurn?
+        switch format {
+        case .claude: return
+        case .codex: turn = CodexSessionScanner.latestTurn(of: fileURL)
+        case .kimi: turn = KimiSessionScanner.latestTurn(of: fileURL)
+        }
+        guard turn?.open == true, writerAlive() else { return }
+        sawWriter = true
+        lastActivityAt = Date()
+        setExternalInProgress(true)
+    }
+
+    /// Whether the process writing a codex or kimi session still lives —
+    /// see `ExternalWriterProbe`. Always false for claude, whose sweep
+    /// reads its heartbeat files instead.
+    private func writerAlive() -> Bool {
+        switch format {
+        case .claude:
+            return false
+        case .codex(let threadId, let sessionRoot):
+            return ExternalWriterProbe.codexThreadLocked(threadId: threadId,
+                                                         sessionRoot: sessionRoot)
+        case .kimi(let workDir):
+            return ExternalWriterProbe.kimiRunning(inDirectory: workDir)
         }
     }
 
@@ -296,8 +383,14 @@ final class AgentSessionTailer: @unchecked Sendable {
             // Suspended means OUR OWN runner is mid-turn on this file.
             // Its claude subprocess writes the same busy records an
             // external one would — status files prove busyness, never
-            // ownership — so the sweep must stay quiet until resume.
+            // ownership — so the sweep must stay quiet until resume. The
+            // same holds for a codex lock our own `codex exec` holds and
+            // a kimi process we spawned.
             if self.isSuspended { return }
+            if self.format != .claude {
+                self.sweepWriter()
+                return
+            }
             let sid = self.fileURL.deletingPathExtension().lastPathComponent
             let verdict = ClaudeSessionStatusStore.verdict(sessionId: sid)
             if verdict != .unknown { self.sawStatusRecord = true }
@@ -328,6 +421,31 @@ final class AgentSessionTailer: @unchecked Sendable {
         }
         staleTimer = t
         t.resume()
+    }
+
+    /// The codex / kimi sweep. The markers alone decide that a turn
+    /// started or ended; this only decides what the markers cannot — that
+    /// a turn whose writer DIED is over, since a killed process writes no
+    /// end marker. A live writer keeps refreshing the activity clock, so
+    /// a long tool call writing nothing cannot time the turn out. It
+    /// never turns a flag ON from the writer alone: a codex lock is held
+    /// between turns too, and a kimi process sits at its prompt.
+    private func sweepWriter() {
+        if openTurnCheckPending {
+            openTurnCheckPending = false
+            adoptOpenTurn()
+            return
+        }
+        guard externalInProgress else { return }
+        if writerAlive() {
+            sawWriter = true
+            lastActivityAt = Date()
+            return
+        }
+        let quiet = Date().timeIntervalSince(lastActivityAt)
+        let timeout = sawWriter ? 3.0 : Self.staleAfter
+        guard quiet >= timeout else { return }
+        setExternalInProgress(false)
     }
 
     /// stop() variant that skips the `async` jump — safe because it's
@@ -446,12 +564,22 @@ final class AgentSessionTailer: @unchecked Sendable {
             else { continue }
 
             lastActivityAt = Date()
-            applyProgressTransition(forRawRecord: obj)
-
-            batch.append(contentsOf: AgentEventParser.parse(
-                line: trimmed,
-                fallbackCwd: fallbackCwd,
-                includeUserMessages: true))
+            switch format {
+            case .claude:
+                applyProgressTransition(forRawRecord: obj)
+                batch.append(contentsOf: AgentEventParser.parse(
+                    line: trimmed,
+                    fallbackCwd: fallbackCwd,
+                    includeUserMessages: true))
+            case .codex:
+                applyMarker(obj)
+                batch.append(contentsOf: rollout.items(forLine: trimmed)
+                    .compactMap(Self.liveEvent(for:)))
+            case .kimi:
+                applyMarker(obj)
+                batch.append(contentsOf: wire.items(forLine: trimmed)
+                    .compactMap(Self.liveEvent(for:)))
+            }
         }
         if cursor > leftoverData.startIndex {
             leftoverData = Data(leftoverData[cursor...])
@@ -536,6 +664,68 @@ final class AgentSessionTailer: @unchecked Sendable {
     private func applyProgressTransition(forRawRecord obj: [String: Any]) {
         if let state = Self.progressState(forRawRecord: obj) {
             setExternalInProgress(state)
+        }
+    }
+
+    /// Codex / kimi: flip on a turn marker. A turn's start asks for its
+    /// writer at once, so one that dies before the next sweep is still
+    /// known to have been seen. Runs on `queue`.
+    private func applyMarker(_ obj: [String: Any]) {
+        guard let live = Self.turnMarker(obj, format: format) else { return }
+        if live { sawWriter = writerAlive() }
+        setExternalInProgress(live)
+    }
+
+    /// True = a turn started, false = a turn ended, nil = not a turn
+    /// marker, in the scanners' own spelling (`CodexSessionScanner
+    /// .turnStarted` / `turnEnded`, `KimiSessionScanner.turnPromptId` /
+    /// `turnEnded` / `promptCompletedId`) — never a second one. Kimi's
+    /// inner `agent.turn.started` / `agent.turn.ended` and a mid-turn
+    /// `turn.steer` carry no signal: `turn.prompt` opens every turn,
+    /// including the one a finished background task drives, and
+    /// `turn.ended` closes it. Claude's rules are `progressState`.
+    static func turnMarker(_ obj: [String: Any], format: Format) -> Bool? {
+        switch format {
+        case .claude:
+            return nil
+        case .codex:
+            if CodexSessionScanner.turnStarted(obj) != nil { return true }
+            if CodexSessionScanner.turnEnded(obj) != nil { return false }
+            return nil
+        case .kimi:
+            if KimiSessionScanner.turnPromptId(obj) != nil { return true }
+            if KimiSessionScanner.turnEnded(obj)
+                || KimiSessionScanner.promptCompletedId(obj) != nil {
+                return false
+            }
+            return nil
+        }
+    }
+
+    /// One transcript row, decoded by the reader the reopened transcript
+    /// uses, as a live event — so a codex or kimi turn watched live and
+    /// the same turn reopened read alike. Thoughts never reach here: the
+    /// readers are built without them, and a turn another process runs
+    /// is never a Chat only turn, the only kind that draws them.
+    static func liveEvent(for item: AgentSessionHistoryItem) -> StreamEvent? {
+        switch item.kind {
+        case .userText(let text):
+            return StreamEvent(kind: .userMessage(text: text),
+                               isSystemNotice: item.isSystemNotice,
+                               attachedFiles: item.attachedFiles)
+        case .assistantText(let text):
+            return StreamEvent(kind: .assistantText(text: text))
+        case .thinking:
+            return nil
+        case .toolUse(let id, let name, let input):
+            return StreamEvent(kind: .toolUse(toolUseId: id, name: name, input: input))
+        case .toolResult(let id, let content, let isError):
+            return StreamEvent(kind: .toolResult(toolUseId: id, output: content,
+                                                 isError: isError))
+        case .interrupted(let message):
+            return StreamEvent(kind: .interrupted(message: message))
+        case .compaction(let pre, let post):
+            return StreamEvent(kind: .compaction(preTokens: pre, postTokens: post))
         }
     }
 
@@ -860,5 +1050,88 @@ enum ClaudeSessionStatusStore {
         let n = proc_pidpath(pid, &buf, UInt32(buf.count))
         guard n > 0 else { return nil }
         return String(cString: buf)
+    }
+}
+
+// MARK: - Codex and Kimi Code writers
+
+/// Whether the process writing a codex or kimi session is still alive —
+/// what the heartbeat files are to `ClaudeSessionStatusStore`, read from
+/// what each CLI actually leaves behind while it runs. Neither answers
+/// "a turn is running": that is the turn markers' job (`AgentSessionTailer
+/// .turnMarker`). These answer "is anyone still there to finish it".
+enum ExternalWriterProbe {
+
+    /// Codex keeps `<codex home>/thread-writer-locks/<thread id>.lock`
+    /// locked for as long as a codex process — `codex exec`, the TUI's
+    /// app-server daemon, another app's app-server — has the thread open
+    /// for writing, idle time included; the kernel releases it when that
+    /// process dies. So a held lock means "a live codex has this thread".
+    ///
+    /// The lock is only ever TESTED (`F_GETLK`), never taken, not even
+    /// for an instant: codex fails a writer that finds the lock busy, and
+    /// cleans up locks it finds stale itself. The test asks about a WRITE
+    /// lock, which conflicts with a shared lock as well as an exclusive
+    /// one, and on macOS it sees codex's `flock` as well as a POSIX lock.
+    /// `F_GETLK` needs no write access, so the file opens read-only, and
+    /// closing it releases nothing: this process holds no lock on it.
+    static func codexThreadLocked(threadId: String, sessionRoot: URL) -> Bool {
+        guard !threadId.isEmpty, !threadId.contains("/") else { return false }
+        let lock = sessionRoot.deletingLastPathComponent()
+            .appendingPathComponent("thread-writer-locks", isDirectory: true)
+            .appendingPathComponent(threadId + ".lock")
+        // Non-blocking: a FIFO at this path would otherwise hold the open
+        // — and the probe's queue — until something wrote to it.
+        let fd = open(lock.path, O_RDONLY | O_CLOEXEC | O_NONBLOCK)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var probe = flock()
+        probe.l_type = Int16(F_WRLCK)
+        probe.l_whence = Int16(SEEK_SET)
+        probe.l_start = 0
+        probe.l_len = 0
+        guard fcntl(fd, F_GETLK, &probe) == 0 else { return false }
+        return probe.l_type != Int16(F_UNLCK)
+    }
+
+    /// Whether a `kimi` process runs in `directory` — a REAL path, the way
+    /// kimi records a session's `cwd` and a process reports its own. Kimi
+    /// writes no lock and does not hold the wire open between records,
+    /// but its process runs where the session does. Two kimi sessions in
+    /// one folder read as each other's writer; that is the price of the
+    /// only signal kimi leaves.
+    static func kimiRunning(inDirectory directory: String) -> Bool {
+        guard !directory.isEmpty else { return false }
+        let count = proc_listallpids(nil, 0)
+        guard count > 0 else { return false }
+        // Room for processes started between the two calls.
+        var pids = [pid_t](repeating: 0, count: Int(count) + 64)
+        let listed = pids.withUnsafeMutableBufferPointer {
+            proc_listallpids($0.baseAddress,
+                             Int32($0.count * MemoryLayout<pid_t>.size))
+        }
+        guard listed > 0 else { return false }
+        var path = [CChar](repeating: 0, count: 4096)
+        for pid in pids.prefix(Int(listed)) where pid > 0 {
+            guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { continue }
+            let executable = String(cString: path)
+            guard (executable as NSString).lastPathComponent == "kimi" else { continue }
+            if workingDirectory(of: pid) == directory { return true }
+        }
+        return false
+    }
+
+    /// A process's current directory (`PROC_PIDVNODEPATHINFO`), or nil
+    /// when it has gone or cannot be read.
+    private static func workingDirectory(of pid: pid_t) -> String? {
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size) == size
+        else { return nil }
+        return withUnsafeBytes(of: &info.pvi_cdir.vip_path) { raw in
+            guard let base = raw.bindMemory(to: CChar.self).baseAddress
+            else { return nil }
+            return String(cString: base)
+        }
     }
 }

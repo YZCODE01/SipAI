@@ -23,6 +23,10 @@ final class SipAIAppDelegate: NSObject, NSApplicationDelegate {
     weak var agentManager: AgentManager?
     /// Same wiring, so a quit can land the note the user was typing in.
     weak var notesManager: NotesManager?
+    /// Same wiring again: a quit has to drop an update install that is
+    /// being held for a running turn BEFORE the turns are cancelled —
+    /// see `UpdateController.abandonHoldForQuit`.
+    weak var updateController: UpdateController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -35,6 +39,14 @@ final class SipAIAppDelegate: NSObject, NSApplicationDelegate {
         // Delegate callbacks arrive on the main thread; the models are
         // @MainActor.
         MainActor.assumeIsolated {
+            // FIRST. The hold's poll runs in the common run-loop modes
+            // and would fire inside the deferral below — after the
+            // turns were cancelled — and resume the install with a
+            // relaunch, on a quit the user asked for. Dropped here, the
+            // quit ends in Sparkle's install-on-quit instead. A no-op
+            // once the install is already under way, which is what a
+            // quit requested BY Sparkle looks like from here.
+            updateController?.abandonHoldForQuit()
             // BEFORE the early return below. The note editor autosaves
             // on a debounce, so quitting mid-sentence has up to that
             // long of typing staged and unwritten — and a quit with no
@@ -80,6 +92,15 @@ struct SipAIApp: App {
         // (~/Library/Application Support/SipAI/).
         SipaiPaths.ensureDataDir()
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 1000])
+        // Every CLI scrape (`claude --help`, `codex features list`) runs
+        // in the environment an agent child gets — an npm-installed CLI
+        // is a `node` script that cannot start on the GUI app's own PATH
+        // (see `CLIScrapeEnvironment`). Installed here, before any view
+        // exists to trigger a scrape.
+        CLIScrapeEnvironment.provider = {
+            await ShellEnvironment.prepare()
+            return AgentRunner.buildEnvironment()
+        }
     }
 
     var body: some Scene {
@@ -100,8 +121,8 @@ struct SipAIApp: App {
                 // sidebar open. Onboarding keeps the roomier floor its fixed
                 // 420-pt cards were designed around.
                 .frame(
-                    minWidth: configManager.models.isEmpty ? 720 : 640,
-                    minHeight: configManager.models.isEmpty ? 540 : 480
+                    minWidth: configManager.needsOnboarding ? 720 : 640,
+                    minHeight: configManager.needsOnboarding ? 540 : 480
                 )
                 .preferredColorScheme(appState.theme.colorScheme)
                 // NOTE: no `.environment(\.locale, …)`. The UI language
@@ -117,24 +138,69 @@ struct SipAIApp: App {
                     appDelegate.notesManager = notesManager
                     // Same reason as the line above: the updater has to
                     // be able to see whether a turn is in flight before
-                    // it swaps the bundle out from under one.
+                    // it swaps the bundle out from under one — and name
+                    // the sessions those turns belong to.
                     updateController.agents = agentManager
+                    updateController.config = configManager
+                    appDelegate.updateController = updateController
                     // Capture the login shell's environment early — API
                     // keys exported in ~/.zshrc resolve through it.
                     ShellEnvironment.warmUp()
+                    // Debug builds: if the main thread ever stops
+                    // answering, write every thread's stack to
+                    // ~/Library/Logs/SipAI — and touch nothing else.
+                    HangCapture.start()
                     configManager.reload()
+                    // Before the reload below, which prunes the unread
+                    // replies of chats that are gone through it.
+                    chatManager.configure(config: configManager)
                     chatManager.reload()
                     projectManager.reload()
                     agentManager.configure(bridge: mcpBridge, config: configManager)
+                    // The Agent Guide's actions reach detection and
+                    // config through the same weak pair.
+                    AgentGuideActions.shared.configure(agents: agentManager, config: configManager)
+                    // The claude catalogs write "Other models" through
+                    // the config, and the first read of the installed
+                    // binary — its help and its baked alias table — is
+                    // started here rather than at the first composer
+                    // appearance, so the rows already name what the
+                    // binary resolves by the time one is drawn.
+                    ClaudeCapabilities.shared.configure(config: configManager)
+                    ClaudeCapabilities.shared.ensureLoaded()
                     agentManager.reload(config: configManager)
+                    // A kimi session a Chat only turn left with its tools
+                    // switched off (a crash between the policy write and
+                    // its restore) is put right before anything else
+                    // touches it.
+                    agentManager.healKimiToolPolicies()
+                    // Images a codex Chat only turn was handed, left
+                    // behind by a crash or a force-quit. A directory
+                    // walk, so not on the main thread.
+                    Task.detached(priority: .utility) {
+                        AgentRunner.sweepStaleCodexImageFiles()
+                    }
                     agentManager.startDetectionRechecks(config: configManager)
                     // After detection, because its first pass reads the
                     // versions of whatever CLIs were just found. Asks
                     // each vendor's release endpoint at launch and then
-                    // every 8 hours; re-stats the binaries every 10
-                    // minutes, which is what notices a CLI that updated
-                    // itself.
-                    AgentCLIUpdateMonitor.shared.start(config: configManager)
+                    // every 8 hours; re-stats the binaries every minute
+                    // and when the app comes to the front, which is what
+                    // notices a CLI that updated itself. The manager is how an automatic update
+                    // knows to wait for a running turn of that tool.
+                    AgentCLIUpdateMonitor.shared.start(config: configManager,
+                                                       agents: agentManager)
+                    // The update lines beside the logo follow Settings →
+                    // Display → Show update messages. Off, nothing is
+                    // queued or spoken. The logo and name they take the
+                    // place of are always drawn.
+                    UpdateAnnouncer.shared.isEnabled = { [weak configManager] in
+                        guard let display = configManager?.display else { return true }
+                        return display.showUpdateMessages
+                    }
+                    // This launch may be the relaunch an update installed;
+                    // if so it is said beside the logo, like a tool's.
+                    updateController.noteLaunch()
                     agentManager.reloadSessions()
                     // Learn what each model alias resolves to on this
                     // machine, from what Claude Code has already
@@ -163,7 +229,19 @@ struct SipAIApp: App {
 
                     // Install the MCP notification coordinator.
                     UNUserNotificationCenter.current().delegate = notificationCoordinator
-                    notificationCoordinator.onApprovalClicked = { sessionId, taskUuid in
+                    notificationCoordinator.onApprovalClicked = { [weak bridge = mcpBridge] requestSessionId, taskUuid in
+                        // A click asks to see the session waiting on an
+                        // answer. Settings is a layer over the routes, so
+                        // it closes first — or the route changes under it
+                        // and the card stays out of sight.
+                        appState.settingsSection = nil
+                        // The session the request belongs to: its own id,
+                        // or the one its draft's task uuid migrated to — a
+                        // session's first turn asks under the uuid for the
+                        // whole turn (`MCPBridge.request(sessionId:…)`).
+                        let sessionId = !requestSessionId.isEmpty
+                            ? requestSessionId
+                            : (bridge?.alias[taskUuid] ?? "")
                         // Session-id match first.
                         if !sessionId.isEmpty,
                            let session = agentManager.sessions.first(where: { $0.id == sessionId }) {
@@ -200,11 +278,24 @@ struct SipAIApp: App {
                     // to decide whether to post a notification. Returns
                     // true only when the app is frontmost AND the
                     // visible surface matches the approval's session.
-                    mcpBridge.isApprovalFocused = { req in
+                    mcpBridge.isApprovalFocused = { [weak bridge = mcpBridge] req in
                         guard NSApp.isActive else { return false }
-                        if let sid = req.sessionId, !sid.isEmpty {
-                            return appState.openAgentSessionId == sid
+                        // Settings replaces the centre pane: no session is
+                        // on screen while it is open, whatever the routing
+                        // fields still name, so a card raised meanwhile is
+                        // announced like one in any other session.
+                        guard appState.settingsSection == nil else { return false }
+                        if let sid = bridge?.owningSessionId(of: req),
+                           appState.openAgentSessionId == sid {
+                            return true
                         }
+                        // A first-turn request can resolve to a session id
+                        // (the alias is registered on `system.init`) while
+                        // the pane still shows the DRAFT: the flip to the
+                        // session waits for the transcript file, which
+                        // lands a beat later. The draft on screen is that
+                        // session, so it is judged by its uuid — or a card
+                        // the user is looking at posts a notification.
                         if let tu = req.taskUuid, !tu.isEmpty,
                            let draft = appState.pendingClaudeSessionDraft {
                             let runner = agentManager.runner(forDraft: draft)
@@ -238,18 +329,25 @@ struct SipAIApp: App {
         .commands {
             // Conventional slot: directly under "About SipAI" in the
             // app menu, which is where every Mac user already looks for
-            // it. Hidden entirely — not greyed out — in a build that
-            // may not update itself, because "disabled forever" invites
-            // clicking to find out why.
+            // it. Drawn in every build, like Settings → Updates: a build
+            // that may not update itself greys it out and says why on
+            // hover — SwiftUI hands `.help` to the menu item's tooltip.
+            // Only such a build gets the modifier: `.help("")` leaves an
+            // EMPTY tooltip on the item rather than none, and a shipped
+            // copy's menu must not depend on how AppKit draws that.
             CommandGroup(after: .appInfo) {
+                let item = Button {
+                    updateController.checkForUpdates()
+                } label: {
+                    Text("Check for Updates…",
+                         comment: "App menu item: look for a newer version of SipAI")
+                }
+                .disabled(!updateController.availability.allowsUpdates
+                          || !updateController.canCheckForUpdates)
                 if updateController.availability.allowsUpdates {
-                    Button {
-                        updateController.checkForUpdates()
-                    } label: {
-                        Text("Check for Updates…",
-                             comment: "App menu item: look for a newer version of SipAI")
-                    }
-                    .disabled(!updateController.canCheckForUpdates)
+                    item
+                } else {
+                    item.help(updateController.notSelfUpdatingReason)
                 }
             }
             CommandGroup(after: .sidebar) {

@@ -228,7 +228,7 @@ else
     sk "an inserted dylib no longer breaks kimi — keep the strip anyway"
   fi
   clean="$(run_kimi --version)"
-  if grep -q "^0\." <<<"$clean"; then
+  if grep -qE "^[0-9]+\." <<<"$clean"; then
     ok "kimi starts cleanly once DYLD_* is absent"
   else
     no "kimi fails even without DYLD_*" "something else is wrong: $clean"

@@ -163,7 +163,9 @@ let composer = MultilineTextField(text: .constant(""),
                                   onSubmit: {},
                                   spellChecking: true,
                                   onDropFiles: { staged.append(contentsOf: $0) },
-                                  onDropTargeted: { targeting.append($0) })
+                                  onDropTargeted: { targeting.append($0) },
+                                  fontSize: 14,
+                                  lineSpacing: 0)
 let host = NSHostingView(rootView: composer)
 let win = window(host)
 settle(0.8)
@@ -219,7 +221,8 @@ check(staged.isEmpty,
 
 section("4. An inline editor (no drop closure) keeps typing the path")
 
-let plain = MultilineTextField(text: .constant(""), onSubmit: {}, spellChecking: true)
+let plain = MultilineTextField(text: .constant(""), onSubmit: {}, spellChecking: true,
+                               fontSize: 14, lineSpacing: 0)
 let plainHost = NSHostingView(rootView: plain)
 let plainWin = window(plainHost)
 settle(0.6)

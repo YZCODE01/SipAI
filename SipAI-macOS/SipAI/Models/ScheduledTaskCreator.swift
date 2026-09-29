@@ -18,10 +18,11 @@ enum ScheduledTaskCreator {
     struct Request {
         var rawName: String
         var description: String
-        /// 5-field cron expression, already validated by the caller's UI.
-        /// Empty means "no schedule" — the task exists and can be run by
-        /// hand, but nothing fires it.
-        var cron: String
+        /// The `schedule:` value — a 5-field cron expression or a
+        /// one-time `once <instant>` (`TaskSchedule`), already validated
+        /// by the caller's UI. Empty means "no schedule" — the task
+        /// exists and can be run by hand, but nothing fires it.
+        var schedule: String
         var prompt: String
         var cwd: URL
         /// Permission mode for the unattended run; the popover
@@ -30,6 +31,11 @@ enum ScheduledTaskCreator {
         var mode: String
         var model: String?
         var effort: String?
+        /// The composer's speed, like its model and effort: claude's fast
+        /// mode switch, codex's speed pick (nil = Default). See
+        /// `ScheduledTaskDefinition.fastMode` / `.serviceTier`.
+        var fastMode: Bool = false
+        var serviceTier: String? = nil
         /// Which CLI the task runs under. Written to the frontmatter,
         /// and read back by `ScheduledTaskScheduler.fire` — a task
         /// created from a codex session must not fire under claude.
@@ -95,11 +101,13 @@ enum ScheduledTaskCreator {
         let desc = ScheduledTaskDefinition.frontmatterSafe(r.description)
         var def = ScheduledTaskDefinition(name: name,
                                           description: desc.isEmpty ? name : desc)
-        def.scheduleExpression = r.cron
+        def.scheduleExpression = r.schedule
         def.workingDirectory = r.cwd
         def.mode = r.mode
         def.model = r.model
         def.effort = r.effort
+        def.fastMode = r.fastMode
+        def.serviceTier = r.serviceTier
         def.agent = r.agent
         def.prompt = r.prompt
 
@@ -138,7 +146,12 @@ enum ScheduledTaskCreator {
     @discardableResult
     static func renameTask(skillFile: URL, description: String) -> Bool {
         let name = skillFile.deletingLastPathComponent().lastPathComponent
-        guard var def = ScheduledTaskDefinition.read(name: name, skillFile: skillFile)
+        // Only a SKILL.md in the task's own directory (see
+        // `taskDirectory(named:in:)`).
+        guard let own = taskDirectory(named: name),
+              own.appendingPathComponent("SKILL.md").standardizedFileURL.path
+                == skillFile.standardizedFileURL.path,
+              var def = ScheduledTaskDefinition.read(name: name, skillFile: skillFile)
         else { return false }
         def.description = ScheduledTaskDefinition.frontmatterSafe(description)
         return def.write(to: skillFile)
@@ -146,11 +159,55 @@ enum ScheduledTaskCreator {
 
     // MARK: - Delete
 
+    /// The directory a task named `name` lives in — a direct child of
+    /// `root` — or nil for a name that could reach anywhere else.
+    ///
+    /// A task's name is normally the name of its own directory, read off
+    /// the disk or minted by `slugify`. But an ORPHANED task (runs, no
+    /// definition) takes its name from the marker in its runs'
+    /// transcripts, and nothing constrains what a transcript says: a run
+    /// filed under `../..` puts that task's "directory" at the home
+    /// folder, and removing it removes the home folder. Every file
+    /// operation on a task goes through this.
+    static func taskDirectory(named name: String, in root: URL = taskRoot) -> URL? {
+        // A dot-prefixed name is no task's: the scanner lists none, and
+        // `.` / `..` are the two that reach outside `root`.
+        guard !name.isEmpty, !name.hasPrefix("."),
+              !name.contains("/"), !name.contains("\u{0}") else { return nil }
+        let directory = root.appendingPathComponent(name, isDirectory: true)
+        guard directory.standardizedFileURL.deletingLastPathComponent().path
+                == root.standardizedFileURL.path else { return nil }
+        return directory
+    }
+
+    /// Remove the task's definition directory, and only that: `directory`
+    /// must be the one `taskDirectory(named:in:)` gives for `name`, and
+    /// `root` must hold an entry spelled `name`, case included. An
+    /// orphan's name comes from its runs' marker, and the default Mac
+    /// volume resolves a path without regard to case: removing the path
+    /// for a run filed under `Daily-Report` would remove the task
+    /// `daily-report` — a different, live task's definition. (`==` is
+    /// case-sensitive and blind to Unicode normalization, which the
+    /// volume is blind to as well: that is one directory either way.)
+    /// Returns whether anything was removed.
+    @discardableResult
+    static func removeTaskDirectory(named name: String, directory: URL,
+                                    in root: URL = taskRoot) -> Bool {
+        guard let own = taskDirectory(named: name, in: root),
+              own.standardizedFileURL.path == directory.standardizedFileURL.path,
+              let entries = try? FileManager.default.contentsOfDirectory(atPath: root.path),
+              entries.contains(name)
+        else { return false }
+        return (try? FileManager.default.removeItem(at: own)) != nil
+    }
+
     /// Remove a task: its definition directory, plus any leftover
     /// crontab entry from before in-app scheduling. Run sessions are
-    /// normal files under ~/.claude/projects and deliberately stay.
+    /// normal files under ~/.claude/projects and stay — the sidebar's
+    /// "Delete all" removes those itself (`AgentManager
+    /// .deleteScheduledTaskAndRuns`).
     static func deleteTask(named name: String, directory: URL) {
-        try? FileManager.default.removeItem(at: directory)
+        removeTaskDirectory(named: name, directory: directory)
         removeCrontabEntry(taskName: name)
     }
 
@@ -208,8 +265,8 @@ enum ScheduledTaskCreator {
             guard fields.count >= 5, !taskName.isEmpty else { continue }
             let expression = fields.prefix(5).joined(separator: " ")
 
-            let skill = taskRoot.appendingPathComponent(taskName, isDirectory: true)
-                .appendingPathComponent("SKILL.md")
+            guard let directory = taskDirectory(named: taskName) else { continue }
+            let skill = directory.appendingPathComponent("SKILL.md")
             guard var def = ScheduledTaskDefinition.read(name: taskName,
                                                          skillFile: skill)
             else { continue }

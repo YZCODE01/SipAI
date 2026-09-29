@@ -18,6 +18,9 @@ struct ModelSetupSheet: View {
     @EnvironmentObject var config: ConfigManager
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) private var dismiss
+    /// A sheet inherits its presenter's environment, so this is the
+    /// tier scale `ContentView` injects.
+    @Environment(\.sipFontScale) private var fontScale
 
     private enum Phase { case provider, custom, apiKey, models }
     @State private var phase: Phase = .provider
@@ -127,6 +130,9 @@ struct ModelSetupSheet: View {
         }
         .frame(width: 500, height: 540)
         .background(Color(nsColor: .windowBackgroundColor))
+        // System controls step with the tier, once for the whole
+        // sheet — the same rule as Settings (`SipFont.controlSize`).
+        .controlSize(SipFont.controlSize(fontScale))
         .onExitCommand { dismiss() }
         .onAppear { keyMonitor.install(handleListKey) }
         .onDisappear { keyMonitor.remove() }
@@ -299,10 +305,10 @@ struct ModelSetupSheet: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Chat Models", comment: "Model setup window title")
-                .font(.system(size: 18, weight: .semibold))
+                .sipFont(18, weight: .semibold)
                 .foregroundColor(SipDesign.textPrimary)
             Text(subtitle)
-                .font(.system(size: 12.5))
+                .sipFont(12.5)
                 .foregroundColor(SipDesign.textSecondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -330,7 +336,7 @@ struct ModelSetupSheet: View {
     private var configuredModelsSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Your models", comment: "Model setup: header of the configured-models list")
-                .font(.system(size: 11, weight: .semibold))
+                .sipFont(11, weight: .semibold)
                 .foregroundColor(SipDesign.textSecondary)
                 .textCase(.uppercase)
             VStack(spacing: 6) {
@@ -345,18 +351,18 @@ struct ModelSetupSheet: View {
         HStack(spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(m.name)
-                    .font(.system(size: 13, weight: .medium))
+                    .sipFont(13, weight: .medium)
                     .foregroundColor(SipDesign.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text(providerDisplayName(m.providerKey))
-                    .font(.system(size: 11))
+                    .sipFont(11)
                     .foregroundColor(SipDesign.textSecondary)
             }
             Spacer(minLength: 8)
             if m.id == config.defaultModel {
                 Text("default", comment: "Chip marking the default model")
-                    .font(.system(size: 11))
+                    .sipFont(11)
                     .foregroundColor(SipDesign.blue)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
@@ -399,15 +405,18 @@ struct ModelSetupSheet: View {
                             } label: {
                                 HStack(spacing: 8) {
                                     Image(systemName: "plus.circle.fill")
-                                        .font(.system(size: 13))
+                                        .sipFont(13)
                                         .foregroundColor(SipDesign.blue)
-                                    Text("Add more models from \(pc.name)",
-                                         comment: "Model setup: one-click row for an already-configured provider")
-                                        .font(.system(size: 13))
+                                    // A provider NAME is the user's own text (a custom
+                                    // provider): never through the markdown-parsing
+                                    // `Text` literal, where `_` and `*` style it.
+                                    Text(String(localized: "Add more models from \(pc.name)",
+                                                comment: "Model setup: one-click row for an already-configured provider"))
+                                        .sipFont(13)
                                         .foregroundColor(SipDesign.textPrimary)
                                     Spacer()
                                     Image(systemName: "chevron.right")
-                                        .font(.system(size: 10, weight: .semibold))
+                                        .sipFont(10, weight: .semibold)
                                         .foregroundColor(SipDesign.textHint)
                                 }
                                 .padding(.horizontal, 12)
@@ -438,25 +447,25 @@ struct ModelSetupSheet: View {
 
             if quickAddProviders.isEmpty {
                 Text("Add models from", comment: "Model setup: header above the provider list")
-                    .font(.system(size: 11, weight: .semibold))
+                    .sipFont(11, weight: .semibold)
                     .foregroundColor(SipDesign.textSecondary)
                     .textCase(.uppercase)
             } else {
                 Text("Or set up a new provider", comment: "Model setup: provider list header when configured providers are offered above")
-                    .font(.system(size: 11, weight: .semibold))
+                    .sipFont(11, weight: .semibold)
                     .foregroundColor(SipDesign.textSecondary)
                     .textCase(.uppercase)
             }
 
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 12))
+                    .sipFont(12)
                     .foregroundColor(SipDesign.textHint)
                 TextField(String(localized: "Search providers",
                                  comment: "Model setup: provider search placeholder"),
                           text: $providerSearch)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
+                    .sipFont(13)
                     .foregroundColor(SipDesign.textPrimary)
             }
             .padding(.horizontal, 12)
@@ -510,15 +519,15 @@ struct ModelSetupSheet: View {
                         } label: {
                             HStack(spacing: 8) {
                                 Image(systemName: "plus.circle")
-                                    .font(.system(size: 12))
+                                    .sipFont(12)
                                     .foregroundColor(SipDesign.blue)
                                 Text("Custom (name & URL)",
                                      comment: "Model setup: row that opens the custom-provider form")
-                                    .font(.system(size: 13))
+                                    .sipFont(13)
                                     .foregroundColor(SipDesign.textPrimary)
                                 Spacer()
                                 Image(systemName: "chevron.right")
-                                    .font(.system(size: 10, weight: .semibold))
+                                    .sipFont(10, weight: .semibold)
                                     .foregroundColor(SipDesign.textHint)
                             }
                             .padding(.horizontal, 14)
@@ -532,7 +541,7 @@ struct ModelSetupSheet: View {
     private func providerSectionHeader(_ title: String) -> some View {
         HStack {
             Text(title)
-                .font(.system(size: 10, weight: .semibold))
+                .sipFont(10, weight: .semibold)
                 .foregroundColor(SipDesign.textSecondary)
                 .textCase(.uppercase)
             Spacer()
@@ -550,11 +559,11 @@ struct ModelSetupSheet: View {
         } label: {
             HStack(spacing: 8) {
                 Text(BuiltinProviderCatalog.localizedName(p))
-                    .font(.system(size: 13))
+                    .sipFont(13)
                     .foregroundColor(SipDesign.textPrimary)
                 Spacer()
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
+                    .sipFont(10, weight: .semibold)
                     .foregroundColor(SipDesign.textHint)
             }
             .padding(.horizontal, 14)
@@ -735,9 +744,9 @@ struct ModelSetupSheet: View {
             endpointSection
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("API Key from \(provider?.name ?? "Provider")",
-                     comment: "Model setup: API key field label naming the provider")
-                    .font(.system(size: 12, weight: .semibold))
+                Text(String(localized: "API Key from \(provider?.name ?? "Provider")",
+                            comment: "Model setup: API key field label naming the provider"))
+                    .sipFont(12, weight: .semibold)
                     .foregroundColor(SipDesign.textPrimary)
                 FocusClearingField(
                     placeholder: String(localized: "Paste your API key",
@@ -758,7 +767,7 @@ struct ModelSetupSheet: View {
                 // and only one of them takes yours.
                 if let note = provider?.keyFieldNote {
                     Text(note)
-                        .font(.system(size: 11))
+                        .sipFont(11)
                         .foregroundColor(SipDesign.textHint)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -767,7 +776,7 @@ struct ModelSetupSheet: View {
             HStack(spacing: 12) {
                 Rectangle().fill(SipDesign.borderLight).frame(height: 1)
                 Text("or", comment: "Model setup: divider between key and env-var fields")
-                    .font(.system(size: 12))
+                    .sipFont(12)
                     .foregroundColor(SipDesign.textHint)
                 Rectangle().fill(SipDesign.borderLight).frame(height: 1)
             }
@@ -775,7 +784,7 @@ struct ModelSetupSheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Use environment variable",
                      comment: "Model setup: env var field label")
-                    .font(.system(size: 12, weight: .semibold))
+                    .sipFont(12, weight: .semibold)
                     .foregroundColor(SipDesign.textPrimary)
                 FocusClearingField(
                     placeholder: envVarPlaceholder,
@@ -793,7 +802,7 @@ struct ModelSetupSheet: View {
 
             if let err = keyError {
                 Text(err)
-                    .font(.system(size: 11))
+                    .sipFont(11)
                     .foregroundColor(.red)
             }
 
@@ -808,7 +817,7 @@ struct ModelSetupSheet: View {
                 HStack(spacing: 10) {
                     Text("A key is already stored — leave both fields empty to keep it.",
                          comment: "Model setup: stored-credentials notice on the API key step")
-                        .font(.system(size: 11))
+                        .sipFont(11)
                         .foregroundColor(SipDesign.textHint)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
@@ -816,7 +825,7 @@ struct ModelSetupSheet: View {
                         confirmingProviderRemoval = existing
                     } label: {
                         Text("Remove", comment: "Model setup: delete the stored key on the API key step")
-                            .font(.system(size: 11))
+                            .sipFont(11)
                     }
                 }
             }
@@ -847,7 +856,7 @@ struct ModelSetupSheet: View {
                         Text("Region", comment: "Model setup: region picker header")
                     }
                 }
-                .font(.system(size: 12, weight: .semibold))
+                .sipFont(12, weight: .semibold)
                 .foregroundColor(SipDesign.textPrimary)
                 if !completesPath {
                     ForEach(p.regions, id: \.baseURL) { region in
@@ -859,9 +868,9 @@ struct ModelSetupSheet: View {
                             HStack(spacing: 8) {
                                 Image(systemName: picked ? "largecircle.fill.circle" : "circle")
                                     .foregroundColor(picked ? SipDesign.blue : SipDesign.textSecondary)
-                                    .font(.system(size: 13))
+                                    .sipFont(13)
                                 Text(region.label)
-                                    .font(.system(size: 12.5))
+                                    .sipFont(12.5)
                                     .foregroundColor(SipDesign.textPrimary)
                             }
                             .contentShape(Rectangle())
@@ -876,9 +885,9 @@ struct ModelSetupSheet: View {
                         HStack(spacing: 8) {
                             Image(systemName: useCustomRegion ? "largecircle.fill.circle" : "circle")
                                 .foregroundColor(useCustomRegion ? SipDesign.blue : SipDesign.textSecondary)
-                                .font(.system(size: 13))
+                                .sipFont(13)
                             Text("Other…", comment: "Model setup: manual region entry option")
-                                .font(.system(size: 12.5))
+                                .sipFont(12.5)
                                 .foregroundColor(SipDesign.textPrimary)
                         }
                         .contentShape(Rectangle())
@@ -922,7 +931,7 @@ struct ModelSetupSheet: View {
                                          comment: "Model setup: invalid custom region entry for a template provider")
                                 : String(localized: "Enter a full URL starting with http:// or https://.",
                                          comment: "Model setup: custom region text is not a usable URL")))
-                            .font(.system(size: 11))
+                            .sipFont(11)
                             .foregroundColor(.red)
                             .padding(.leading, completesPath ? 0 : 21)
                     }
@@ -945,12 +954,12 @@ struct ModelSetupSheet: View {
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: showEndpointField ? "chevron.down" : "chevron.right")
-                            .font(.system(size: 9, weight: .semibold))
+                            .sipFont(9, weight: .semibold)
                         Text("Endpoint", comment: "Model setup: disclosure for the provider's base URL")
-                            .font(.system(size: 12, weight: .semibold))
+                            .sipFont(12, weight: .semibold)
                         if !showEndpointField {
                             Text(resolvedBaseURL)
-                                .font(.system(size: 11))
+                                .sipFont(11)
                                 .foregroundColor(SipDesign.textHint)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
@@ -977,7 +986,7 @@ struct ModelSetupSheet: View {
                     if !isValidHTTPBaseURL(resolvedBaseURL) {
                         Text("Enter a full URL starting with http:// or https://.",
                              comment: "Model setup: the endpoint field holds something that is not a URL")
-                            .font(.system(size: 11))
+                            .sipFont(11)
                             .foregroundColor(.red)
                     }
                 }
@@ -1080,9 +1089,9 @@ struct ModelSetupSheet: View {
     private var modelsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Models from \(provider?.name ?? "")",
-                     comment: "Model setup: header above the fetched model list")
-                    .font(.system(size: 11, weight: .semibold))
+                Text(String(localized: "Models from \(provider?.name ?? "")",
+                            comment: "Model setup: header above the fetched model list"))
+                    .sipFont(11, weight: .semibold)
                     .foregroundColor(SipDesign.textSecondary)
                     .textCase(.uppercase)
                 Spacer()
@@ -1091,7 +1100,7 @@ struct ModelSetupSheet: View {
                 } label: {
                     Text("Change provider",
                          comment: "Model setup: go back to the provider list without adding")
-                        .font(.system(size: 12))
+                        .sipFont(12)
                         .foregroundColor(SipDesign.textSecondary)
                 }
                 .buttonStyle(.plain)
@@ -1102,7 +1111,7 @@ struct ModelSetupSheet: View {
                     ProgressView().controlSize(.small)
                     Text("Fetching models…",
                          comment: "Model setup: shown while the /models call runs")
-                        .font(.system(size: 12))
+                        .sipFont(12)
                         .foregroundColor(SipDesign.textSecondary)
                 }
                 .frame(maxWidth: .infinity, minHeight: 140)
@@ -1121,7 +1130,7 @@ struct ModelSetupSheet: View {
                                     HStack {
                                         Text("Show all \(fetchedModels.count) models",
                                              comment: "Model setup: reveal the older fetched models")
-                                            .font(.system(size: 12.5))
+                                            .sipFont(12.5)
                                             .foregroundColor(SipDesign.blue)
                                         Spacer()
                                     }
@@ -1155,7 +1164,7 @@ struct ModelSetupSheet: View {
                 } icon: {
                     Image(systemName: "info.circle")
                 }
-                .font(.system(size: 12))
+                .sipFont(12)
                 .foregroundColor(SipDesign.textSecondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
             } else if let e = fetchError {
@@ -1166,7 +1175,7 @@ struct ModelSetupSheet: View {
                     } icon: {
                         Image(systemName: "exclamationmark.triangle")
                     }
-                    .font(.system(size: 12))
+                    .sipFont(12)
                     .foregroundColor(.orange)
                     // Region switch in place: only the user knows which
                     // region their key belongs to, and this is the
@@ -1182,14 +1191,14 @@ struct ModelSetupSheet: View {
                                               ? "largecircle.fill.circle" : "circle")
                                             .foregroundColor(provider?.baseURL == region.baseURL
                                                              ? SipDesign.blue : SipDesign.textSecondary)
-                                            .font(.system(size: 13))
+                                            .sipFont(13)
                                         // .label, like the setup-phase
                                         // picker — .name drops the region
                                         // code, where there is one, or
                                         // the two pickers would name the
                                         // same endpoint differently.
                                         Text(region.label)
-                                            .font(.system(size: 12.5))
+                                            .sipFont(12.5)
                                             .foregroundColor(SipDesign.textPrimary)
                                     }
                                     .contentShape(Rectangle())
@@ -1205,7 +1214,7 @@ struct ModelSetupSheet: View {
                     // a thing most people would think to try.
                     Text("The endpoint may not be up to date — editing it could solve this.",
                          comment: "Model setup: hint next to a failed model fetch")
-                        .font(.system(size: 11))
+                        .sipFont(11)
                         .foregroundColor(SipDesign.textHint)
                         .fixedSize(horizontal: false, vertical: true)
                     // The two things that actually fix a failed fetch,
@@ -1217,14 +1226,14 @@ struct ModelSetupSheet: View {
                             startModelFetch()
                         } label: {
                             Text("Try again", comment: "Model setup: refetch the model list")
-                                .font(.system(size: 12))
+                                .sipFont(12)
                         }
                         Button {
                             editKeyAndEndpoint()
                         } label: {
                             Text("Edit key or endpoint",
                                  comment: "Model setup: go back to the key/endpoint page for this provider")
-                                .font(.system(size: 12))
+                                .sipFont(12)
                         }
                     }
                 }
@@ -1236,7 +1245,7 @@ struct ModelSetupSheet: View {
                                      comment: "Model setup: manual model entry placeholder"),
                               text: $manualModelId)
                         .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 13, design: .monospaced))
+                        .sipFont(13, design: .monospaced)
                         .onSubmit { addManualModel() }
                         .disabled(isVerifyingManual)
                     Button {
@@ -1246,7 +1255,7 @@ struct ModelSetupSheet: View {
                             ProgressView().controlSize(.small)
                         } else {
                             Text("Add", comment: "Model setup: add the manually typed model ID")
-                                .font(.system(size: 13))
+                                .sipFont(13)
                         }
                     }
                     .disabled(isVerifyingManual
@@ -1256,7 +1265,7 @@ struct ModelSetupSheet: View {
                 if let message = manualVerifyMessage {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(message)
-                            .font(.system(size: 11))
+                            .sipFont(11)
                             .foregroundColor(.orange)
                             .fixedSize(horizontal: false, vertical: true)
                         if let pending = unverifiedManualId {
@@ -1266,9 +1275,11 @@ struct ModelSetupSheet: View {
                                 // collides with another provider's entry.
                                 saveManualModel(pending)
                             } label: {
-                                Text("Add \(pending) anyway",
-                                     comment: "Model setup: save the model even though verification failed")
-                                    .font(.system(size: 11))
+                                // A typed model id: `_` is common in one and
+                                // must not render as emphasis.
+                                Text(String(localized: "Add \(pending) anyway",
+                                            comment: "Model setup: save the model even though verification failed"))
+                                    .sipFont(11)
                             }
                         }
                     }
@@ -1282,7 +1293,7 @@ struct ModelSetupSheet: View {
                         } icon: {
                             Image(systemName: "exclamationmark.triangle")
                         }
-                        .font(.system(size: 11))
+                        .sipFont(11)
                         .foregroundColor(.orange)
                         // A rejected key is fixed on the page before
                         // this one, so say so with a button.
@@ -1291,7 +1302,7 @@ struct ModelSetupSheet: View {
                         } label: {
                             Text("Edit key or endpoint",
                                  comment: "Model setup: go back to the key/endpoint page for this provider")
-                                .font(.system(size: 11))
+                                .sipFont(11)
                         }
                     }
                 }
@@ -1299,7 +1310,7 @@ struct ModelSetupSheet: View {
                 if provider?.key == "openai" {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("API Style", comment: "Model setup: OpenAI API style header")
-                            .font(.system(size: 12, weight: .semibold))
+                            .sipFont(12, weight: .semibold)
                             .foregroundColor(SipDesign.textPrimary)
                         apiStyleRadioRow(String(localized: "Chat Completions (standard)",
                                                 comment: "Model setup: OpenAI chat completions style"),
@@ -1309,7 +1320,7 @@ struct ModelSetupSheet: View {
                                          value: "openai-responses")
                         Text("Applies to models you tick from now on.",
                              comment: "Model setup: OpenAI API style hint")
-                            .font(.system(size: 11))
+                            .sipFont(11)
                             .foregroundColor(SipDesign.textHint)
                     }
                     .padding(.top, 2)
@@ -1322,7 +1333,7 @@ struct ModelSetupSheet: View {
                         Spacer()
                         Text("+ Add more models",
                              comment: "Model setup: restart the flow with another provider")
-                            .font(.system(size: 13))
+                            .sipFont(13)
                             .foregroundColor(SipDesign.textSecondary)
                         Spacer()
                     }
@@ -1349,17 +1360,17 @@ struct ModelSetupSheet: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: added ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 14))
+                    .sipFont(14)
                     .foregroundColor(added ? SipDesign.blue : SipDesign.textHint)
                 Text(id)
-                    .font(.system(size: 12.5, design: .monospaced))
+                    .sipFont(12.5, design: .monospaced)
                     .foregroundColor(SipDesign.textPrimary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
                 if id == config.defaultModel {
                     Text("default", comment: "Chip marking the default model")
-                        .font(.system(size: 11))
+                        .sipFont(11)
                         .foregroundColor(SipDesign.blue)
                 }
             }
@@ -1502,9 +1513,9 @@ struct ModelSetupSheet: View {
             HStack(spacing: 8) {
                 Image(systemName: selectedApiStyle == value ? "largecircle.fill.circle" : "circle")
                     .foregroundColor(selectedApiStyle == value ? SipDesign.blue : SipDesign.textSecondary)
-                    .font(.system(size: 13))
+                    .sipFont(13)
                 Text(label)
-                    .font(.system(size: 12.5))
+                    .sipFont(12.5)
                     .foregroundColor(SipDesign.textPrimary)
             }
             .contentShape(Rectangle())
@@ -1621,7 +1632,7 @@ struct ModelSetupSheet: View {
                     goBack()
                 } label: {
                     Text("Back", comment: "Model setup: back button")
-                        .font(.system(size: 13))
+                        .sipFont(13)
                         .foregroundColor(SipDesign.textSecondary)
                 }
                 .buttonStyle(.plain)
@@ -1631,7 +1642,7 @@ struct ModelSetupSheet: View {
                 primaryAction()
             } label: {
                 Text(primaryLabel)
-                    .font(.system(size: 13, weight: .semibold))
+                    .sipFont(13, weight: .semibold)
                     .foregroundColor(.white)
                     .padding(.horizontal, 28)
                     .padding(.vertical, 8)
@@ -1740,11 +1751,11 @@ struct ModelSetupSheet: View {
                               text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(label)
-                .font(.system(size: 12, weight: .semibold))
+                .sipFont(12, weight: .semibold)
                 .foregroundColor(SipDesign.textPrimary)
             TextField(placeholder, text: text)
                 .textFieldStyle(.plain)
-                .font(.system(size: 13))
+                .sipFont(13)
                 .padding(.horizontal, 12)
                 .frame(height: 38)
                 .background(SipDesign.surface)

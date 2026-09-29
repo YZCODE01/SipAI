@@ -29,8 +29,8 @@
 // see. That is also why they go BEFORE the wipe rather than after —
 // see `perform`.
 //
-// The confirmation alert in `SettingsView` states each of these, so the
-// list here and the sentence there have to be changed together.
+// The confirmation alert in `SettingsSidebarList` states each of these,
+// so the list here and the sentence there have to be changed together.
 
 import Foundation
 
@@ -66,13 +66,32 @@ enum FactoryReset {
         "leftSidebarWidth",
         "rightSidebarWidth",
         "scheduledTaskPanelExpanded",
-        // Which outdated-CLI banners the user has closed, keyed by the
-        // version they closed. Mac-only UI state, so it lives here
-        // rather than in the config file the CLI shares.
-        AgentCLIUpdateMonitor.dismissalsDefaultsKey,
-        // Whether the CLI release checks run at all — the switch in
-        // Settings → Updates. Same home, same reason.
+        // The outdated-CLI banner's closed versions. The banner is gone;
+        // installs that used it still carry the key, the same reason
+        // `rightSidebarWidth` stays listed.
+        "cliUpdateDismissed",
+        // Which updates the user has looked at in Settings → Updates,
+        // by version — what the download badge answers from. Mac-only
+        // UI state, so it lives here rather than in the config file
+        // the CLI shares.
+        UpdateBadge.seenDefaultsKey,
+        // The release the last SipAI update check found, and the build
+        // each copy last launched as. A reset keeps nothing for the
+        // badge, or the "just updated" line, to answer from. The
+        // singular key is the record's earlier shape — one build for
+        // every copy on the Mac — kept listed for the same reason as
+        // `rightSidebarWidth`.
+        UpdateController.availableUpdateDefaultsKey,
+        CopyLaunchRecord.defaultsKey,
+        "sipaiLastLaunchedBuild",
+        // Whether the CLI release checks run at all, and whether a
+        // tool that is behind is updated without asking — the two
+        // switches in Settings → Updates. Same home, same reason.
         AgentCLIUpdateMonitor.remoteChecksDefaultsKey,
+        AgentCLIUpdateMonitor.autoUpdateDefaultsKey,
+        // The plan-usage window's last account verdict per agent —
+        // what decides the toolbar icon before anything runs.
+        UsageMonitor.verdictsDefaultsKey,
         // Sparkle's own preferences. They are settings the user can
         // change (the automatic-check toggle) or decisions they made
         // (a skipped version), so "every setting goes" covers them —
@@ -115,7 +134,7 @@ enum FactoryReset {
     /// The three optional managers exist for callers that do not hold
     /// them — today only `Verification/FactoryReset`, which passes nil
     /// to exercise the partial-failure report. Everything reachable
-    /// from the Settings sheet passes all of them, and should.
+    /// from Settings passes all of them, and should.
     @discardableResult
     static func perform(config: ConfigManager,
                         projects: ProjectManager,
@@ -159,6 +178,14 @@ enum FactoryReset {
         ClaudeModelCatalog.forgetHarvest()
         ClaudeModelCatalog.refreshObservedNames(config: config,
                                                 sessionURLs: [])
+        // Same rule for the plan-usage verdicts: the UserDefaults key
+        // is gone, and the copy in memory must go with it.
+        UsageMonitor.shared.forgetVerdicts()
+        // And for the update switches and the badge's seen versions.
+        // An automatic-update switch left on in memory would keep
+        // updating tools after a reset that promised every setting.
+        AgentCLIUpdateMonitor.shared.forgetSwitches()
+        UpdateBadge.shared.forgetSeen()
         projects.reload()
         chats.reload()
         notes?.reload()
@@ -190,9 +217,9 @@ enum FactoryReset {
         appState.leftSidebarVisible = true
 
         // Posted on the SUCCESS path only. This notification swaps the
-        // whole main layout out for onboarding, and the Settings sheet
-        // goes with it — including the alert that is the only report a
-        // partial wipe ever gets. A reset that left something behind
+        // whole main layout out for onboarding, and Settings goes with
+        // it — including the alert that is the only report a partial
+        // wipe ever gets. A reset that left something behind
         // therefore stays put and lets the caller speak. It is also not
         // clear that first-run setup is even the right destination when
         // the entry that survived might be config.json itself.

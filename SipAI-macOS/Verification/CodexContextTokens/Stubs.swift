@@ -28,14 +28,25 @@ struct AgentSession: Identifiable, Hashable {
     var activityAt: Date { lastUserMessageAt ?? modifiedAt }
 }
 
+/// The newest turn a transcript records — a plain value the codex
+/// reader returns (`CodexSessionScanner.latestTurn`); the real one lives
+/// in AgentSession.swift, which this harness does not compile.
+struct RecordedTurn: Equatable {
+    var open: Bool
+    var startedAt: Date?
+    var seconds: Double?
+}
+
 struct AgentSessionHistoryItem: Identifiable, Hashable {
     let id: UUID = UUID()
     let kind: Kind
     var recordUuid: String? = nil
+    var attachedFiles: [String] = []
 
     enum Kind {
         case userText(String)
         case assistantText(String)
+        case thinking(String)
         case toolUse(id: String, name: String, input: [String: Any])
         case toolResult(toolUseId: String, content: String, isError: Bool)
         case interrupted(message: String)

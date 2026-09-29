@@ -13,11 +13,17 @@
 import SwiftUI
 import AppKit
 
-/// The lockup, copied structurally from `LeftSidebar`'s brand header. Keep
-/// the metrics in step with it — this measures what it is given, so a stale
-/// copy here passes while the sidebar drifts.
+/// The lockup, copied structurally from `LeftSidebar`'s brand header
+/// (`SidebarBrandLockup`). Keep the metrics in step with it — this
+/// measures what it is given, so a stale copy here passes while the
+/// sidebar drifts.
+///
+/// The wordmark's frame is laid out always and drawn by nothing; what
+/// shows — the wordmark, or an update line — is an overlay on that
+/// frame, aligned on its last baseline.
 struct Lockup: View {
     let mark: NSImage
+    var message: String? = nil
     var body: some View {
         HStack(alignment: .lastTextBaseline, spacing: 10) {
             Image(nsImage: mark)
@@ -25,11 +31,21 @@ struct Lockup: View {
                 .interpolation(.high)
                 .aspectRatio(contentMode: .fit)
                 .frame(height: 54)
-            Text(verbatim: "SipAI")
-                .font(.system(size: 28, weight: .semibold))
-                .tracking(-0.4)
-                .foregroundStyle(.black)
-            Spacer()
+            Self.wordmark
+                .hidden()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .overlay(alignment: .leadingLastTextBaseline) {
+                    if let message {
+                        Text(verbatim: message)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(.black)
+                            .lineLimit(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Self.wordmark
+                    }
+                }
         }
         .padding(.leading, 14)
         .padding(.trailing, 12)
@@ -37,6 +53,13 @@ struct Lockup: View {
         .padding(.bottom, 12)
         .frame(width: 268)
         .background(Color.white)
+    }
+
+    static var wordmark: some View {
+        Text(verbatim: "SipAI")
+            .font(.system(size: 28, weight: .semibold))
+            .tracking(-0.4)
+            .foregroundStyle(.black)
     }
 }
 
@@ -61,6 +84,12 @@ func run() -> Int32 {
     let aqua = NSAppearance(named: .aqua)!
     var resolved: NSImage?
     var rendered: CGImage?
+    // The update lines, both shapes: one row, and a wrap whose LAST row
+    // is what must sit on the glass. Capitals and figures only on that
+    // row, so its lowest ink IS the baseline (no descender to allow for).
+    let oneLine = "CODEX 0.157.0"
+    let twoLines = "CLAUDE CODE HAS BEEN\nUPDATED TO 2.1.290"
+    var renderedLines: [String: CGImage] = [:]
     let scale: CGFloat = 4
     aqua.performAsCurrentDrawingAppearance {
         guard let mark = bundle.image(forResource: "SipAI-Logo-54") else { return }
@@ -68,6 +97,11 @@ func run() -> Int32 {
         let renderer = ImageRenderer(content: Lockup(mark: mark))
         renderer.scale = scale
         rendered = renderer.cgImage
+        for line in [oneLine, twoLines] {
+            let r = ImageRenderer(content: Lockup(mark: mark, message: line))
+            r.scale = scale
+            renderedLines[line] = r.cgImage
+        }
     }
     guard let mark = resolved else {
         return fail("SipAI-Logo-54 missing from the bundle")
@@ -127,7 +161,41 @@ func run() -> Int32 {
         return 1
     }
     print("PASS  the glass's base and the S sit on one line (within \(tolerance) pt)")
-    return 0
+
+    // The update line takes the wordmark's place: its LAST row lands on
+    // the glass's base, and the header keeps its height, so nothing in
+    // the sidebar below it moves while a line shows.
+    var failed = false
+    for line in [oneLine, twoLines] {
+        guard let img = renderedLines[line] else { return fail("ImageRenderer produced nothing for \(line)") }
+        guard img.height == h, img.width == w else {
+            print("FAIL  a line changed the header's size: \(img.width)x\(img.height) against \(w)x\(h) px")
+            failed = true
+            continue
+        }
+        var lbuf = [UInt8](repeating: 0, count: w * h)
+        lbuf.withUnsafeMutableBytes { raw in
+            let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8,
+                                bytesPerRow: w, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0)!
+            ctx.setFillColor(CGColor(gray: 1, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
+        }
+        var lowest: Int? = nil
+        search: for y in stride(from: h - 1, through: 0, by: -1) {
+            for x in split..<w where lbuf[y * w + x] < 170 { lowest = y; break search }
+        }
+        guard let lineBottom = lowest else { return fail("found no ink for \(line)") }
+        let d = Double(lineBottom - cupBottom) / Double(scale)
+        let rows = line.contains("\n") ? "two-row" : "one-row"
+        if abs(d) <= tolerance {
+            print(String(format: "PASS  a %@ update line ends on the glass's base (%+.2f pt), header size unchanged", rows, d))
+        } else {
+            print(String(format: "FAIL  a %@ update line ends %+.2f pt off the glass's base", rows, d))
+            failed = true
+        }
+    }
+    return failed ? 1 : 0
 }
 
 exit(MainActor.assumeIsolated { run() })

@@ -25,20 +25,25 @@ struct RootChatsSection: View {
         DisclosureSection(
             title: String(localized: "Chats",
                           comment: "Sidebar section header for chats not in any project"),
-            isExpanded: $expanded
+            isExpanded: $expanded,
+            live: chats.hasChatInFlight(inProject: nil),
+            unread: chats.hasChatUnread(inProject: nil)
         ) {
             newChatRow
-            let visible = filtered(chats.rootChats)
+            // Replying first, then unread, then the rest — the agent
+            // sections' order (`SidebarTier`), newest first within each.
+            let visible = chats.sidebarOrdered(filtered(chats.rootChats))
             if visible.isEmpty {
                 emptyRow
             } else {
-                let overflow = max(0, visible.count - SidebarRowCap.limit)
-                ForEach(revealed ? visible : Array(visible.prefix(SidebarRowCap.limit)),
-                        id: \.id) { chat in
+                let capped = SidebarRowCap.visible(visible, revealed: revealed) {
+                    chats.sidebarTier(slug: $0.slug, project: $0.project) < .rest
+                }
+                ForEach(capped.rows, id: \.id) { chat in
                     SidebarChatRow(chat: chat)
                 }
-                if overflow > 0 {
-                    SidebarShowMoreRow(overflow: overflow, revealed: revealed) {
+                if capped.overflow > 0 {
+                    SidebarShowMoreRow(overflow: capped.overflow, revealed: revealed) {
                         revealed.toggle()
                     }
                 }
@@ -121,7 +126,9 @@ struct ProjectsSection: View {
         DisclosureSection(
             title: String(localized: "Chat groups",
                           comment: "Sidebar section header for chat groups"),
-            isExpanded: $expanded
+            isExpanded: $expanded,
+            live: projects.projects.contains { chats.hasChatInFlight(inProject: $0.slug) },
+            unread: projects.projects.contains { chats.hasChatUnread(inProject: $0.slug) }
         ) {
             newProjectRow
             if projects.projects.isEmpty {
@@ -205,19 +212,25 @@ struct ProjectsSection: View {
 
     @ViewBuilder
     private func projectRows(_ project: ProjectInfo) -> some View {
-        let projChats = filtered(chats.projectChats[project.slug] ?? [])
+        let projChats = chats.sidebarOrdered(filtered(chats.projectChats[project.slug] ?? []))
         let isProjectExpanded = expandedProjects.contains(project.slug)
 
         VStack(alignment: .leading, spacing: 2) {
             if renamingProject == project.slug {
                 projectRenameRow(project)
             } else {
-                projectHeaderRow(project, isExpanded: isProjectExpanded)
+                projectHeaderRow(project, isExpanded: isProjectExpanded,
+                                 live: chats.hasChatInFlight(inProject: project.slug),
+                                 unread: chats.hasChatUnread(inProject: project.slug))
                     // Drag handle for reordering groups. On the HEADER
                     // only — a drag started on a chat row inside an
                     // expanded group must not move the whole folder.
                     .onDrag {
-                        NSItemProvider(object: ("chatgroup:" + project.slug) as NSString)
+                        let payload = "chatgroup:" + project.slug
+                        #if DEBUG
+                        SidebarDropDiagnostics.dumpDestinations(reason: "drag start " + payload)
+                        #endif
+                        return NSItemProvider(object: payload as NSString)
                     }
             }
 
@@ -238,19 +251,18 @@ struct ProjectsSection: View {
                     .padding(.vertical, 4)
                 } else {
                     let revealed = revealedProjects.contains(project.slug)
-                    let overflow = max(0, projChats.count - SidebarRowCap.limit)
-                    ForEach(revealed
-                            ? projChats
-                            : Array(projChats.prefix(SidebarRowCap.limit)),
-                            id: \.id) { chat in
+                    let capped = SidebarRowCap.visible(projChats, revealed: revealed) {
+                        chats.sidebarTier(slug: $0.slug, project: $0.project) < .rest
+                    }
+                    ForEach(capped.rows, id: \.id) { chat in
                         SidebarChatRow(chat: chat).padding(.leading, 12)
                     }
                     // Inside the group's own block, under its last chat.
                     // 40 pt = the rows' 12-pt indent + the 28 pt that
                     // lines a label up with a row TITLE (8 pt padding + a
                     // 14-pt glyph + the row's 6-pt spacing).
-                    if overflow > 0 {
-                        SidebarShowMoreRow(overflow: overflow,
+                    if capped.overflow > 0 {
+                        SidebarShowMoreRow(overflow: capped.overflow,
                                            revealed: revealed,
                                            indent: 40) {
                             if revealed {
@@ -268,8 +280,14 @@ struct ProjectsSection: View {
 
     /// The ⋮ sits outside the expand-button so its click never also
     /// toggles the project open (nested SwiftUI buttons both fire).
+    ///
+    /// `live` says a chat in the group is waiting on its reply, `unread`
+    /// that a reply landed unopened; the header shows them — both, when
+    /// both — only while the group is folded. See `ChatGroupHeaderLabel`.
     private func projectHeaderRow(_ project: ProjectInfo,
-                                  isExpanded: Bool) -> some View {
+                                  isExpanded: Bool,
+                                  live: Bool,
+                                  unread: Bool) -> some View {
         HStack(spacing: 0) {
             Button {
                 withAnimation(.easeInOut(duration: 0.18)) {
@@ -280,24 +298,15 @@ struct ProjectsSection: View {
                     }
                 }
             } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                    Image(systemName: "folder")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                    Text(project.name)
-                        .font(.system(size: SipFont.sidebarRow(fontScale), weight: .medium))
-                        .foregroundStyle(.primary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    Spacer(minLength: 4)
-                }
-                .padding(.leading, 6)
-                .padding(.trailing, 2)
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
+                ChatGroupHeaderLabel(name: project.name,
+                                     expanded: isExpanded,
+                                     live: live,
+                                     unread: unread,
+                                     titleSize: SipFont.sidebarRow(fontScale))
+                    .padding(.leading, 6)
+                    .padding(.trailing, 2)
+                    .padding(.vertical, 4)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             RowEllipsisMenu { projectMenuItems(project) }
@@ -320,9 +329,17 @@ struct ProjectsSection: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: SipFont.sidebarRow(fontScale), weight: .medium))
                 .focused($renameFocused)
-                .onSubmit { commitProjectRename(project) }
+                .onSubmit {
+                    #if DEBUG
+                    SidebarDropDiagnostics.log("rename submit for \(project.slug)")
+                    #endif
+                    commitProjectRename(project)
+                }
                 .onExitCommand { renamingProject = nil }
                 .onChange(of: renameFocused) { _, focused in
+                    #if DEBUG
+                    SidebarDropDiagnostics.log("rename focus → \(focused); first responder \(String(describing: NSApp.keyWindow?.firstResponder.map { type(of: $0) }))")
+                    #endif
                     // Click-away = regret. The Enter path clears the
                     // renaming slug before focus drops, so this cancel
                     // is a no-op after a real commit.
@@ -332,7 +349,12 @@ struct ProjectsSection: View {
                         renamingProject = nil
                     }
                 }
-                .onAppear { renameFocused = true }
+                .onAppear {
+                    #if DEBUG
+                    SidebarDropDiagnostics.log("rename row appeared for \(project.slug); first responder \(String(describing: NSApp.keyWindow?.firstResponder.map { type(of: $0) })), key window \(NSApp.keyWindow != nil)")
+                    #endif
+                    renameFocused = true
+                }
         }
         .padding(.leading, 12)
         .padding(.trailing, 8)
@@ -384,10 +406,23 @@ struct ProjectsSection: View {
     }
 
     private func commitProjectRename(_ project: ProjectInfo) {
-        guard renamingProject == project.slug else { return }
+        guard renamingProject == project.slug else {
+            #if DEBUG
+            SidebarDropDiagnostics.log("rename commit for \(project.slug) refused: renaming \(String(describing: renamingProject))")
+            #endif
+            return
+        }
         renamingProject = nil
         let name = projectNameDraft.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty, name != project.name else { return }
+        guard !name.isEmpty, name != project.name else {
+            #if DEBUG
+            SidebarDropDiagnostics.log("rename commit for \(project.slug): nothing to write (\(name))")
+            #endif
+            return
+        }
+        #if DEBUG
+        SidebarDropDiagnostics.log("rename commit for \(project.slug) → \(name)")
+        #endif
         projects.renameProject(slug: project.slug, newName: name)
     }
 
@@ -409,6 +444,7 @@ struct ProjectsSection: View {
             appState.startNewChat()
         }
         projects.deleteProject(slug: project.slug)
+        appState.dropComposerDrafts(inChatGroup: project.slug)
         chats.reload()
         expandedProjects.remove(project.slug)
     }
@@ -515,6 +551,12 @@ struct SidebarChatRow: View {
         chats.isChatInFlight(slug: chat.slug, project: chat.project)
     }
 
+    /// A reply landed while this chat was not open, and it has not been
+    /// opened since — the steady dot, in the pulse's place.
+    private var isUnread: Bool {
+        chats.isChatUnread(slug: chat.slug, project: chat.project)
+    }
+
     private var normalRow: some View {
         HStack(spacing: 0) {
             Button {
@@ -533,6 +575,8 @@ struct SidebarChatRow: View {
                     Group {
                         if isLive {
                             ActivityDot()
+                        } else if isUnread {
+                            UnreadDot()
                         } else {
                             Image(systemName: "bubble.left")
                                 .font(.system(size: 10))
@@ -541,6 +585,7 @@ struct SidebarChatRow: View {
                     }
                     .frame(width: 14, height: 14)
                     .animation(nil, value: isLive)
+                    .animation(nil, value: isUnread)
                     Text(chat.title)
                         .font(.system(size: SipFont.sidebarRow(fontScale)))
                         .lineLimit(1)
@@ -642,7 +687,7 @@ struct SidebarChatRow: View {
                 newProjectDraft = ""
                 showingNewProject = true
             } label: {
-                Text("New Group…",
+                Text("New group…",
                      comment: "Move-to menu item — create a chat group and move the chat into it")
             }
         } label: {
@@ -686,6 +731,11 @@ struct SidebarChatRow: View {
                                          project: chat.project,
                                          toProject: targetProject)
         else { return }
+        // Its unsent text moves with it — BEFORE the routing below, so
+        // an open chat's reload finds the text at the new address.
+        appState.moveComposerDraft(
+            from: AppState.chatDraftKey(slug: chat.slug, project: chat.project),
+            to: AppState.chatDraftKey(slug: moved.slug, project: moved.project))
         // Keep the open chat open at its new address.
         if wasOpen {
             appState.openChatSlug = moved.slug
@@ -696,6 +746,10 @@ struct SidebarChatRow: View {
     private func deleteChat() {
         let wasOpen = isSelected
         chats.deleteChat(slug: chat.slug, project: chat.project)
+        // Its unsent text goes with it: the address is free now, and the
+        // next chat given it must start with an empty box.
+        appState.setComposerDraft(
+            "", for: AppState.chatDraftKey(slug: chat.slug, project: chat.project))
         if wasOpen {
             appState.openChatSlug = nil
             appState.openChatProject = nil
@@ -717,6 +771,18 @@ struct SidebarChatRow: View {
 struct DisclosureSection<Content: View, Accessory: View>: View {
     let title: String
     @Binding var isExpanded: Bool
+    /// Something inside is running — an agent turn, a chat waiting on
+    /// its reply. While the section is COLLAPSED the header draws the
+    /// activity dot right after its title, because none of the rows that
+    /// would say so are on screen; expanded, those rows (or a folded
+    /// group's header) carry their own, and the header draws nothing.
+    /// A fixed-size sibling after the title, so a long title gives way
+    /// and the dot does not.
+    var live: Bool = false
+    /// Something inside FINISHED and has not been opened since: the
+    /// steady dot, while the section is collapsed — right after the
+    /// pulse when something inside is running too (`GroupActivityDots`).
+    var unread: Bool = false
     @ViewBuilder var accessory: () -> Accessory
     @ViewBuilder var content: () -> Content
     @Environment(\.sipFontScale) private var fontScale
@@ -742,7 +808,12 @@ struct DisclosureSection<Content: View, Accessory: View>: View {
     @ViewBuilder
     private var headerRow: some View {
         if let payload = sectionDragPayload {
-            headerCore.onDrag { NSItemProvider(object: payload as NSString) }
+            headerCore.onDrag {
+                #if DEBUG
+                SidebarDropDiagnostics.dumpDestinations(reason: "drag start " + payload)
+                #endif
+                return NSItemProvider(object: payload as NSString)
+            }
         } else {
             headerCore
         }
@@ -757,10 +828,21 @@ struct DisclosureSection<Content: View, Accessory: View>: View {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
+                    // One line, cut at the tail, like every other name in
+                    // the sidebar. Left to wrap, a long title (a long agent
+                    // label, a Local Files folder) inside this plain
+                    // Button came out as ONE truncated line pinned to the
+                    // top of a row two lines tall, drawn past its own
+                    // frame — over the dot that follows it.
                     Text(title)
                         .font(.system(size: SipFont.sidebarHeader(fontScale), weight: .semibold))
                         .foregroundStyle(.secondary)
                         .textCase(.uppercase)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    if !isExpanded && (live || unread) {
+                        GroupActivityDots(live: live, unread: unread)
+                    }
                     Spacer(minLength: 0)
                 }
                 .padding(.leading, 6)
@@ -776,10 +858,61 @@ struct DisclosureSection<Content: View, Accessory: View>: View {
 extension DisclosureSection where Accessory == EmptyView {
     init(title: String,
          isExpanded: Binding<Bool>,
+         live: Bool = false,
+         unread: Bool = false,
          @ViewBuilder content: @escaping () -> Content) {
         self.init(title: title,
                   isExpanded: isExpanded,
+                  live: live,
+                  unread: unread,
                   accessory: { EmptyView() },
                   content: content)
+    }
+}
+
+// MARK: - Chat group header
+
+/// The title line of a chat group's header: the fold chevron, the folder
+/// glyph, the group's name, and — while the group is FOLDED — the dots
+/// right after the name: the pulse while a chat in it is waiting on its
+/// reply, the steady dot while a reply in it is unopened, both when both.
+///
+/// Same layout rules as an agent group's header (`AgentGroupHeaderLabel`):
+/// the dots are a fixed-size sibling AFTER the name, never part of it, and
+/// the name is the only thing that gives way, truncating at its tail — so
+/// the dots land right after the "…", and a long name can never push them
+/// off the row. Expanded, each chat's own row carries its dot.
+///
+/// A type of its own, taking plain values, so the layout can be rendered
+/// headless (`Verification/SidebarGroupActivity`).
+struct ChatGroupHeaderLabel: View {
+    let name: String
+    let expanded: Bool
+    /// A chat in the group is waiting on its reply.
+    let live: Bool
+    /// A reply landed in the group while its chat was not open, and it
+    /// has not been opened since — the steady dot, beside the pulse when
+    /// another chat in the group is still waiting.
+    var unread: Bool = false
+    let titleSize: CGFloat
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Image(systemName: "folder")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Text(name)
+                .font(.system(size: titleSize, weight: .medium))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if !expanded && (live || unread) {
+                GroupActivityDots(live: live, unread: unread)
+            }
+            Spacer(minLength: 4)
+        }
     }
 }

@@ -31,15 +31,36 @@ struct AgentComposer: View {
     /// turn belongs to another terminal and stops there.
     var externalStoppable: Bool = false
     var placeholder: String
+    /// Every session id the app lists; the text box draws each one it
+    /// holds on a grey token (`SessionIdTokens`).
+    var sessionIdTokens: Set<String> = []
 
     /// Mode / model / effort selections. Owned by AgentSessionView so
     /// they survive the draft→existing transition and persist to config.
     @Binding var options: AgentLaunchOptions
-    /// Claude's own report of whether its newest turn here ran fast
-    /// ("on" / "off" / "cooldown"); nil before any turn, and always nil
-    /// for the other agents. The switch below is an intent, this is
-    /// the outcome, and the chip's hover names both.
-    var fastModeState: String? = nil
+    /// What claude has said about fast mode on this session — its state,
+    /// a refused call's sentence, and the speed the newest call ran at
+    /// (`ClaudeFastModeReport`). Empty for the other agents. The switch
+    /// is the request, this is the outcome, and the chip shows both.
+    var fastModeReport = ClaudeFastModeReport()
+    /// The account claude runs on, when known — on a plan fast mode is
+    /// paid from usage credits, on an API key at a higher rate. nil off
+    /// claude.
+    var claudeAccount: PlanAccountKind? = nil
+
+    /// Files staged for the next message — the chat page's mechanism,
+    /// offered while the mode chip is on Chat only, where the `+` and a
+    /// drop ATTACH instead of inserting paths (the agent has no tools to
+    /// read a path with). Owned by `AgentSessionView`, like the draft
+    /// text, and stashed with it. `onStageFiles` is the one door both
+    /// routes go through, so a drop refuses what the picker refuses.
+    var attachments: [ChatAttachment] = []
+    var onStageFiles: (([URL]) -> Void)? = nil
+    var onRemoveAttachment: ((UUID) -> Void)? = nil
+    /// What the last attach refused or cut short — the chat page's
+    /// banner, drawn above the card until dismissed or the next attach.
+    var attachmentNotice: String? = nil
+    var onDismissAttachmentNotice: (() -> Void)? = nil
 
     /// Working directory shown in the folder control.
     var folder: URL
@@ -117,13 +138,24 @@ struct AgentComposer: View {
 
     var onSend: () -> Void
     var onStop: () -> Void
-    /// Fired after a scheduled task is created so the sidebar reloads.
-    var onScheduleCreated: () -> Void
+    /// Fired after a scheduled task is created, with its directory
+    /// name, so the sidebar lists it at once and then rescans.
+    var onScheduleCreated: (String) -> Void
 
     @EnvironmentObject var config: ConfigManager
     @ObservedObject private var caps = ClaudeCapabilities.shared
     @ObservedObject private var codexCaps = CodexCatalog.shared
     @ObservedObject private var kimiCaps = KimiCatalog.shared
+    /// The installed versions the Chat only gate reads (`ChatOnlyGate`).
+    @ObservedObject private var cliUpdates = AgentCLIUpdateMonitor.shared
+    /// A file drag over the input card while Chat only is on, for the
+    /// border tint the chat card draws for the same thing.
+    @State private var dropTargeted = false
+    /// The TIER scale: this composer is a sibling of the transcript,
+    /// outside its content re-scope, so every size here is the
+    /// design-size convention (`SipFont.scaled` / `.sipFont`).
+    @Environment(\.sipFontScale) private var fontScale
+    @Environment(\.sipLineSpacingFactor) private var lineSpacingFactor
 
     @State private var inputHeight: CGFloat = 30
     @State private var showingModePopover = false
@@ -151,8 +183,30 @@ struct AgentComposer: View {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    /// Whether the row is OFFERED for this composer's agent — the
+    /// installed CLI names what the mode relies on. Below the gate the
+    /// chip reads Default and a saved pick is ignored (the host applies
+    /// the same verdict to the send).
+    private var chatOnlyOffered: Bool { ChatOnlyGate.offered(agentKey: agentKey) }
+
+    /// The chip's state, as it applies: Chat only only where it is
+    /// offered. Every Chat only decision below reads THIS, not the raw
+    /// option, so a saved pick on an older CLI changes nothing on screen.
+    private var chatOnlyActive: Bool { options.chatOnly && chatOnlyOffered }
+
+    /// A saved Chat only pick whose gate has not been read yet — the
+    /// moments after launch, or after the CLI changed. The chip reads
+    /// Default meanwhile, but the pick stands, and a send now would run
+    /// an agent turn, with the agent's tools, on a message meant as a
+    /// chat. So Send waits for the verdict, and says why.
+    private var chatOnlyPending: Bool {
+        options.chatOnly && !ChatOnlyGate.settled(agentKey: agentKey)
+    }
+
     private var canSend: Bool {
-        hasText && !sending && !externalBusy
+        // An attached file is a message on its own, as on the chat page.
+        (hasText || (chatOnlyActive && !attachments.isEmpty))
+            && !sending && !externalBusy && !chatOnlyPending
     }
 
     var body: some View {
@@ -160,10 +214,10 @@ struct AgentComposer: View {
             if let notice = scheduleNotice {
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
                     Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 11))
+                        .sipFont(11)
                         .foregroundStyle(.green)
                     Text(notice)
-                        .font(.system(size: 12))
+                        .sipFont(12)
                         .foregroundColor(SipDesign.textSecondary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
@@ -173,16 +227,63 @@ struct AgentComposer: View {
             if scheduleDraft.enabled && scheduleAvailable {
                 armedScheduleBanner
             }
+            if let notice = attachmentNotice, chatOnlyActive {
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .sipFont(11)
+                        .foregroundStyle(.orange)
+                    // A file name is user content: a String expression,
+                    // never an interpolated literal.
+                    Text(notice)
+                        .sipFont(12)
+                        .foregroundColor(SipDesign.textSecondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    Button {
+                        onDismissAttachmentNotice?()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .sipFont(9, weight: .bold)
+                            .foregroundColor(SipDesign.textHint)
+                    }
+                    .buttonStyle(.plain)
+                    .help(String(localized: "Dismiss",
+                                 comment: "Close button of the attachment notice above the agent composer"))
+                }
+                .transition(.opacity)
+            }
+            if chatOnlyPending {
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Image(systemName: "hourglass")
+                        .sipFont(11)
+                        .foregroundStyle(.orange)
+                    // String expression: the agent label is user-set.
+                    Text(String(localized: "Checking whether \(agentName) offers Chat only. Send waits for the answer — pick another mode to send now.",
+                                comment: "Above the agent composer: a saved Chat only pick is held until the installed CLI's support for it has been read; placeholder is the agent's name"))
+                        .sipFont(12)
+                        .foregroundColor(SipDesign.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .transition(.opacity)
+                // A read that failed is asked again once, here; a switch
+                // away and back asks again after that.
+                .onAppear {
+                    caps.ensureLoaded()
+                    codexCaps.ensureLoaded()
+                    kimiCaps.ensureLoaded()
+                }
+            }
             if let hint = slashCommandHint {
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
                     Image(systemName: "info.circle.fill")
-                        .font(.system(size: 11))
+                        .sipFont(11)
                         .foregroundStyle(.orange)
                     // String expression, never an interpolated literal:
                     // the agent label is user-set and that overload
                     // markdown-parses.
                     Text(hint)
-                        .font(.system(size: 12))
+                        .sipFont(12)
                         .foregroundColor(SipDesign.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -196,8 +297,20 @@ struct AgentComposer: View {
             codexCaps.ensureLoaded()
             kimiCaps.ensureLoaded()
             refreshConfiguredDefault()
+            if !isCodex && !isKimi { caps.refreshUsageCreditsBlock() }
+            if isCodex { codexCaps.refreshSpeedSettings(forFolder: codexFolder) }
+            // "Other models" is anchored on what each alias resolves
+            // to NOW; every appearance re-derives it from the current
+            // inputs (cheap, idempotent) rather than trusting a
+            // section computed at some earlier harvest.
+            if !isCodex && !isKimi {
+                ClaudeModelCatalog.refreshOtherModels(config: config)
+            }
         }
-        .onChange(of: folder) { _, _ in refreshConfiguredDefault() }
+        .onChange(of: folder) { _, _ in
+            refreshConfiguredDefault()
+            if isCodex { codexCaps.refreshSpeedSettings(forFolder: codexFolder) }
+        }
         .onChange(of: scheduleAvailable) { _, available in
             // Disarm when the composer moves somewhere scheduling
             // doesn't exist (draft → existing migration, or switching
@@ -235,40 +348,97 @@ struct AgentComposer: View {
 
     // MARK: Input card
 
+    /// The box's type: 14 pt at Default, with the tier's line spacing
+    /// between wrapped lines — the same rule the transcript's prose
+    /// follows, so the box shares its rhythm.
+    private var inputFontSize: CGFloat { SipFont.scaled(14, fontScale) }
+    private var inputLineSpacing: CGFloat { inputFontSize * lineSpacingFactor }
+
     private var inputCard: some View {
-        HStack(alignment: .bottom, spacing: 6) {
-            ZStack(alignment: .topLeading) {
-                if draft.isEmpty {
-                    Text(placeholder)
-                        .foregroundColor(SipDesign.textHint)
-                        .font(.system(size: 14))
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 9)
-                        .allowsHitTesting(false)
-                }
-                GrowingTextField(
-                    text: $draft,
-                    measuredHeight: $inputHeight,
-                    onSubmit: { if canSend { handleSendTapped() } },
-                    spellChecking: config.display.spellCheck
-                )
-                // Rests at roughly two lines tall, grows with the text.
-                .frame(height: min(max(inputHeight, 60), 140))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
+        VStack(spacing: 0) {
+            if chatOnlyActive, !attachments.isEmpty, let onRemoveAttachment {
+                // The chat page's strip: each chip is the receipt for an
+                // attach and carries the only control that removes it.
+                AttachmentChipRow(attachments: attachments, onRemove: onRemoveAttachment,
+                                  frameRatio: SipFont.ratio(fontScale))
+                    .padding(.horizontal, 10)
+                    .padding(.top, 8)
             }
-            sendButton
-                .padding(.trailing, 8)
-                .padding(.bottom, 7)
+            HStack(alignment: .bottom, spacing: 6) {
+                ZStack(alignment: .topLeading) {
+                    if draft.isEmpty {
+                        Text(placeholder)
+                            .foregroundColor(SipDesign.textHint)
+                            .sipFont(14)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                            .allowsHitTesting(false)
+                    }
+                    GrowingTextField(
+                        text: $draft,
+                        measuredHeight: $inputHeight,
+                        onSubmit: { if canSend { handleSendTapped() } },
+                        spellChecking: config.display.spellCheck,
+                        // Chat only: a dropped file ATTACHES, through the
+                        // same door as the +; every other row keeps
+                        // AppKit's own answer, the path typed in.
+                        onDropFiles: chatOnlyActive ? onStageFiles : nil,
+                        onDropTargeted: chatOnlyActive ? { dropTargeted = $0 } : nil,
+                        fontSize: inputFontSize,
+                        lineSpacing: inputLineSpacing,
+                        sessionIdTokens: sessionIdTokens
+                    )
+                    // Rests at roughly two lines tall, grows with the text.
+                    // The clamp scales with the type, or a larger tier
+                    // shows fewer lines of a box that is meant to show ~3.
+                    .frame(height: min(max(inputHeight, 60 * SipFont.ratio(fontScale)),
+                                       140 * SipFont.ratio(fontScale)))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                }
+                sendButton
+                    .padding(.trailing, 8)
+                    .padding(.bottom, 7)
+            }
         }
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(SipDesign.surface)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
-                        .stroke(SipDesign.borderLight, lineWidth: 1)
+                        .stroke(dropTargeted && chatOnlyActive ? SipDesign.blue : SipDesign.borderLight,
+                                lineWidth: dropTargeted && chatOnlyActive ? 2 : 1)
                 )
         )
+        // A drop on the card OUTSIDE the text view (the strip, the
+        // padding) — the text view forwards its own. Chat only alone:
+        // everywhere else a dropped path is meant to be typed in, and
+        // a card-level target would swallow the drop before the text
+        // view saw it.
+        .onDrop(of: [.fileURL], isTargeted: chatOnlyActive ? $dropTargeted : .constant(false)) { providers in
+            guard chatOnlyActive, let onStageFiles else { return false }
+            // Collected into ONE batch before staging — per-provider
+            // delivery stages a multi-file drop as several batches, and
+            // each batch's refusals would overwrite the last one's.
+            let lock = NSLock()
+            var collected: [URL] = []
+            let group = DispatchGroup()
+            for provider in providers {
+                group.enter()
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    if let url, url.isFileURL {
+                        lock.lock(); collected.append(url); lock.unlock()
+                    }
+                    group.leave()
+                }
+            }
+            group.notify(queue: .main) {
+                guard !collected.isEmpty else { return }
+                onStageFiles(collected)
+            }
+            return true
+        }
+        .animation(.easeInOut(duration: 0.12), value: dropTargeted)
     }
 
     @ViewBuilder
@@ -283,7 +453,7 @@ struct AgentComposer: View {
             let stoppable = sending || externalStoppable
             Button(action: onStop) {
                 Image(systemName: "stop.circle.fill")
-                    .font(.system(size: 22))
+                    .sipFont(22)
                     .foregroundColor(SipDesign.textHint)
                     .opacity(stoppable ? 1 : 0.4)
             }
@@ -297,7 +467,7 @@ struct AgentComposer: View {
             Button(action: handleSendTapped) {
                 Image(systemName: scheduleArmed
                       ? "calendar.circle.fill" : "arrow.up.circle.fill")
-                    .font(.system(size: 22))
+                    .sipFont(22)
                     .foregroundColor(canSend && !creatingTask
                                      ? SipDesign.blue : SipDesign.textHint)
             }
@@ -361,8 +531,11 @@ struct AgentComposer: View {
                     scheduleButton
                 }
             }
-            HoverHighlight(hint: String(localized: "Add file",
-                                        comment: "Instant hover hint for the add-files button")) {
+            HoverHighlight(hint: chatOnlyActive
+                           ? String(localized: "Attach file",
+                                    comment: "Instant hover hint for the add-files button in Chat only")
+                           : String(localized: "Add file",
+                                    comment: "Instant hover hint for the add-files button")) {
                 addFilesButton
             }
             if onGenerateNote != nil && config.display.showNoteAgent {
@@ -392,10 +565,11 @@ struct AgentComposer: View {
                     effortButton
                 }
             }
-            if isKimi {
+            if isKimi && !chatOnlyOffered {
                 // A statement, not a choice: `highlight: false` so it
                 // doesn't read as a button, and the hint says WHY there
-                // is nothing to pick.
+                // is nothing to pick. With Chat only offered the slot is
+                // a two-row picker instead (Auto-approve · Chat only).
                 HoverHighlight(
                     hint: KimiCapabilities.autoApproveHint(agentName: agentName),
                     highlight: false
@@ -403,8 +577,10 @@ struct AgentComposer: View {
                     autoApproveChip
                 }
             } else {
-                HoverHighlight(hint: String(localized: "Mode",
-                                            comment: "Instant hover hint for the permission-mode chip")) {
+                HoverHighlight(hint: chatOnlyActive
+                               ? chatOnlyHint
+                               : String(localized: "Mode",
+                                        comment: "Instant hover hint for the permission-mode chip")) {
                     modeChip
                 }
             }
@@ -437,17 +613,44 @@ struct AgentComposer: View {
             // the previous counter's `.help()` read. `highlight:
             // false` — a readout, and a fill would imply a button.
             if config.display.showTokenAgent && contextTokens > 0 {
+                // Codex sessions get a "?" after the window figure: the
+                // number codex enforces is a third of what OpenAI
+                // advertises for the same model, and the Help card the
+                // glyph opens is the only place that says why. The other
+                // agents' windows are the model's own — nothing to
+                // explain, so no glyph.
                 HoverHighlight(hint: ContextUsageChip.hoverText(
                                     contextTokens: contextTokens,
                                     windowTokens: contextWindowTokens),
                                highlight: false,
-                               hintAlignment: .trailing) {
+                               hintAlignment: .trailing,
+                               hintAccessory: contextWindowHelpGlyph) {
                     ContextUsageChip(contextTokens: contextTokens,
                                      windowTokens: contextWindowTokens)
                 }
             }
         }
         .padding(.horizontal, 4)
+    }
+
+    /// The "?" in the context chip's hint — codex only, and only once
+    /// a window is known (the hint then names the figure the glyph
+    /// explains). nil leaves the hint exactly as every other agent's.
+    private var contextWindowHelpGlyph: ((@escaping () -> Void) -> AnyView)? {
+        guard isCodex, let window = contextWindowTokens, window > 0 else { return nil }
+        let label = String(
+            localized: "Why \(ContextUsageFormat.compact(window))? Opens Help",
+            comment: "Accessibility label of the context chip's help glyph; placeholder is the window as a compact token count")
+        return { collapse in
+            AnyView(HintHelpGlyph(accessibilityLabel: label) {
+                // The bubble is folded BEFORE the sheet opens: a view
+                // under a sheet gets no hover-exit, so left alone the
+                // hint would still be floating there when the sheet
+                // closed.
+                collapse()
+                HelpTopic.codexContextWindow.open()
+            })
+        }
     }
 
     // MARK: Turn clock
@@ -519,13 +722,35 @@ struct AgentComposer: View {
         return config.agentLabel(for: agentKey, defaultName: fallback)
     }
 
+    /// The chip's title: Chat only where it is in force, else the
+    /// agent's mode, else Default (kimi: its auto-approve readout).
     private var selectedModeTitle: String {
+        if chatOnlyActive { return Self.chatOnlyTitle }
+        if isKimi { return KimiCapabilities.autoApproveTitle }
         if let name = options.permissionMode {
             return isCodex ? CodexCapabilities.title(for: name)
                            : AgentPermissionMode(name: name).title
         }
         return String(localized: "Default",
                       comment: "Mode chip label when no permission mode override is set")
+    }
+
+    /// The row's name — one key, used by the chip, the rows and the
+    /// Help card alike.
+    static var chatOnlyTitle: String {
+        String(localized: "Chat only",
+               comment: "Mode chip row: a turn with no file or command tools, only web lookups, drawing on the user's plan")
+    }
+
+    /// The Chat only row, offered first among the overrides — the same
+    /// row on every agent, its subtitle naming the agent through the
+    /// label.
+    private var chatOnlyRow: ComposerOptionRow {
+        ComposerOptionRow(
+            value: ChatOnlyMode.rowValue,
+            title: Self.chatOnlyTitle,
+            subtitle: String(localized: "\(agentName) can look things up on the web but can't read or change files. Attach files with +.",
+                             comment: "Hint under the Chat only mode row; placeholder is the agent label"))
     }
 
     private var modeRows: [ComposerOptionRow] {
@@ -538,28 +763,41 @@ struct AgentComposer: View {
                          comment: "Hint for the no-override sandbox row on a codex session; placeholder is the agent label")
                 : String(localized: "\(agentName) decides; approvals appear here",
                          comment: "Hint for the no-override permission mode row; placeholder is the agent label"))
+        let overrides = chatOnlyOffered ? [chatOnlyRow] : []
+        if isKimi {
+            // Kimi's own mode cannot be chosen (`--prompt` refuses one),
+            // so its list is the auto-approve readout — now a row — and
+            // Chat only.
+            let autoRow = ComposerOptionRow(
+                value: nil,
+                title: KimiCapabilities.autoApproveTitle,
+                subtitle: String(localized: "\(agentName) approves its own tool calls on a headless run",
+                                 comment: "Hint under the kimi Auto-approve mode row; placeholder is the agent label"))
+            return [autoRow] + overrides
+        }
         if isCodex {
-            return [defaultRow] + CodexCapabilities.modePresets.map {
+            return [defaultRow] + overrides + CodexCapabilities.modePresets.map {
                 ComposerOptionRow(value: $0.value,
                                   title: CodexCapabilities.title(for: $0.value),
                                   subtitle: $0.hint)
             }
         }
-        return [defaultRow] + caps.permissionModes.map {
+        return [defaultRow] + overrides + caps.permissionModes.map {
             ComposerOptionRow(value: $0.name, title: $0.title, subtitle: $0.hint)
         }
     }
 
     /// No resting background — flat like the other controls, with the
     /// grey coming only from the shared hover treatment. A non-default
-    /// mode is signalled by the blue text alone.
+    /// mode is signalled by the blue text alone; Chat only reads blue
+    /// like any override.
     private var modeChip: some View {
         Button {
             showingModePopover = true
         } label: {
             Text(selectedModeTitle)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(options.permissionMode == nil
+                .sipFont(11, weight: .semibold)
+                .foregroundColor(options.permissionMode == nil && !chatOnlyActive
                                  ? SipDesign.textSecondary : SipDesign.blue)
                 .padding(.vertical, 3)
                 .padding(.horizontal, 5)
@@ -568,22 +806,52 @@ struct AgentComposer: View {
         .buttonStyle(.plain)
         .popover(isPresented: $showingModePopover, arrowEdge: .bottom) {
             ComposerOptionList(rows: modeRows,
-                               selected: options.permissionMode) { value in
-                options.permissionMode = value
+                               selected: chatOnlyActive
+                                   ? ChatOnlyMode.rowValue : options.permissionMode) { value in
+                // One writer for both fields — see `ChatOnlyMode.select`.
+                ChatOnlyMode.select(value, into: &options)
                 showingModePopover = false
             }
         }
     }
 
-    /// The mode chip's Kimi stand-in: the same slot, same type size,
-    /// but a readout. Secondary colour like an unset chip — nothing has
-    /// been overridden here, because nothing can be.
+    /// The mode chip's Kimi stand-in while Chat only is not offered:
+    /// the same slot, same type size, but a readout. Secondary colour
+    /// like an unset chip — nothing has been overridden here, because
+    /// nothing can be.
     private var autoApproveChip: some View {
         Text(KimiCapabilities.autoApproveTitle)
-            .font(.system(size: 11, weight: .semibold))
+            .sipFont(11, weight: .semibold)
             .foregroundColor(SipDesign.textSecondary)
             .padding(.vertical, 3)
             .padding(.horizontal, 5)
+    }
+
+    /// The chip's hover while Chat only is in force: which pool the
+    /// turn draws on, per agent, and on a kimi draft the one thing that
+    /// differs about its first turn. Through the label, every sentence.
+    private var chatOnlyHint: String {
+        var hint: String
+        // A tool signed in with an API key is billed per token for Chat
+        // only too; naming a plan there would misstate who pays.
+        if UsageMonitor.shared.accounts[agentKey] == .apiKey {
+            hint = String(localized: "Billed to the API key \(agentName) is signed in with",
+                          comment: "Hover on the mode chip while Chat only is on, for an agent signed in with an API key; placeholder is the agent label")
+        } else if isCodex {
+            hint = String(localized: "Uses your \(agentName) limits",
+                          comment: "Hover on the mode chip while Chat only is on, codex; placeholder is the agent label")
+        } else if isKimi {
+            hint = String(localized: "Uses your \(agentName) membership",
+                          comment: "Hover on the mode chip while Chat only is on, kimi; placeholder is the agent label")
+        } else {
+            hint = String(localized: "Uses your \(agentName) plan",
+                          comment: "Hover on the mode chip while Chat only is on, claude; placeholder is the agent label")
+        }
+        if isKimi && folderEditable {
+            hint += " " + String(localized: "The first message of a new session arrives all at once; later ones stream.",
+                                 comment: "Hover on the mode chip while Chat only is on, appended on a kimi draft")
+        }
+        return hint
     }
 
     // MARK: Folder control
@@ -646,11 +914,11 @@ struct AgentComposer: View {
     private func scheduledRunTag(_ info: (name: String, time: Date)) -> some View {
         HStack(spacing: 4) {
             Image(systemName: "timer")
-                .font(.system(size: 11, weight: .medium))
+                .sipFont(11, weight: .medium)
                 .foregroundColor(SipDesign.textSecondary)
             Text(info.time.formatted(
                 .dateTime.month(.abbreviated).day().hour().minute()))
-                .font(.system(size: 11))
+                .sipFont(11)
                 .foregroundColor(SipDesign.textSecondary)
                 .lineLimit(1)
         }
@@ -702,6 +970,10 @@ struct AgentComposer: View {
     /// claude's interactive default would stall a cron run on its
     /// first approval.
     private var effectiveScheduleMode: String {
+        // Chat only never reaches a task: it is not a permission mode,
+        // and `options.permissionMode` is nil while it is on, so a task
+        // scheduled from a Chat only composer gets the agent's
+        // unattended default below — an agent task, with tools.
         // Kimi writes NO mode into the task file. There is no unattended
         // default to pick because there is no attended one either — its
         // headless runs already approve every tool call, and any value
@@ -726,12 +998,12 @@ struct AgentComposer: View {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "calendar.badge.clock")
-                    .font(.system(size: 12, weight: .medium))
+                    .sipFont(12, weight: .medium)
                     .foregroundColor(scheduleDraft.enabled
                                      ? SipDesign.blue : SipDesign.textSecondary)
                 if scheduleDraft.enabled {
                     Text(scheduleDraft.summary)
-                        .font(.system(size: 11))
+                        .sipFont(11)
                         .foregroundColor(SipDesign.blue)
                         .lineLimit(1)
                 }
@@ -764,7 +1036,7 @@ struct AgentComposer: View {
         } label: {
             HStack(spacing: 5) {
                 Image(systemName: "calendar.badge.clock")
-                    .font(.system(size: 11))
+                    .sipFont(11)
                     .foregroundColor(SipDesign.blue)
                 // The FOLDER is named here, not just in the popover. This
                 // banner is the last thing read before send, and the
@@ -776,7 +1048,7 @@ struct AgentComposer: View {
                               comment: "Banner above the input while scheduling is armed and a prompt is typed")
                      : String(localized: "Scheduling armed — type the task prompt below, then send",
                               comment: "Banner above the input while scheduling is armed and the input is empty"))
-                    .font(.system(size: 12))
+                    .sipFont(12)
                     .foregroundColor(SipDesign.textSecondary)
                     .lineLimit(2)
                     .truncationMode(.middle)
@@ -811,21 +1083,29 @@ struct AgentComposer: View {
             showingSchedulePopover = true
             return
         }
-        guard let cron = scheduleDraft.cronExpression, !cron.isEmpty else {
-            scheduleError = String(localized: "That isn't a valid 5-field cron expression (minute hour day month weekday).",
-                                   comment: "Schedule validation: bad cron")
+        // A bad cron, or a one-time moment the clock has passed while
+        // the popover sat open — the same words the task card shows.
+        if let problem = scheduleDraft.timing.problem() {
+            scheduleError = problem
             showingSchedulePopover = true
             return
         }
+        guard let schedule = scheduleDraft.expression, !schedule.isEmpty else { return }
         let request = ScheduledTaskCreator.Request(
             rawName: scheduleDraft.name,
             description: scheduleDraft.taskDescription,
-            cron: cron,
+            schedule: schedule,
             prompt: prompt,
             cwd: folder,
             mode: effectiveScheduleMode,
             model: options.model,
             effort: options.effort,
+            // The speed rides with the model it belongs to: claude's
+            // switch only where the model takes it, codex's as its switch
+            // shows it (`codexTaskSpeedPick`).
+            fastMode: !isCodex && !isKimi && options.fastMode
+                && fastModeSupported(forModel: options.model),
+            serviceTier: isCodex ? codexTaskSpeedPick : nil,
             agent: agentKey
         )
         creatingTask = true
@@ -855,10 +1135,10 @@ struct AgentComposer: View {
                 draft = ""
                 scheduleDraft = ScheduleDraft()
                 showingSchedulePopover = false
-                onScheduleCreated()
+                onScheduleCreated(success.name)
                 let created = success.name
                 scheduleNotice = String(
-                    localized: "Scheduled task “\(created)” created — \(scheduleDraftSummaryAfterCreate(cron))",
+                    localized: "Scheduled task “\(created)” created — \(scheduleDraftSummaryAfterCreate(schedule))",
                     comment: "Transient notice after creating a scheduled task")
                 DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
                     scheduleNotice = nil
@@ -870,10 +1150,10 @@ struct AgentComposer: View {
         }
     }
 
-    /// Human summary for the success notice, computed from the cron we
-    /// just submitted (the draft has already been reset by then).
-    private func scheduleDraftSummaryAfterCreate(_ cron: String) -> String {
-        ScheduleDraft.describe(cron: cron)
+    /// Human summary for the success notice, computed from the schedule
+    /// we just submitted (the draft has already been reset by then).
+    private func scheduleDraftSummaryAfterCreate(_ schedule: String) -> String {
+        ScheduleDraft.describe(schedule: schedule)
     }
 
     // MARK: Add files
@@ -898,10 +1178,13 @@ struct AgentComposer: View {
             }
         } label: {
             if noteGenerating {
+                // The same box the icon occupies, scaled with it, or the
+                // row shifts by a few points while a note generates.
                 ProgressView()
                     .controlSize(.small)
                     .scaleEffect(0.6)
-                    .frame(width: 22, height: 18)
+                    .frame(width: 22 * SipFont.ratio(fontScale),
+                           height: 18 * SipFont.ratio(fontScale))
             } else {
                 controlLabel(icon: "note.text", text: nil)
                     .opacity(canGenerateNote ? 1 : 0.4)
@@ -938,9 +1221,25 @@ struct AgentComposer: View {
                        comment: "Tooltip for the transcript find button when the transcript is empty"))
     }
 
-    /// Claude Code reads files itself, so attaching = referencing the
-    /// paths in the prompt text.
+    /// The agent reads files itself, so attaching = referencing the
+    /// paths in the prompt text — except in Chat only, where it has no
+    /// tools to read a path with and the file travels WITH the message
+    /// instead, through the chat page's mechanism.
     private func addFiles() {
+        if chatOnlyActive, let onStageFiles {
+            let panel = NSOpenPanel()
+            panel.canChooseFiles = true
+            panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = true
+            panel.prompt = String(localized: "Attach",
+                                  comment: "Confirm button of the chat attachment picker")
+            panel.message = String(localized: "Attached files are sent with your message",
+                                   comment: "File picker explanatory text for the agent composer in Chat only")
+            panel.directoryURL = folder
+            guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+            onStageFiles(panel.urls)
+            return
+        }
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
@@ -996,10 +1295,10 @@ struct AgentComposer: View {
                 title: String(localized: "Default",
                               comment: "Model menu row — codex's default model"),
                 // What a send with no explicit pick actually runs as,
-                // read from the user's own config.toml — the codex
-                // counterpart of claude's observed-default subtitle,
-                // and named the same way its own row would be.
-                subtitle: codexCaps.defaultModel.map { slug in
+                // in this folder, as codex's own config resolves it —
+                // the codex counterpart of claude's configured-default
+                // subtitle, and named the same way its own row would be.
+                subtitle: codexCaps.defaultModel(forFolder: codexFolder).map { slug in
                     codexCaps.models.first { $0.slug == slug }?
                         .displayName ?? slug
                 })]
@@ -1025,9 +1324,19 @@ struct AgentComposer: View {
         // has run and the installed claude still names — offered under
         // its FULL id, which `--model` takes verbatim. Ordered by the
         // alias rows above so the section reads in the same sequence.
-        let others = caps.modelAliases.flatMap { alias in
-            caps.otherModels.filter {
-                $0.family == ClaudeModelDisplay.parts(of: alias).family
+        // Grouped by the family the alias NAMES — the casing table's
+        // word, else the installed catalog's (`family(ofAlias:)`), the
+        // same rule that admitted the row. Grouped on the table alone,
+        // a family only the binary names would have a row and no place
+        // to draw it. One row per id: a family with two aliases lists
+        // its previous version once.
+        let catalog = ClaudeModelCatalog.installedCatalog()
+        var listed: Set<String> = []
+        let others = caps.modelAliases.flatMap { alias -> [ClaudeOtherModel] in
+            guard let family = ClaudeModelCatalog.family(ofAlias: alias, catalog: catalog)
+            else { return [] }
+            return caps.otherModels.filter {
+                $0.family == family && listed.insert($0.fullId).inserted
             }
         }
         if !others.isEmpty {
@@ -1035,7 +1344,7 @@ struct AgentComposer: View {
                                        comment: "Model menu section header: previous model versions the CLI still offers")))
             rows += others.map {
                 ComposerOptionRow(value: $0.fullId,
-                                  title: ClaudeModelDisplay.name(for: $0.fullId),
+                                  title: $0.displayName,
                                   subtitle: nil)
             }
         }
@@ -1044,13 +1353,15 @@ struct AgentComposer: View {
 
     /// The Default row's subtitle and the chip's resting title for
     /// claude: the configured default, read the way the codex and kimi
-    /// rows read theirs, else the observed one.
+    /// rows read theirs, else what a Default send resolves to — the
+    /// family a Default send was last observed to run, at the version
+    /// the installed binary resolves that family to now.
     private var claudeDefaultName: String? {
         if let configured = configuredDefault, !configured.isEmpty {
             return rememberedName(forAlias: configured)
         }
-        return config.agentModelFullId(forAlias: "")
-            .map { ClaudeModelDisplay.name(for: $0) }
+        return config.resolvedModelId(forAlias: "")
+            .map { ClaudeModelCatalog.displayName(forId: $0) }
     }
 
     private func refreshConfiguredDefault() {
@@ -1061,118 +1372,235 @@ struct AgentComposer: View {
 
     // MARK: Fast mode
 
-    /// Whether the model in force can take the fast switch.
+    /// Whether the model in force can take a faster speed.
     ///
-    /// Claude's fast mode is Opus-only — measured: another model
-    /// reports `model_not_allowed`, and claude's own toggle says
-    /// "Switching to other models turns off fast mode". A family this
-    /// cannot read (an alias with no family word, a Default whose
-    /// resolution has never been observed) is allowed, and claude then
-    /// reports the state itself. Codex offers it only where the model's
-    /// catalog entry advertises a service tier; kimi never.
+    /// Claude: the model's own `fast_mode` capability in the installed
+    /// binary's catalog (`ClaudeCapabilities.fastModeSupported`), which
+    /// does not mark every Opus — and never through a cloud provider
+    /// (`claudeCloudProvider`). A model nothing resolves is allowed,
+    /// and claude then reports on it itself.
+    /// Codex: the model advertises a service tier and codex's
+    /// `fast_mode` feature is on. Kimi: never.
     private func fastModeSupported(forModel value: String?) -> Bool {
         if isKimi { return false }
-        if isCodex { return codexCaps.fastTier(forModel: value) != nil }
-        let effective: String? = {
-            if let value, !value.isEmpty { return value }
-            if let configured = configuredDefault, !configured.isEmpty {
-                return configured
-            }
-            return config.agentModelFullId(forAlias: "")
-        }()
-        guard let effective,
-              let family = ClaudeModelDisplay.parts(of: effective).family
-        else { return true }
-        return family == "opus"
+        if isCodex { return codexCaps.offersSpeed(forModel: value, folder: codexFolder) }
+        if claudeCloudProvider != nil { return false }
+        let id = config.resolvedClaudeModelId(picked: value,
+                                              configuredDefault: configuredDefault)
+        return caps.fastModeSupported(forModelId: id) ?? true
     }
 
-    private var fastModeTitle: String {
-        String(localized: "Fast mode",
-               comment: "Model menu switch: the agent's faster inference mode")
+    /// The cloud provider the child's environment switches claude onto
+    /// (Bedrock, Vertex, Foundry), if any. Claude offers fast mode on
+    /// Anthropic's own API alone, so any of them rules it out for every
+    /// model. Cached reads of the environment and claude's settings.
+    private var claudeCloudProvider: String? {
+        ClaudeModelCatalog.childEnvironmentFacts().provider
     }
 
-    private func fastModeSubtitle(supported: Bool) -> String? {
-        guard supported else {
-            return String(localized: "Not offered for this model",
-                          comment: "Model menu switch subtitle: the selected model has no fast mode")
-        }
-        if isCodex, let tier = codexCaps.fastTier(forModel: options.model) {
-            // Codex's own words for its tier ("Fast · 1.5x speed,
-            // increased usage") — tool-derived text, never a literal.
-            return tier.description.isEmpty
-                ? tier.name
-                : tier.name + " · " + tier.description
-        }
-        return String(localized: "Applies to Opus models",
-                      comment: "Model menu switch subtitle: claude's fast mode is Opus-only")
+    private var fastModeTitle: String { ClaudeFastModeWords.title }
+
+    /// Claude's cached reason usage credits are unavailable — only
+    /// meaningful on a Claude plan, where fast mode is paid from them.
+    private var claudeCreditsBlock: String? {
+        guard claudeAccount?.isPlan == true else { return nil }
+        return caps.usageCreditsBlock
     }
 
-    /// What the chip's hover says about fast mode: the outcome claude
-    /// reported when there is one, else the intent. Nothing for kimi,
-    /// and nothing at all while the switch is off and no turn has
-    /// reported a state.
+    /// What the switch's calls actually get — `ClaudeFastMode.verdict`
+    /// over what claude reported and what it has cached.
+    private var claudeFastVerdict: ClaudeFastMode.Verdict {
+        ClaudeFastMode.verdict(
+            requested: options.fastMode && fastModeSupported(forModel: options.model),
+            report: fastModeReport, creditsBlock: claudeCreditsBlock)
+    }
+
+    /// The folder codex resolves this composer's config in — its speed
+    /// and its default model (`CodexCatalog.speedSettings(forFolder:)`).
+    private var codexFolder: String { folder.path }
+
+    /// Codex's speed for this composer's model: the tier a send runs at
+    /// (nil = standard), under codex's own interactive rule.
+    private var codexEffectiveTier: String? {
+        codexCaps.effectiveServiceTier(for: options, folder: codexFolder)
+    }
+
+    /// The tier codex's Fast mode switch turns on for this model — nil
+    /// when the model advertises none, or codex's `fast_mode` feature is
+    /// off (codex then drops every tier, even one on the command line).
+    private var codexFastTier: CodexServiceTier? {
+        guard codexCaps.speedSettings(forFolder: codexFolder).featureEnabled else { return nil }
+        return codexCaps.fastTier(forModel: options.model, folder: codexFolder)
+    }
+
+    /// Whether codex's Fast mode switch reads on: the model advertises a
+    /// tier the switch can name, and the send runs at a faster one. The
+    /// chip's bolt, its hover and a task scheduled from here read this
+    /// same answer, so a configured tier on a model codex's catalog does
+    /// not list — one the switch cannot offer, and one codex judges by
+    /// itself — lights nothing anywhere.
+    private var codexFastOn: Bool {
+        codexFastTier != nil && CodexSpeed.isFaster(codexEffectiveTier)
+    }
+
+    /// A faster tier in codex's own words for this model ("2x speed,
+    /// increased usage"), its name when it carries none, the id when the
+    /// model's catalog does not list it.
+    private func codexTierDescription(_ tier: String) -> String {
+        guard let known = codexCaps.serviceTier(id: tier, forModel: options.model,
+                                                folder: codexFolder) else { return tier }
+        return known.description.isEmpty ? known.name : known.description
+    }
+
+    /// What the chip's hover says about speed: for codex, the faster
+    /// tier the next send runs at; for claude, what its calls actually
+    /// get. Nothing for kimi, or while the switch is off.
     private var fastModeHint: String? {
-        guard !isKimi, options.fastMode || fastModeState != nil else { return nil }
-        switch fastModeState {
-        case "on":
-            return String(localized: "Fast mode is on",
-                          comment: "Model chip hover: claude reported fast mode active")
-        case "cooldown":
-            return String(localized: "Fast mode is cooling down after a rate limit",
-                          comment: "Model chip hover: claude reported fast mode paused after a rate limit")
-        case "off":
-            return String(localized: "Fast mode is off",
-                          comment: "Model chip hover: claude reported fast mode inactive")
-        default:
-            return options.fastMode
-                ? String(localized: "Fast mode requested",
-                         comment: "Model chip hover: the switch is on and the agent has not yet reported a state")
-                : nil
+        if isKimi { return nil }
+        if isCodex {
+            guard codexFastOn, let tier = codexEffectiveTier else { return nil }
+            return String(localized: "Fast mode is on · \(codexTierDescription(tier))",
+                          comment: "Model chip hover: codex's fast mode is on for the next turn; the placeholder is codex's own description of the tier (“2x speed, increased usage”)")
+        }
+        switch claudeFastVerdict {
+        case .off:
+            return nil
+        case .requested:
+            return String(localized: "Fast mode requested",
+                          comment: "Model chip hover: the switch is on and the agent has not yet reported a state")
+        case .running:
+            return String(localized: "Fast mode is on · the last reply ran fast",
+                          comment: "Model chip hover: the newest API call ran in fast mode")
+        case .notServing(let why):
+            return String(localized: "Fast mode requested, but not running · \(ClaudeFastModeWords.notServing(why))",
+                          comment: "Model chip hover: fast mode is switched on, but the calls run at standard speed; the placeholder says why")
         }
     }
 
-    /// The switch under the model rows. Claude and codex only; disabled
-    /// with the reason as its subtitle for a model that does not offer
-    /// it, and cleared when such a model is picked (see the picker).
+    /// The chip's glyph: a bolt while a faster speed is what runs, a
+    /// struck-through bolt while claude's switch is on and its calls
+    /// run at standard speed anyway.
+    private var fastModeIcon: String? {
+        if isKimi { return nil }
+        if isCodex {
+            return codexFastOn ? "bolt.fill" : nil
+        }
+        switch claudeFastVerdict {
+        case .off: return nil
+        case .notServing: return "bolt.slash.fill"
+        case .requested, .running: return "bolt.fill"
+        }
+    }
+
+    /// Under the model rows: one Fast mode switch — claude's opt-in, or
+    /// codex's Fast tier. Nothing for kimi, which has no such mode: its
+    /// faster option is a separate high-speed MODEL, listed with the rest.
     @ViewBuilder
     private var fastModeFooter: some View {
-        if !isKimi {
+        if isCodex {
+            codexFastModeSwitch
+        } else if !isKimi {
             let supported = fastModeSupported(forModel: options.model)
+            fastModeSwitch(
+                isOn: Binding(get: { options.fastMode && supported },
+                              set: { options.fastMode = $0 }),
+                enabled: supported,
+                lines: ClaudeFastModeWords.lines(
+                    supported: supported, cloudProvider: claudeCloudProvider != nil,
+                    agentName: agentName, account: claudeAccount,
+                    creditsBlock: claudeCreditsBlock, verdict: claudeFastVerdict))
+        }
+    }
+
+    /// Codex's Fast mode, the switch codex's own compact picker draws: on
+    /// runs the model's Fast tier, off pins standard (`default`) — so off
+    /// holds even where codex's config turns a tier on by itself. Until
+    /// it is flipped, it shows what codex itself would run here (its
+    /// config for this folder, else the model's default) and says so.
+    @ViewBuilder
+    private var codexFastModeSwitch: some View {
+        let fast = codexFastTier
+        let on = codexFastOn
+        fastModeSwitch(
+            isOn: Binding(get: { on }, set: { turnOn in
+                var updated = options
+                updated.serviceTier = turnOn ? fast?.id : CodexSpeed.standard
+                // A value saved before codex had a speed choice here is
+                // superseded by any flip.
+                updated.fastMode = false
+                options = updated
+            }),
+            enabled: fast != nil,
+            lines: codexFastModeLines(fast: fast, on: on))
+    }
+
+    /// The codex speed a task scheduled from here keeps — the speed the
+    /// switch shows (`CodexSpeed.carriedToTask`).
+    private var codexTaskSpeedPick: String? {
+        CodexSpeed.carriedToTask(pick: codexCaps.speedPick(for: options, folder: codexFolder),
+                                 effective: codexFastOn ? codexEffectiveTier : nil)
+    }
+
+    private func codexFastModeLines(fast: CodexServiceTier?, on: Bool) -> [String] {
+        guard let fast else {
+            return [codexCaps.speedSettings(forFolder: codexFolder).featureEnabled
+                    ? String(localized: "Not offered for this model",
+                             comment: "Model menu switch subtitle: the selected model has no fast mode")
+                    : String(localized: "Turned off in \(agentName)'s config (features.fast_mode)",
+                             comment: "Codex speed: the fast_mode feature is disabled in the user's codex config; placeholder is the agent label")]
+        }
+        var lines = [fast.description.isEmpty ? fast.name : fast.description]
+        if on, codexCaps.speedPick(for: options, folder: codexFolder) == nil {
+            lines.append(String(localized: "On by default in \(agentName)",
+                                comment: "Fast mode switch: on because codex itself turns it on here — its config, or the model's own default — and not because it was picked; the placeholder is the agent label"))
+        }
+        return lines
+    }
+
+    /// The one switch both agents draw: the title, and each line under it
+    /// wrapped at a fixed width. A popover takes its size when it opens,
+    /// and a line that lengthens after that — the credits verdict is
+    /// re-read as the menu opens — would otherwise be cut short.
+    private func fastModeSwitch(isOn: Binding<Bool>, enabled: Bool,
+                                lines: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
             Divider().padding(.vertical, 4)
-            Toggle(isOn: Binding(
-                get: { options.fastMode && supported },
-                set: { options.fastMode = $0 }
-            )) {
+            Toggle(isOn: isOn) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(fastModeTitle)
-                        .font(.system(size: 13))
+                        .sipFont(13)
                         .foregroundColor(SipDesign.textPrimary)
-                    if let subtitle = fastModeSubtitle(supported: supported) {
-                        Text(subtitle)
-                            .font(.system(size: 11))
+                    ForEach(lines, id: \.self) { line in
+                        Text(verbatim: line)
+                            .sipFont(11)
                             .foregroundColor(SipDesign.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                .frame(width: 230 * SipFont.ratio(fontScale), alignment: .leading)
             }
             .toggleStyle(.switch)
             .controlSize(.mini)
-            .disabled(!supported)
+            .disabled(!enabled)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
         }
     }
 
     /// Alias row/chip title carrying the version the alias resolves to
-    /// here ("opus" → "Opus 5") — observed from system.init events and
-    /// from what Claude Code already recorded on this machine
-    /// (`ClaudeModelCatalog`), never hand-maintained. Bare alias name
-    /// only when nothing on this machine names that family.
+    /// here ("opus" → "Opus 5") — read off the installed claude's own
+    /// alias table, with what this machine has observed the alias run
+    /// as the fallback, never hand-maintained. Bare alias name only
+    /// when nothing on this machine names that family.
     private func rememberedName(forAlias alias: String) -> String {
         config.rememberedModelName(forAlias: alias)
     }
 
-    /// Chip label. The full id recorded by the session wins — it carries
-    /// the version ("Opus 5") the bare picker alias can't ("Opus").
+    /// Chip label: the CHOICE in force, named as what the next send
+    /// will run. An alias pick names the alias's current resolution;
+    /// a concrete pick names itself. The id the session last ran under
+    /// (`modelFullId`) is the hover's, not the title's — after a CLI
+    /// update it names a model the next send will not run.
     private var modelChipTitle: String {
         if isKimi {
             if let picked = options.model, !picked.isEmpty {
@@ -1197,21 +1625,18 @@ struct AgentComposer: View {
             }
             // Same rule as claude's chip: name what the default
             // resolves to here rather than the bare word "Model".
-            if let fallback = codexCaps.defaultModel, !fallback.isEmpty {
+            if let fallback = codexCaps.defaultModel(forFolder: codexFolder) {
                 return codexCaps.models.first { $0.slug == fallback }?
                     .displayName ?? fallback
             }
             return String(localized: "Model",
                           comment: "Model menu label when no override is set")
         }
-        if let full = options.modelFullId, !full.isEmpty {
-            return ClaudeModelDisplay.name(for: full)
-        }
         if let picked = options.model, !picked.isEmpty {
             return rememberedName(forAlias: picked)
         }
         // No override: name what a Default send runs as — claude's own
-        // configured default, else what such a send last resolved to.
+        // configured default, else what such a send resolves to here.
         if let name = claudeDefaultName, !name.isEmpty {
             return name
         }
@@ -1219,24 +1644,81 @@ struct AgentComposer: View {
                       comment: "Model menu label when no override is set")
     }
 
-    /// The exact recorded id on hover — the display name is derived,
-    /// the id is the ground truth — and, when the fast switch is in
-    /// play, what became of it.
+    /// The exact ids on hover — the display name is derived, the ids
+    /// are the ground truth: for an alias, what it resolves to now and
+    /// (when different) what the session last ran under; for a
+    /// concrete pick, the id itself. Names the variable when an
+    /// environment override decided the resolution, and, when the fast
+    /// switch is in play, what became of it.
     private var modelHelp: String {
-        let base = options.modelFullId
-            ?? options.model
-            ?? String(localized: "Model",
-                      comment: "Model menu label when no override is set")
+        var base: String
+        if isCodex || isKimi {
+            base = options.modelFullId
+                ?? options.model
+                ?? String(localized: "Model",
+                          comment: "Model menu label when no override is set")
+        } else {
+            base = claudeModelHelp
+        }
         guard let fast = fastModeHint else { return base }
         return base + " · " + fast
     }
 
+    private var claudeModelHelp: String {
+        let picked = options.model ?? ""
+        if ClaudeModelDisplay.isFullId(picked) { return picked }
+        // The alias in force: the pick, else the configured default,
+        // else claude's own Default ("").
+        let alias: String
+        if !picked.isEmpty {
+            alias = picked
+        } else if let configured = configuredDefault, !configured.isEmpty {
+            alias = configured
+        } else {
+            alias = ""
+        }
+        // A configured default that is itself a full id names itself,
+        // like a concrete pick.
+        if ClaudeModelDisplay.isFullId(alias) { return alias }
+        guard let resolved = config.resolvedModel(forAlias: alias) else {
+            return options.modelFullId
+                ?? (picked.isEmpty
+                    ? String(localized: "Model",
+                             comment: "Model menu label when no override is set")
+                    : picked)
+        }
+        var parts: [String] = [alias.isEmpty ? resolved.id : "\(alias) → \(resolved.id)"]
+        if resolved.source == .environment {
+            // The Default resolves through the family its observed id
+            // records, so that is the family whose variable spoke.
+            let family = alias.isEmpty
+                ? (ClaudeModelDisplay.familyAlias(of: config.agentModelFullId(forAlias: "") ?? "") ?? "")
+                : ClaudeModelDisplay.splitVariant(alias).id
+            if !family.isEmpty {
+                parts.append(String(localized: "set by \(ClaudeModelCatalog.ChildEnvironmentFacts.overrideVariable(forFamily: family))",
+                                    comment: "Model chip hover: the environment variable that decided which model the alias resolves to"))
+            }
+        }
+        if let last = options.modelFullId, !last.isEmpty,
+           ClaudeModelDisplay.splitVariant(last).id
+               != ClaudeModelDisplay.splitVariant(resolved.id).id {
+            parts.append(String(localized: "last ran as \(last)",
+                                comment: "Model chip hover: the model id this session's previous turn actually ran under, when it differs from what the alias resolves to now"))
+        }
+        return parts.joined(separator: " · ")
+    }
+
     private var modelButton: some View {
         Button {
+            // The credits verdict the switch's line states moves with
+            // every claude API response; two stats when it has not.
+            if !isCodex && !isKimi { caps.refreshUsageCreditsBlock() }
+            // Codex's answer for this folder, fresh for the choice the
+            // menu is about to state.
+            if isCodex { codexCaps.refreshSpeedSettings(forFolder: codexFolder, force: true) }
             showingModelPopover = true
         } label: {
-            trailingMenuLabel(modelChipTitle,
-                              icon: options.fastMode ? "bolt.fill" : nil)
+            trailingMenuLabel(modelChipTitle, icon: fastModeIcon)
         }
         .buttonStyle(.plain)
         .help(modelHelp)
@@ -1247,22 +1729,21 @@ struct AgentComposer: View {
                 var updated = options
                 updated.model = value
                 updated.modelFullId = nil
-                // Codex's AND kimi's levels are per-model, so a model
-                // change can strand an effort the new model does not
-                // accept — picking `gpt-5.5` while `ultra` was selected
-                // would send `-c model_reasoning_effort=ultra` for a
-                // model whose catalog stops at `xhigh`, and picking a
-                // kimi model that publishes no levels would leave a
-                // KIMI_MODEL_THINKING_EFFORT the picker no longer
-                // shows. The picker stops OFFERING it at that point, so
-                // leaving it set means sending a value the user can no
-                // longer even see.
+                // Every agent's levels are per model, so a model change
+                // can strand an effort the new model does not accept —
+                // picking `gpt-5.5` while `ultra` was selected would send
+                // `-c model_reasoning_effort=ultra` for a model whose
+                // catalog stops at `xhigh`, a kimi model that publishes
+                // no levels would keep a KIMI_MODEL_THINKING_EFFORT the
+                // picker no longer shows, and claude runs Haiku with no
+                // effort at all. The picker stops OFFERING it at that
+                // point, so leaving it set means sending a value the
+                // user can no longer even see.
                 //
-                // Claude is excluded on purpose: its list does not vary
-                // by model, so an empty one means "catalog still
-                // loading", and clearing on that would drop a choice
-                // the user made.
-                if isCodex || isKimi, let effort = updated.effort, !effort.isEmpty,
+                // Safe for claude while its catalog is still loading: an
+                // unread catalog answers the WHOLE list, never an empty
+                // one, so nothing is cleared on a guess.
+                if let effort = updated.effort, !effort.isEmpty,
                    !effortLevels(forModel: value).contains(effort) {
                     updated.effort = nil
                 }
@@ -1272,6 +1753,14 @@ struct AgentComposer: View {
                 // on a model switch for the same reason.
                 if updated.fastMode, !fastModeSupported(forModel: value) {
                     updated.fastMode = false
+                }
+                // And for codex's speed: a tier the new model does not
+                // advertise goes back to Default. Standard is a speed
+                // every model has.
+                if isCodex, let tier = updated.serviceTier,
+                   tier != CodexSpeed.standard,
+                   codexCaps.serviceTier(id: tier, forModel: value, folder: codexFolder) == nil {
+                    updated.serviceTier = nil
                 }
                 options = updated
                 showingModelPopover = false
@@ -1292,19 +1781,19 @@ struct AgentComposer: View {
                           comment: "Effort menu row — claude's default effort"),
             // Kimi records a `default_effort` per model, so this row can
             // name what it resolves to ("Max") the way the model menu's
-            // Default row names the model. The other two publish no such
-            // value, and inventing one would be a guess about someone
-            // else's default.
+            // Default row names the model. Codex's and claude's catalogs
+            // carry a per-model default as well, but it is not their
+            // last word (codex's config and claude's served settings
+            // outrank it), so it is not named here.
             subtitle: isKimi
                 ? kimiCaps.defaultEffort(forModel: options.model)
                     .map(Self.effortDisplayName)
                 : nil)]
-        // Codex's levels are PER MODEL — its catalog says `gpt-5.6-terra`
-        // accepts `ultra` where `gpt-5.5` stops at `xhigh` — so the list
+        // Levels are PER MODEL for all three agents — codex's catalog
+        // says `gpt-5.6-terra` accepts `ultra` where `gpt-5.5` stops at
+        // `xhigh`, kimi's config lists `support_efforts` per model, and
+        // claude's catalog gives Haiku no effort at all — so the list
         // follows the model this composer would actually send with.
-        // Kimi's are not: its override bypasses the per-model support
-        // list and clamps instead of erroring, so one union is correct
-        // there (see `KimiCapabilities.effortLevels`).
         // Every list arrives already ordered fast → deep.
         + effortLevels.map {
             ComposerOptionRow(value: $0, title: Self.effortDisplayName($0), subtitle: nil)
@@ -1316,21 +1805,33 @@ struct AgentComposer: View {
 
     private func effortLevels(forModel model: String?) -> [String] {
         if isKimi { return kimiCaps.effortLevels(forModel: model) }
-        if isCodex { return codexCaps.effortLevels(forModel: model) }
-        return caps.effortLevels
+        if isCodex {
+            // The model a send runs as — the pick, else the model codex's
+            // config names in this folder.
+            let slug = (model?.isEmpty == false) ? model
+                : codexCaps.defaultModel(forFolder: codexFolder)
+            return codexCaps.effortLevels(forModel: slug)
+        }
+        // The model a send runs as — the pick, else claude's configured
+        // default, else its Default — read off the catalog the installed
+        // binary resolves through (`ClaudeModelCatalog.effortLevels`).
+        return caps.effortLevels(forModelId: config.resolvedClaudeModelId(
+            picked: model, configuredDefault: configuredDefault))
     }
 
-    /// Kimi publishes thinking levels PER MODEL, and some of its models
-    /// publish none — so for kimi alone an empty list is a real answer
-    /// ("this model has no levels"), and a picker offering nothing but
-    /// "Default" is a dead control. Kimi's own UI shows the levels only
-    /// "when available for the selected model"; this matches it.
+    /// Kimi and claude publish levels PER MODEL, and some of their
+    /// models take none (a kimi model with no `support_efforts`,
+    /// claude's Haiku) — so for those two an empty list is a real
+    /// answer ("this model has no levels"), and a picker offering
+    /// nothing but "Default" is a dead control. Kimi's own UI shows the
+    /// levels only "when available for the selected model"; claude's
+    /// shows Haiku none. Neither list is empty on a guess: an unread
+    /// claude catalog answers the whole list.
     ///
-    /// Deliberately not generalised to the other two: their lists are
-    /// empty only while a catalog is still loading, where hiding the
-    /// chip would be a flicker rather than an answer.
+    /// Not codex: its list is never empty (an unknown model gets the
+    /// union), so the chip always shows there.
     private var showsEffortChip: Bool {
-        !isKimi || !effortLevels.isEmpty
+        isCodex || !effortLevels.isEmpty
     }
 
     private var effortButton: some View {
@@ -1358,11 +1859,11 @@ struct AgentComposer: View {
     private func controlLabel(icon: String, text: String?) -> some View {
         HStack(spacing: 4) {
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .medium))
+                .sipFont(12, weight: .medium)
                 .foregroundColor(SipDesign.textSecondary)
             if let text = text {
                 Text(text)
-                    .font(.system(size: 11))
+                    .sipFont(11)
                     .foregroundColor(SipDesign.textSecondary)
                     .lineLimit(1)
             }
@@ -1377,11 +1878,11 @@ struct AgentComposer: View {
         HStack(spacing: 3) {
             if let icon {
                 Image(systemName: icon)
-                    .font(.system(size: 9, weight: .semibold))
+                    .sipFont(9, weight: .semibold)
                     .foregroundColor(SipDesign.textSecondary)
             }
             Text(text)
-                .font(.system(size: 11, weight: .medium))
+                .sipFont(11, weight: .medium)
                 .foregroundColor(SipDesign.textSecondary)
         }
         .padding(.vertical, 3)
@@ -1411,8 +1912,38 @@ private struct HoverHighlight<Content: View>: View {
     /// edge and are simply not drawn. Trailing keeps the hint's right
     /// edge on the control's, so it grows leftward over the strip.
     var hintAlignment: HorizontalAlignment = .center
+    /// A control drawn INSIDE the hint bubble after its text — the
+    /// context chip's "?". Its presence changes what the bubble is:
+    /// hit-testable, and held up while the cursor is over it or for a
+    /// moment after leaving the control, so the pointer can cross the
+    /// gap between the two. Without one the bubble is exactly what
+    /// every other hint in the strip is — untouchable, gone on leave.
+    ///
+    /// A BUILDER rather than a view: it is handed `collapse`, which
+    /// folds the bubble at once. A control whose click opens a sheet
+    /// must call it first — a view under a sheet is not sent a
+    /// hover-exit, so without it the bubble would still be floating
+    /// over the chip when the sheet closed.
+    var hintAccessory: ((@escaping () -> Void) -> AnyView)? = nil
     @ViewBuilder var content: Content
+    /// Cursor over the control.
     @State private var hovered = false
+    /// Cursor over the bubble — only ever true with an accessory.
+    @State private var bubbleHovered = false
+    /// The bubble's own state, which lags the two hovers by
+    /// `hintHold` on the way OUT and never on the way in. Only consulted
+    /// with an accessory; a plain hint follows `hovered` directly.
+    @State private var held = false
+    @State private var hideWork: DispatchWorkItem? = nil
+
+    /// How long the bubble outlives the cursor leaving both the control
+    /// and the bubble. The gap between them is about 17 pt; crossing
+    /// it takes a fraction of this.
+    private var hintHold: TimeInterval { 0.25 }
+
+    private var showsHint: Bool {
+        hintAccessory == nil ? hovered : held
+    }
 
     var body: some View {
         content
@@ -1422,10 +1953,15 @@ private struct HoverHighlight<Content: View>: View {
             )
             .overlay(alignment: Alignment(horizontal: hintAlignment,
                                           vertical: .top)) {
-                if hovered, let hint = hint {
-                    Text(hint)
-                        .font(.system(size: 10.5, weight: .medium))
-                        .foregroundColor(SipDesign.textPrimary)
+                if showsHint, let hint = hint {
+                    HStack(spacing: 4) {
+                        Text(hint)
+                            .sipFont(10.5, weight: .medium)
+                            .foregroundColor(SipDesign.textPrimary)
+                        if let hintAccessory {
+                            hintAccessory(collapseHint)
+                        }
+                    }
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2.5)
                         .background(
@@ -1438,10 +1974,92 @@ private struct HoverHighlight<Content: View>: View {
                         )
                         .fixedSize()
                         .offset(y: -26)
-                        .allowsHitTesting(false)
+                        .onHover { inside in
+                            bubbleHovered = inside
+                            updateHold()
+                        }
+                        .allowsHitTesting(hintAccessory != nil)
                 }
             }
-            .onHover { hovering in hovered = hovering }
+            .onHover { hovering in
+                hovered = hovering
+                updateHold()
+            }
+    }
+
+    /// In at once, out after `hintHold` — cancelled by either hover
+    /// coming back. The work item is the whole state machine.
+    private func updateHold() {
+        guard hintAccessory != nil else { return }
+        if hovered || bubbleHovered {
+            hideWork?.cancel()
+            hideWork = nil
+            held = true
+        } else if held, hideWork == nil {
+            let work = DispatchWorkItem {
+                held = false
+                hideWork = nil
+            }
+            hideWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + hintHold, execute: work)
+        }
+    }
+
+    /// Fold the bubble now, and forget both hovers: the accessory's
+    /// click is about to cover this view with a sheet, after which no
+    /// exit event will arrive for either. The next hover-enter starts
+    /// the cycle again.
+    private func collapseHint() {
+        hideWork?.cancel()
+        hideWork = nil
+        bubbleHovered = false
+        hovered = false
+        held = false
+    }
+}
+
+/// The "?" inside the context chip's hint on a codex session. A plain
+/// glyph that fills and takes the accent on hover, with a pointing
+/// hand — the one thing in the strip's hints that can be clicked, and
+/// it has to look it.
+private struct HintHelpGlyph: View {
+    let accessibilityLabel: String
+    let action: () -> Void
+    @State private var hovered = false
+    /// At most one outstanding cursor push — same guard as the
+    /// sidebar's resize handle.
+    @State private var cursorPushed = false
+
+    var body: some View {
+        Button {
+            // The click opens a sheet over this window, and a view
+            // covered by a sheet is not promised a hover-exit — so the
+            // cursor is restored here, before the sheet, not left to it.
+            setPointingHand(false)
+            hovered = false
+            action()
+        } label: {
+            Image(systemName: hovered ? "questionmark.circle.fill" : "questionmark.circle")
+                .sipFont(11, weight: .medium)
+                .foregroundColor(hovered ? SipDesign.blue : SipDesign.textSecondary)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { inside in
+            hovered = inside
+            setPointingHand(inside)
+        }
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private func setPointingHand(_ active: Bool) {
+        if active, !cursorPushed {
+            NSCursor.pointingHand.push()
+            cursorPushed = true
+        } else if !active, cursorPushed {
+            NSCursor.pop()
+            cursorPushed = false
+        }
     }
 }
 
@@ -1481,7 +2099,7 @@ private struct ComposerOptionList<Footer: View>: View {
                 }
                 if row.isHeader {
                     Text(row.title)
-                        .font(.system(size: 11, weight: .semibold))
+                        .sipFont(11, weight: .semibold)
                         .foregroundColor(SipDesign.textSecondary)
                         .padding(.horizontal, 10)
                         .padding(.top, 8)
@@ -1522,18 +2140,18 @@ private struct ComposerOptionRowButton: View {
             HStack(spacing: 8) {
                 VStack(alignment: .leading, spacing: 1) {
                     Text(row.title)
-                        .font(.system(size: 13))
+                        .sipFont(13)
                         .foregroundColor(SipDesign.textPrimary)
                     if let subtitle = row.subtitle {
                         Text(subtitle)
-                            .font(.system(size: 11))
+                            .sipFont(11)
                             .foregroundColor(SipDesign.textSecondary)
                     }
                 }
                 Spacer(minLength: 12)
                 if selected {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 11, weight: .semibold))
+                        .sipFont(11, weight: .semibold)
                         .foregroundColor(SipDesign.blue)
                 }
             }
@@ -1548,6 +2166,199 @@ private struct ComposerOptionRowButton: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering in hovered = hovering }
+    }
+}
+
+// MARK: - Chat only gate
+
+/// The MainActor wrapper of `ChatOnlyAvailability.offered`, over what
+/// the app's scrapers hold right now: claude's `--help` (`Claude
+/// Capabilities`), codex's version (`AgentCLIUpdateMonitor`) and
+/// feature list (`CodexCatalog`), kimi's version. The composer and the
+/// session view both read it, so the chip and the send cannot disagree.
+/// Views that draw it observe the three publishers, so the row appears
+/// the moment a scrape lands.
+enum ChatOnlyGate {
+    @MainActor static func offered(agentKey: String) -> Bool {
+        ChatOnlyAvailability.offered(
+            agent: agentKey,
+            claudeHelp: ClaudeCapabilities.shared.chatOnlyHelp,
+            codexVersion: AgentCLIUpdateMonitor.shared.installed["codex"]?.text,
+            codexFeatures: CodexCatalog.shared.featureNames,
+            kimiVersion: AgentCLIUpdateMonitor.shared.installed["kimi"]?.text)
+    }
+
+    /// Whether `offered` is a verdict yet rather than "not read yet".
+    @MainActor static func settled(agentKey: String) -> Bool {
+        ChatOnlyAvailability.isSettled(
+            agent: agentKey,
+            claudeHelp: ClaudeCapabilities.shared.chatOnlyHelp,
+            codexVersion: AgentCLIUpdateMonitor.shared.installed["codex"]?.text,
+            codexFeatures: CodexCatalog.shared.featureNames,
+            kimiVersion: AgentCLIUpdateMonitor.shared.installed["kimi"]?.text)
+    }
+}
+
+// MARK: - Fast mode words
+
+/// Every sentence SipAI says about claude's fast mode and the usage
+/// credits it is paid from, spelled once: the composer's switch and
+/// chip, the scheduled-task card and the usage window all read these,
+/// so the same state is never described two ways.
+enum ClaudeFastModeWords {
+    static var title: String {
+        String(localized: "Fast mode",
+               comment: "Model menu switch: the agent's faster inference mode")
+    }
+
+    /// Why the switch is not offered: the provider, else the model.
+    static func unsupported(cloudProvider: Bool) -> String {
+        cloudProvider
+            ? String(localized: "Only available on the Anthropic API directly",
+                     comment: "Fast mode status: not offered through a cloud provider or gateway")
+            : String(localized: "Not offered for this model",
+                     comment: "Model menu switch subtitle: the selected model has no fast mode")
+    }
+
+    /// Claude's cached reason the usage credits are unavailable, with
+    /// what that means for fast mode.
+    static func needsCredits(_ code: String) -> String {
+        String(localized: "Needs usage credits · \(credits(code))",
+               comment: "Model menu switch subtitle: fast mode on a Claude plan is paid from usage credits, which are unavailable; the placeholder says why")
+    }
+
+    /// The lines under the switch, in order: what fast mode costs on this
+    /// account (or why it is not offered), then what stands in its way
+    /// right now — or, while it is on, what the last reply got. Drawn in
+    /// both of the switch's states, so the cost is said before it is
+    /// turned on and the reason after.
+    static func lines(supported: Bool, cloudProvider: Bool, agentName: String,
+                      account: PlanAccountKind?, creditsBlock: String?,
+                      verdict: ClaudeFastMode.Verdict) -> [String] {
+        guard supported else { return [unsupported(cloudProvider: cloudProvider)] }
+        var lines = [cost(account: account, agentName: agentName)]
+        switch verdict {
+        case .off:
+            if let block = creditsBlock {
+                lines.append(String(localized: "Right now, \(credits(block))",
+                                    comment: "Fast mode switch, while off: why it could not run now; the placeholder is the reason (“your usage credits are used up”)"))
+            }
+        case .requested:
+            break
+        case .running:
+            lines.append(String(localized: "The last reply ran fast",
+                                comment: "Fast mode switch, while on: the newest API call ran in fast mode"))
+        case .notServing(let why):
+            lines.append(status(why))
+        }
+        return lines
+    }
+
+    /// Why the calls are not getting fast mode, as the switch's own line —
+    /// `notServing` without its "Needs usage credits" lead, which the
+    /// cost line above it already says.
+    static func status(_ why: ClaudeFastMode.Why) -> String {
+        if case .credits(let code) = why {
+            return String(localized: "Not running · \(credits(code))",
+                          comment: "Fast mode switch, while on: it is not running; the placeholder is the reason (“your usage credits are used up”)")
+        }
+        return notServing(why)
+    }
+
+    /// What fast mode costs on this account. On a Claude plan it is paid
+    /// from usage credits ALONE — never from the plan's own limits, even
+    /// with plan usage left (Anthropic's fast mode documentation).
+    static func cost(account: PlanAccountKind?, agentName: String) -> String {
+        switch account {
+        case .plan?:
+            return String(localized: "\(agentName) fast mode is paid only from usage credits.",
+                          comment: "Fast mode switch on a Claude plan: fast mode is paid from usage credits alone, never from the plan's own limits; the placeholder is the agent label")
+        case .apiKey?:
+            return String(localized: "Billed at a higher rate than standard",
+                          comment: "Model menu switch subtitle: on an API key, fast mode is billed at a higher per-token rate")
+        default:
+            return String(localized: "Same model, faster output",
+                          comment: "Model menu switch subtitle: what fast mode is, when the account kind is not known")
+        }
+    }
+
+    /// Why claude's fast mode is not what the calls get, in one line.
+    /// A refusal is claude's own sentence, drawn as it wrote it.
+    static func notServing(_ why: ClaudeFastMode.Why) -> String {
+        switch why {
+        case .refused(let text):
+            return text
+        case .cooldown:
+            return String(localized: "Paused after a rate limit · resumes by itself",
+                          comment: "Fast mode status: paused after a rate limit; the agent turns it back on when the pause ends")
+        case .disabled(let code):
+            return disabled(code)
+        case .reportedOff:
+            return String(localized: "Reported off for this model",
+                          comment: "Fast mode status: the agent reported fast mode off and gave no reason")
+        case .credits(let code):
+            return needsCredits(code)
+        case .ranStandard:
+            return String(localized: "The last reply ran at standard speed",
+                          comment: "Fast mode status: fast mode was requested but the newest API call ran at standard speed")
+        }
+    }
+
+    /// Why usage credits are unavailable, from the reason code claude
+    /// caches. The codes are claude's; the sentences are ours.
+    static func credits(_ code: String) -> String {
+        switch code {
+        case "out_of_credits":
+            return String(localized: "your usage credits are used up",
+                          comment: "Why usage credits are unavailable: the balance is exhausted")
+        case "org_spend_cap_reached", "org_level_disabled_until":
+            return String(localized: "the usage credit limit is reached",
+                          comment: "Why usage credits are unavailable: the spending limit is reached")
+        case "org_level_disabled", "org_service_level_disabled":
+            return String(localized: "your organization has turned usage credits off",
+                          comment: "Why usage credits are unavailable: disabled by the organization")
+        case "member_level_disabled":
+            return String(localized: "usage credits are turned off for your account",
+                          comment: "Why usage credits are unavailable: disabled for this member")
+        case "seat_tier_level_disabled", "seat_tier_zero_credit_limit",
+             "member_zero_credit_limit", "group_zero_credit_limit":
+            return String(localized: "your plan has no usage credits",
+                          comment: "Why usage credits are unavailable: the plan or seat includes none")
+        case "overage_not_provisioned", "no_limits_configured":
+            return String(localized: "usage credits are not turned on",
+                          comment: "Why usage credits are unavailable: never enabled")
+        default:
+            return String(localized: "usage credits are unavailable",
+                          comment: "Why usage credits are unavailable: a reason this app does not know")
+        }
+    }
+
+    /// Claude's `fast_mode_disabled_reason`, in a sentence. An unknown
+    /// code is shown as it came.
+    static func disabled(_ code: String) -> String {
+        switch code {
+        case "extra_usage_disabled":
+            return String(localized: "Needs usage credits",
+                          comment: "Fast mode status: fast mode is paid from usage credits, which are not available")
+        case "free":
+            return String(localized: "Needs a paid subscription",
+                          comment: "Fast mode status: the account's plan does not include fast mode")
+        case "preference":
+            return String(localized: "Turned off by your organization",
+                          comment: "Fast mode status: the organization disabled fast mode")
+        case "model_not_allowed":
+            return String(localized: "Its model is not among your organization's allowed models",
+                          comment: "Fast mode status: the organization's model allow-list excludes the fast mode model")
+        case "not_first_party":
+            return String(localized: "Only available on the Anthropic API directly",
+                          comment: "Fast mode status: not offered through a cloud provider or gateway")
+        case "network_error":
+            return String(localized: "Could not be checked · network error",
+                          comment: "Fast mode status: the availability check failed on the network")
+        default:
+            return String(localized: "Unavailable (\(code))",
+                          comment: "Fast mode status: a reason code this app does not know, shown as the agent sent it")
+        }
     }
 }
 
@@ -1607,12 +2418,12 @@ struct TurnClockChip: View {
             : AgentComposer.durationText(seconds)
         return HStack(spacing: 3) {
             Image(systemName: "clock")
-                .font(.system(size: 9))
+                .sipFont(9)
             Text(verbatim: timeStr)
-                .font(.system(size: 11))
                 // Fixed-width digits: without this the whole control
                 // strip shuffles sideways every single second.
                 .monospacedDigit()
+                .sipFont(11)
         }
         // Running borrows the transcript's inline-code accent, so the
         // live clock reads as the same "machine speaking" blue as the
@@ -1663,11 +2474,11 @@ struct ContextUsageChip: View {
         // the call site, so no `.help()` here — two tooltips for one
         // readout is noise, and the system one arrives a second late.
         Text(verbatim: label)
-            .font(.system(size: 11))
+            .monospacedDigit()
+            .sipFont(11)
             // One constant colour regardless of occupancy — this
             // states a fact, it does not warn.
             .foregroundColor(.orange)
-            .monospacedDigit()
             .accessibilityLabel(accessibilityText)
     }
 
@@ -1724,14 +2535,38 @@ struct GrowingTextField: NSViewRepresentable {
     var onSubmit: () -> Void
     /// `DisplaySettings.spellCheck`, passed by the owning view.
     var spellChecking: Bool
+    /// Files dropped ON THE TEXT FIELD, handed to the host so a drag
+    /// stages exactly what the + button stages. Set by the composer
+    /// while its mode chip is on Chat only; nil everywhere else, where a
+    /// dragged path is still typed in — see `DropForwardingTextView` for
+    /// why interception, and not a filter, is what takes the drag off
+    /// NSTextView. Re-pointed in `updateNSView` with the rest of the
+    /// host, since the chip moves while this view stands.
+    var onDropFiles: (([URL]) -> Void)? = nil
+    var onDropTargeted: ((Bool) -> Void)? = nil
+    /// The tier-scaled point size and the spacing between wrapped
+    /// lines, passed by the owning view — in POINTS, so this view does
+    /// not have to know which scaling convention its host is under.
+    /// No defaults, the `spellChecking` rule: a text view cannot fall
+    /// out of the tier by omission.
+    var fontSize: CGFloat
+    var lineSpacing: CGFloat
+    /// The ids drawn on a grey token when they appear in the box — every
+    /// session the app lists (`AgentManager.knownSessionIds`), so an id
+    /// copied from a row's "Copy session ID" reads as one wherever it is
+    /// pasted. Applied in `updateNSView` too: a scan lands, and the list
+    /// grows, while this view stands.
+    var sessionIdTokens: Set<String> = []
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSTextView.scrollableTextView()
+        let scroll = DropForwardingTextView.makeForwardingScrollView()
         let tv = scroll.documentView as! NSTextView
         tv.delegate = context.coordinator
-        tv.font = NSFont.systemFont(ofSize: 14)
+        applyDropHandlers(to: tv)
+        (tv as? DropForwardingTextView)?.sessionIdTokens = sessionIdTokens
+        TextInputTypography.apply(pointSize: fontSize, lineSpacing: lineSpacing, to: tv)
         tv.isRichText = false
         tv.allowsUndo = true
         tv.drawsBackground = false
@@ -1744,6 +2579,12 @@ struct GrowingTextField: NSViewRepresentable {
         scroll.hasVerticalScroller = true
         scroll.verticalScrollElasticity = .none
         return scroll
+    }
+
+    private func applyDropHandlers(to textView: NSTextView) {
+        guard let tv = textView as? DropForwardingTextView else { return }
+        tv.onDropFiles = onDropFiles
+        tv.onDropTargeted = onDropTargeted
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
@@ -1762,10 +2603,26 @@ struct GrowingTextField: NSViewRepresentable {
         // Same rule, same reason, as `SearchField`.
         context.coordinator.parent = self
         guard let tv = nsView.documentView as? NSTextView else { return }
+        // Same rule, same reason: a drop closure captured when the text
+        // view was BUILT stages into whatever the host looked like then
+        // — and here the closure is nil or not depending on a chip the
+        // user moves while this view stands.
+        applyDropHandlers(to: tv)
+        (tv as? DropForwardingTextView)?.sessionIdTokens = sessionIdTokens
+        var remeasure = false
         if tv.string != text {
             tv.string = text
-            context.coordinator.reportHeight(of: tv)
+            remeasure = true
         }
+        // Both hooks, like the spell-check switch: the tier is changed
+        // behind a sheet that leaves this view standing. A change here
+        // moves every line, so the reported height must follow.
+        if TextInputTypography.apply(pointSize: fontSize, lineSpacing: lineSpacing, to: tv) {
+            remeasure = true
+            // The tokens hug the glyphs, and the glyphs just changed size.
+            tv.needsDisplay = true
+        }
+        if remeasure { context.coordinator.reportHeight(of: tv) }
         TextInputSpellChecking.apply(spellChecking, to: tv)
     }
 
@@ -1781,10 +2638,30 @@ struct GrowingTextField: NSViewRepresentable {
 
         /// Measure the laid-out text and push the height up. Deferred a
         /// runloop so we never mutate SwiftUI state mid view-update.
+        ///
+        /// Through `textLayoutManager`, never `layoutManager`: reading
+        /// the latter on a stock text view silently drops it into
+        /// TextKit 1 compatibility mode for good, and under TextKit 1 a
+        /// paragraph `lineSpacing` — which this box carries from the
+        /// font tier — draws the spelling underline at the BOTTOM of
+        /// the line fragment, in the gap under the word rather than
+        /// under it (measured: 11 px low for a 12 pt spacing; TextKit 2
+        /// keeps it 1 px under the baseline). The two managers report
+        /// the same used height for every shape of text, so nothing
+        /// but the generation changes.
         func reportHeight(of tv: NSTextView) {
-            guard let lm = tv.layoutManager, let tc = tv.textContainer else { return }
-            lm.ensureLayout(for: tc)
-            let used = lm.usedRect(for: tc).height
+            let used: CGFloat
+            if let tlm = tv.textLayoutManager {
+                tlm.ensureLayout(for: tlm.documentRange)
+                used = tlm.usageBoundsForTextContainer.height
+            } else if let lm = tv.layoutManager, let tc = tv.textContainer {
+                // Already TextKit 1 (nothing here puts it there); the
+                // fallback keeps the box growing rather than frozen.
+                lm.ensureLayout(for: tc)
+                used = lm.usedRect(for: tc).height
+            } else {
+                return
+            }
             let height = ceil(used + tv.textContainerInset.height * 2)
             if abs(height - parent.measuredHeight) > 0.5 {
                 DispatchQueue.main.async { [weak self] in
@@ -1805,6 +2682,21 @@ struct GrowingTextField: NSViewRepresentable {
             }
             return false
         }
+
+        /// No spelling dots on a session-id token. The checker reads a
+        /// whole id — hyphens, digits and all — as ONE misspelled word,
+        /// so with Typo check on every pasted id would carry a red
+        /// underline from end to end.
+        func textView(_ textView: NSTextView, shouldSetSpellingState value: Int,
+                      range affectedCharRange: NSRange) -> Int {
+            guard value != 0,
+                  let tv = textView as? DropForwardingTextView,
+                  tv.sessionIdTokenRanges.contains(where: {
+                      NSIntersectionRange($0, affectedCharRange).length > 0
+                  })
+            else { return value }
+            return 0
+        }
     }
 }
 
@@ -1824,12 +2716,12 @@ struct ScheduleDraft: Equatable {
     /// cannot drift apart — see `ScheduleTimingEditor`.
     var timing = ScheduleTiming()
 
-    /// The 5-field cron for the current selection; nil for an invalid
-    /// custom expression.
-    var cronExpression: String? { timing.cronExpression }
+    /// The `schedule:` value for the current selection — cron, or a
+    /// one-time `once …`; nil for an invalid custom expression.
+    var expression: String? { timing.expression }
 
-    /// Short human summary ("every day at 9:00 AM") for the banner and
-    /// the armed schedule chip.
+    /// Short human summary ("every day at 9:00 AM", "once, tomorrow at
+    /// 9:00 AM") for the banner and the armed schedule chip.
     var summary: String { timing.summary }
 
     /// Name shown in the armed banner before creation.
@@ -1840,12 +2732,13 @@ struct ScheduleDraft: Equatable {
             : slug
     }
 
-    /// Human rendering of a cron the composer just submitted (used for
-    /// the success notice, after the draft has been reset). Delegates to
-    /// the same parser the scheduler fires on, so the confirmation can
-    /// never describe a different schedule from the one that will run.
-    static func describe(cron: String) -> String {
-        CronSchedule.parse(cron)?.localizedDescriptionText ?? cron
+    /// Human rendering of a schedule the composer just submitted (used
+    /// for the success notice, after the draft has been reset).
+    /// Delegates to the same parser the scheduler fires on, so the
+    /// confirmation can never describe a different schedule from the
+    /// one that will run.
+    static func describe(schedule: String) -> String {
+        TaskSchedule.parse(schedule)?.localizedDescriptionText ?? schedule
     }
 }
 
@@ -1853,8 +2746,8 @@ struct ScheduleDraft: Equatable {
 
 /// Toggle + timing fields for the composer's armed-schedule mode. The
 /// task prompt is typed in the composer's input box, and folder / mode
-/// / model / effort come from the control strip — this popover only
-/// owns the on/off switch, the name, and the timing.
+/// / model / effort / speed come from the control strip — this popover
+/// only owns the on/off switch, the name, and the timing.
 private struct SchedulePopover: View {
     @Binding var schedule: ScheduleDraft
     @Binding var errorText: String?
@@ -1864,26 +2757,30 @@ private struct SchedulePopover: View {
     /// moment of creation, not merely recognizable.
     let folderPath: String
     let modeTitle: String
+    /// A popover inherits its presenter's environment, so this is the
+    /// tier scale the composer reads.
+    @Environment(\.sipFontScale) private var fontScale
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let ratio = SipFont.ratio(fontScale)
+        VStack(alignment: .leading, spacing: 10 * ratio) {
             Toggle(isOn: $schedule.enabled.animation(.easeInOut(duration: 0.15))) {
                 Text("Run on a schedule",
                      comment: "Schedule popover toggle label")
-                    .font(.system(size: 13, weight: .semibold))
+                    .sipFont(13, weight: .semibold)
             }
             .toggleStyle(.switch)
-            .controlSize(.small)
+            .controlSize(SipFont.controlSize(fontScale, base: .small))
 
             if schedule.enabled {
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 8 * ratio) {
                     TextField(
                         String(localized: "Task name (e.g. daily-review)",
                                comment: "Schedule popover name field placeholder"),
                         text: $schedule.name
                     )
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12))
+                    .sipFont(12)
 
                     TextField(
                         String(localized: "Description (optional)",
@@ -1891,10 +2788,10 @@ private struct SchedulePopover: View {
                         text: $schedule.taskDescription
                     )
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12))
+                    .sipFont(12)
 
                     // The toggle above already IS "no schedule", so the
-                    // frequency list doesn't repeat the option; the hint
+                    // frequency chips don't repeat the option; the hint
                     // is redundant next to the caption block below.
                     ScheduleTimingEditor(timing: $schedule.timing,
                                          offersManual: false,
@@ -1902,12 +2799,12 @@ private struct SchedulePopover: View {
 
                     if let errorText = errorText {
                         Text(errorText)
-                            .font(.system(size: 11))
+                            .sipFont(11)
                             .foregroundColor(.red)
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: 3 * ratio) {
                         Text("Type the task prompt in the input box, then press send to create.",
                              comment: "Schedule popover caption — where the prompt comes from")
                         Text(String(localized: "Runs in \(folderPath) · \(modeTitle) mode — from the bar below.",
@@ -1916,13 +2813,16 @@ private struct SchedulePopover: View {
                             .truncationMode(.middle)
                             .help(folderPath)
                     }
-                    .font(.system(size: 11))
+                    .sipFont(11)
                     .foregroundColor(SipDesign.textHint)
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
-        .padding(14)
-        .frame(width: 300)
+        // Scaled with the type: the frequency and time chips wrap to the
+        // width they are given, and a fixed 300 pt would hand the
+        // largest tier a column of one-chip rows.
+        .padding(14 * ratio)
+        .frame(width: 300 * ratio)
     }
 }

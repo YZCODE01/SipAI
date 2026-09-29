@@ -192,20 +192,43 @@ check("discovery ignores ids it already knew",
       KimiSessionScanner.discoverSession(
         cwd: projectDir,
         excluding: ["sess-alpha", "sess-beta", "sess-scratch", "sess-empty"],
-        since: Date(timeIntervalSince1970: 0)) == nil)
+        since: Date(timeIntervalSince1970: 0),
+        prompt: "first question") == nil)
 check("discovery ignores a session in another folder",
       KimiSessionScanner.discoverSession(
         cwd: URL(fileURLWithPath: "/Users/nobody/elsewhere"),
-        excluding: [], since: Date(timeIntervalSince1970: 0)) == nil)
+        excluding: [], since: Date(timeIntervalSince1970: 0),
+        prompt: "first question") == nil)
 check("discovery ignores a directory older than the send",
       KimiSessionScanner.discoverSession(
         cwd: projectDir, excluding: [],
-        since: Date().addingTimeInterval(3600)) == nil)
+        since: Date().addingTimeInterval(3600),
+        prompt: "first question") == nil)
 let found = KimiSessionScanner.discoverSession(
     cwd: projectDir, excluding: ["sess-beta", "sess-empty"],
-    since: Date(timeIntervalSince1970: 0))
+    since: Date(timeIntervalSince1970: 0),
+    prompt: "first question")
 check("discovery finds the one new session for this cwd",
       found?.id == "sess-alpha", found?.id ?? "nil")
+check("discovery does not take a new session holding other words",
+      KimiSessionScanner.discoverSession(
+        cwd: projectDir, excluding: ["sess-beta", "sess-empty"],
+        since: Date(timeIntervalSince1970: 0),
+        prompt: "a message this store never saw") == nil)
+// `sess-empty` is excluded here as everywhere: an empty wire is a
+// session whose first message has not landed, and one such in the
+// folder holds every answer (the rule the next check pins).
+let byWords = KimiSessionScanner.discoverSession(
+    cwd: projectDir, excluding: ["sess-empty"],
+    since: Date(timeIntervalSince1970: 0),
+    prompt: #"<scheduled-task name="nightly-audit"></scheduled-task>run the audit"#)
+check("discovery picks the new session by what it holds, not by age",
+      byWords?.id == "sess-beta", byWords?.id ?? "nil")
+check("a new session with no message yet holds the folder's answers",
+      KimiSessionScanner.discoverSession(
+        cwd: projectDir, excluding: [],
+        since: Date(timeIntervalSince1970: 0),
+        prompt: "first question") == nil)
 
 // MARK: - History
 
@@ -223,7 +246,7 @@ if let alpha = byId["sess-alpha"] {
         case .toolUse(_, let name, let input):
             tools.append((name, (input["command"] as? String) ?? ""))
         case .toolResult(let id, let c, let e): results.append((id, c, e))
-        case .interrupted, .compaction: break
+        case .interrupted, .compaction, .thinking: break
         }
     }
     check("the request trace is NOT replayed as conversation",

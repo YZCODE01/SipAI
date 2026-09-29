@@ -29,7 +29,15 @@ trap 'rm -rf "$out"' EXIT
 model="$root/SipAI/Models/AgentCLIUpdates.swift"
 if [ ! -f "$model" ]; then
   echo "  FAIL  $model not found"
-  echo "        (the feature's one model file — nothing to test)"
+  echo "        (the feature's model file — nothing to test)"
+  exit 1
+fi
+# The badge and the header's queue live beside it, and are compiled
+# WHOLE: nothing in that file reaches for an app type.
+notices="$root/SipAI/Models/UpdateNotices.swift"
+if [ ! -f "$notices" ]; then
+  echo "  FAIL  $notices not found"
+  echo "        (the badge and the announcement queue — nothing to test)"
   exit 1
 fi
 
@@ -39,14 +47,15 @@ fi
   echo "import Foundation"
   for decl in "struct CLIVersion" "enum CLIUpdateStatus" "enum AgentCLIUpdateRules" \
               "struct AgentCLIRelease" "struct CLIBinaryFingerprint" "enum AgentCLIProbe" \
-              "enum CodexModelListRefresh"; do
+              "enum CodexAppServerCall" "enum CodexModelListRefresh" \
+              "enum CodexConfigWrite"; do
     awk -v pat="^${decl}[ :]" '$0 ~ pat, /^\}/' "$model"
     echo
   done
 } > "$out/Extracted.swift"
 
 for required in "static func parse" "static func decideStatus" "static func updateAction" \
-                "static func updateVerdict" "static func bannerIsOwed" \
+                "static func updateVerdict" "static func badgeVersion" "static func autoUpdateIsDue" \
                 "static func measured" "static func versionFromClaudeVersionsSymlink"; do
   if ! grep -q "$required" "$out/Extracted.swift"; then
     echo "  FAIL  '$required' did not extract from $model"
@@ -56,5 +65,5 @@ for required in "static func parse" "static func decideStatus" "static func upda
 done
 
 swiftc -O -o "$out/cliupdharness" \
-  "$here/Stubs.swift" "$out/Extracted.swift" "$here/main.swift"
+  "$here/Stubs.swift" "$out/Extracted.swift" "$notices" "$here/main.swift"
 "$out/cliupdharness" "$root"

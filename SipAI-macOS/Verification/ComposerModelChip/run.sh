@@ -13,10 +13,17 @@
 # ~/Library/Application Support/SipAI — section 5 reads it, and only to
 # report.
 #
-# Run it after touching anything that decides a model's NAME. The whole
-# class of bug here is silent and permanent: a wrong pairing does not
-# fail, it renames a model in every picker on the machine, and it
-# renames it again after a relaunch.
+# Run it after touching anything that decides a model's NAME or the
+# effort levels offered for it, and after every Claude Code upgrade: the
+# table both are read from is an object literal inside claude's
+# executable, in a shape that is Anthropic's to change. Sections 12 and
+# 13 parse whatever claude is installed here, and section 14 RUNS it —
+# one-line turns against the local fake endpoint in ../ChatOnlyMode
+# (junk key, throwaway config directory; no provider is reached and no
+# token is spent) — to hold the levels the picker offers to what claude
+# actually sends. The whole class of bug here is silent and permanent:
+# a wrong pairing does not fail, it renames a model in every picker on
+# the machine, and it renames it again after a relaunch.
 #
 #   ./run.sh                 # this checkout
 #   ./run.sh <source-root>   # another checkout, e.g. to watch it fail
@@ -27,6 +34,7 @@ trap 'rm -rf "$out"' EXIT
 swiftc -O -o "$out/modelchipharness" \
   "$here/Stubs.swift" "$here/main.swift" \
   "$here/../../SipAI/Models/AgentLaunchOptions.swift" \
+  "$here/../../SipAI/Models/KimiToolPolicy.swift" \
   "$here/../../SipAI/Models/ConfigManager.swift" \
   "$here/../../SipAI/Models/ProviderCatalog.swift"
-"$out/modelchipharness" "${1:-$here/../..}"
+"$out/modelchipharness" "${1:-$here/../..}" "$here"

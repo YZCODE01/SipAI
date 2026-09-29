@@ -33,14 +33,44 @@ enum SipaiPaths {
     }
 }
 
-/// Only the defaults key is needed here: `FactoryReset` lists it among
-/// the settings a reset clears. The real monitor holds timers, network
-/// calls and subprocesses, none of which this harness wants.
-/// `Verification/CLIUpdates` is what pins the two spellings together.
+/// The defaults keys `FactoryReset` lists, and the one call it makes to
+/// drop the in-memory copies of the two switches. The real monitor holds
+/// timers, network calls and subprocesses, none of which this harness
+/// wants. `Verification/CLIUpdates` is what pins the spellings together.
 @MainActor
-enum AgentCLIUpdateMonitor {
-    static let dismissalsDefaultsKey = "cliUpdateDismissed"
+final class AgentCLIUpdateMonitor {
+    static let shared = AgentCLIUpdateMonitor()
     static let remoteChecksDefaultsKey = "cliUpdateChecksEnabled"
+    static let autoUpdateDefaultsKey = "cliAutoUpdateEnabled"
+    func forgetSwitches() { CallLog.record("cliUpdates.forgetSwitches") }
+}
+
+/// The badge's seen-versions key, and the call that drops the copy in
+/// memory.
+@MainActor
+final class UpdateBadge {
+    static let shared = UpdateBadge()
+    static let seenDefaultsKey = "updateBadgeSeen"
+    func forgetSeen() { CallLog.record("badge.forgetSeen") }
+}
+
+/// Only the key: the release the last SipAI check found. The build each
+/// copy last launched as is `CopyLaunchRecord`'s, compiled in from the
+/// real UpdaterAvailability.swift by run.sh.
+@MainActor
+enum UpdateController {
+    static let availableUpdateDefaultsKey = "sipaiAvailableUpdate"
+}
+
+@MainActor
+final class UsageMonitor {
+    static let shared = UsageMonitor()
+    static let verdictsDefaultsKey = "planAccountVerdicts"
+    static var forgotten = false
+    func forgetVerdicts() {
+        Self.forgotten = true
+        CallLog.record("usage.forgetVerdicts")
+    }
 }
 
 // MARK: - Managers

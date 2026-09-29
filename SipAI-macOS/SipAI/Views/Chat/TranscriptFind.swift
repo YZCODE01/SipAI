@@ -47,7 +47,10 @@ import AppKit
 struct SearchField: NSViewRepresentable {
     @Binding var text: String
     var placeholder: String
-    var fontSize: CGFloat = 13
+    /// In POINTS, and with no default — the rule the composers' text
+    /// views follow: a caller that forgets it falls out of the font tier
+    /// silently. The palette passes its fixed size on purpose.
+    var fontSize: CGFloat
     var onMoveUp: () -> Void = {}
     var onMoveDown: () -> Void = {}
     /// Return. `shift` is true for Shift+Return, which every find bar
@@ -95,6 +98,12 @@ struct SearchField: NSViewRepresentable {
         if field.stringValue != text { field.stringValue = text }
         if field.placeholderString != placeholder {
             field.placeholderString = placeholder
+        }
+        // The find bar passes a tier-scaled size, and the tier can
+        // change while the bar is open. Compared first: an NSTextField
+        // re-lays out on every font assignment.
+        if abs((field.font?.pointSize ?? -1) - fontSize) > 0.01 {
+            field.font = NSFont.systemFont(ofSize: fontSize)
         }
     }
 
@@ -385,12 +394,15 @@ struct FindBar: View {
     var widening: Bool = false
 
     @State private var closeHovered = false
+    /// The bar sits ABOVE the transcript, outside its content re-scope
+    /// (in both hosts), so this is the tier scale.
+    @Environment(\.sipFontScale) private var fontScale
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
-                    .font(.system(size: 12, weight: .medium))
+                    .sipFont(12, weight: .medium)
                     .foregroundColor(SipDesign.textSecondary)
 
                 // AppKit-backed: a SwiftUI `TextField` eats ↑/↓ in its
@@ -401,16 +413,19 @@ struct FindBar: View {
                     placeholder: String(
                         localized: "Find in conversation",
                         comment: "Placeholder in the per-conversation find field"),
+                    fontSize: SipFont.scaled(13, fontScale),
                     onMoveUp: { find.previous() },
                     onMoveDown: { find.next() },
                     onSubmit: { shift in shift ? find.previous() : find.next() },
                     onCancel: { find.close() }
                 )
-                .frame(minWidth: 120, maxWidth: 320, minHeight: 18)
+                .frame(minWidth: 120, maxWidth: 320,
+                       minHeight: 18 * SipFont.ratio(fontScale))
 
                 // Reads as a total, so it is never a bare number.
                 Text(find.counterText)
-                    .font(.system(size: 11).monospacedDigit())
+                    .monospacedDigit()
+                    .sipFont(11)
                     .foregroundColor(find.matches.isEmpty && !find.query.isEmpty
                                      ? SipDesign.textHint
                                      : SipDesign.textSecondary)
@@ -438,7 +453,7 @@ struct FindBar: View {
                     find.close()
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .semibold))
+                        .sipFont(10, weight: .semibold)
                         .foregroundColor(closeHovered
                                          ? SipDesign.textPrimary
                                          : SipDesign.textSecondary)
@@ -460,14 +475,14 @@ struct FindBar: View {
             if let scopeNote {
                 HStack(spacing: 6) {
                     Text(scopeNote)
-                        .font(.system(size: 11))
+                        .sipFont(11)
                         .foregroundColor(SipDesign.textHint)
                     if widening {
                         ProgressView().controlSize(.small).scaleEffect(0.6)
                     } else if let onWiden, let widenTitle {
                         Button(action: onWiden) {
                             Text(widenTitle)
-                                .font(.system(size: 11, weight: .medium))
+                                .sipFont(11, weight: .medium)
                                 .foregroundColor(SipDesign.blue)
                         }
                         .buttonStyle(.plain)
@@ -511,7 +526,7 @@ private struct StepButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 10, weight: .semibold))
+                .sipFont(10, weight: .semibold)
                 .foregroundColor(disabled ? SipDesign.textHint
                                           : (hovered ? SipDesign.textPrimary
                                                      : SipDesign.textSecondary))
@@ -539,16 +554,18 @@ struct ChatFindToggle: View {
     @ObservedObject var find: TranscriptFindState
     let enabled: Bool
     @State private var hovered = false
+    @Environment(\.sipFontScale) private var fontScale
 
     var body: some View {
         Button {
             if find.isOpen { find.close() } else { find.open() }
         } label: {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 14, weight: .medium))
+                .sipFont(14, weight: .medium)
                 .foregroundStyle(enabled ? AnyShapeStyle(.secondary)
                                          : AnyShapeStyle(SipDesign.textHint))
-                .frame(width: 22, height: 22)
+                .frame(width: 22 * SipFont.ratio(fontScale),
+                       height: 22 * SipFont.ratio(fontScale))
                 .padding(2)
                 .background(
                     RoundedRectangle(cornerRadius: 6)

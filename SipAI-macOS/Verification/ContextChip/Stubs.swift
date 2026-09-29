@@ -31,15 +31,20 @@ struct StreamEvent {
     let contextTokens: Int?
     let isSystemNotice: Bool
     let fastModeState: String?
+    let fastModeDisabledReason: String?
+    let callSpeed: String?
     let modelContextWindows: [String: Int]?
 
     init(kind: StreamEventKind, contextTokens: Int? = nil,
          isSystemNotice: Bool = false, fastModeState: String? = nil,
+         fastModeDisabledReason: String? = nil, callSpeed: String? = nil,
          modelContextWindows: [String: Int]? = nil) {
         self.kind = kind
         self.contextTokens = contextTokens
         self.isSystemNotice = isSystemNotice
         self.fastModeState = fastModeState
+        self.fastModeDisabledReason = fastModeDisabledReason
+        self.callSpeed = callSpeed
         self.modelContextWindows = modelContextWindows
     }
 }
@@ -47,6 +52,7 @@ struct StreamEvent {
 enum StreamEventKind {
     case userMessage(text: String)
     case assistantText(text: String)
+    case thinking(text: String)
     case toolUse(toolUseId: String, name: String, input: [String: Any])
     case toolResult(toolUseId: String, output: String, isError: Bool)
     case systemInit(sessionId: String, model: String, cwd: String)
@@ -113,4 +119,25 @@ enum AgentManager {
 /// here anyway, so the catalog never reaches it.
 enum CodexModelListRefresh {
     static func run(binary: String) async -> Bool { false }
+    static func answer(binary: String) async -> [String: Any]? { nil }
+}
+
+/// The config write `CodexCatalog.setContextWindow` runs — also a
+/// process spawn, also unreachable here since `binaryPath` is nil.
+enum CodexConfigWrite {
+    enum Outcome: Equatable {
+        case written(version: String?, filePath: String?, overriddenBy: String?)
+        case refused(code: String?, message: String)
+        case unavailable
+    }
+    static func run(binary: String, keyPath: String, value: Int?) async -> Outcome {
+        .unavailable
+    }
+}
+
+/// The folder read `CodexCatalog.refreshSpeedSettings` sends — a spawn
+/// as well, and unreachable for the same reason. The request builder
+/// and the answer's parse are the real ones, in AgentLaunchOptions.swift.
+extension CodexConfigRead {
+    static func run(binary: String, cwd: String) async -> [String: Any]? { nil }
 }

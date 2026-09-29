@@ -201,6 +201,16 @@ struct ChatView: View {
     /// this one always searches the WHOLE chat.
     @StateObject private var find = TranscriptFindState()
     @Environment(\.sipFontScale) private var fontScale
+    @Environment(\.sipLineSpacingFactor) private var lineSpacingFactor
+
+    /// The gap between messages follows the transcript's rule — the
+    /// tier's line pitch over Default's — computed from the CONTENT
+    /// scale the message list is re-scoped to, since that is the scale
+    /// its wrapped lines are spaced at.
+    private var transcriptGapScale: CGFloat {
+        SipFont.transcriptGapScale(fontScale: SipFont.contentScale(fontScale),
+                                   lineSpacingFactor: lineSpacingFactor)
+    }
 
     private var apiClient: APIClient { APIClient(config: config) }
 
@@ -244,9 +254,6 @@ struct ChatView: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        // Transcript text tracks the sidebar row size, exactly like the
-        // agent session view — the two center columns must not differ.
-        .environment(\.sipFontScale, SipFont.contentScale(fontScale))
         // Cmd+F. A zero-size invisible button rather than an app-level
         // menu command: the shortcut has to reach the conversation that
         // is actually on screen, and the router replaces this view
@@ -370,25 +377,31 @@ struct ChatView: View {
             // Lift the hero while editing so the buttons stay clickable.
             .zIndex(editingTagline ? 1 : 0)
 
-            // Subtitle shown only when no chat model is configured —
-            // distinguishes agent-only mode from an empty install.
+            // Shown only while no chat model is configured: what a chat
+            // is, how to add a model, and where a subscription goes
+            // instead. Goes with the first model. One literal with an
+            // inline link (no interpolation, so the markdown pass is
+            // safe); the link is blue and underlined and opens
+            // Settings → Chat models through `.openSettingsTab`.
             if !config.hasChatModel {
                 Spacer().frame(height: 16)
-                Group {
-                    if agents.hasInstalledAgent {
-                        Text("Agent-only mode — pick an agent session from the sidebar, or add a chat model in Settings → Models.",
-                             comment: "Empty-state subtitle shown when no chat model is configured but an agent CLI is installed.")
-                    } else {
-                        Text("No chat model configured. Add one in Settings → Models.",
-                             comment: "Empty-state subtitle shown when no chat model and no agent CLI is available.")
-                    }
-                }
-                .font(.system(size: 13))
-                .foregroundColor(ChatDesign.textSecondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 420)
-                .padding(.horizontal, 20)
+                Text(Self.noModelIntroduction)
+                    .sipFont(13)
+                    .foregroundColor(ChatDesign.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 520)
+                    .padding(.horizontal, 20)
+                    .environment(\.openURL, OpenURLAction { url in
+                        guard url.scheme == "sipai" else { return .systemAction }
+                        if url.host == "settings",
+                           let tab = SettingsView.Tab(rawValue: url.lastPathComponent) {
+                            NotificationCenter.default.post(
+                                name: .openSettingsTab, object: nil,
+                                userInfo: [SettingsView.Tab.userInfoKey: tab.rawValue])
+                        }
+                        return .handled
+                    })
             }
 
             Spacer().frame(height: 40)
@@ -440,6 +453,19 @@ struct ChatView: View {
         }
         .onGeometryChange(for: CGFloat.self, of: { $0.size.width },
                           action: { emptyStateWidth = $0 })
+    }
+
+    /// The empty chat page's explanation, with its link styled as a
+    /// link: blue, underlined. Built from the localized markdown once
+    /// per pass — the string is static, the styling is not.
+    private static var noModelIntroduction: AttributedString {
+        var text = AttributedString(localized: "The Chat section talks to AI models through their API endpoints and is billed per token. To add a model, click the model chip at the lower right of the chat box, or open Settings → Chat models. If you would rather use a subscription plan than an API key, the **Chat only** mode of an agent session gives you a similar kind of conversation — it is limited to the agent providers SipAI supports. [Learn more](sipai://settings/models)",
+                                    comment: "Empty chat page while no chat model is configured. Keep the [Learn more](sipai://settings/models) link and the **Chat only** mode name (the mode chip's row).")
+        for run in text.runs where run.link != nil {
+            text[run.range].underlineStyle = .single
+            text[run.range].foregroundColor = SipDesign.blue
+        }
+        return text
     }
 
     // MARK: - Tagline hero
@@ -618,7 +644,7 @@ struct ChatView: View {
             // input card's chips (ProjectSelector / RoleSelector).
             HStack {
                 Text(liveTitle.isEmpty ? String(localized: "New Chat", comment: "Default chat title") : liveTitle)
-                    .font(.system(size: 14, weight: .semibold))
+                    .sipFont(14, weight: .semibold)
                     .foregroundColor(SipDesign.textPrimary)
                 Spacer()
             }
@@ -654,14 +680,17 @@ struct ChatView: View {
             // height exact, so there is no estimate to be wrong.
             ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 12 * transcriptGapScale) {
                     if liveMessages.count > messageDisplayCap {
                         Button {
                             messageDisplayCap += 40
                         } label: {
                             Text(String(localized: "Show earlier — \(liveMessages.count - messageDisplayCap) older messages",
                                         comment: "Button above a truncated chat; placeholder is the hidden message count"))
-                                .font(.system(size: 12))
+                                // Inside the list's re-scope, but `fontScale`
+                                // here is this view's ROOT value, so the
+                                // design-size rule applies directly.
+                                .font(.system(size: SipFont.scaled(12, fontScale)))
                                 .foregroundColor(ChatDesign.textSecondary)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 6)
@@ -713,7 +742,7 @@ struct ChatView: View {
                                 ProgressView().controlSize(.small)
                                 Text("Sipping\u{2026} (\(elapsed))",
                                      comment: "Shown while waiting for the model")
-                                    .font(.system(size: 13))
+                                    .font(.system(size: SipFont.scaled(13, fontScale)))
                                     .foregroundColor(SipDesign.textSecondary)
                             }
                         }
@@ -786,6 +815,16 @@ struct ChatView: View {
                 jumpToActiveMatch(proxy)
             }
             }
+            // Transcript text tracks the sidebar row size, exactly like
+            // the agent session view — the two center columns must not
+            // differ. The re-scope covers the MESSAGE LIST alone: the
+            // title, the find bar and the input card below read the
+            // tier's own scale, the way the agent composer beside its
+            // stream does. Inside this block `.sipFont` would come out
+            // 1/1.1 too small — see `SipFont`.
+            .environment(\.sipFontScale, SipFont.contentScale(fontScale))
+            // What a code block's Save names the file after.
+            .environment(\.sipCodeFileTitle, liveTitle.isEmpty ? nil : liveTitle)
 
             // Bottom unified input card — same margins as the agent
             // session's composer (AgentSessionView.inputArea).
@@ -818,12 +857,12 @@ struct ChatView: View {
             Image(systemName: icon)
                 .foregroundColor(color.opacity(0.8))
             Text(text)
-                .font(.system(size: 13))
+                .sipFont(13)
                 .foregroundColor(SipDesign.textPrimary)
             Spacer()
             Button("Dismiss") { onDismiss() }
                 .buttonStyle(.plain)
-                .font(.system(size: 13, weight: .medium))
+                .sipFont(13, weight: .medium)
                 .foregroundColor(SipDesign.textSecondary)
         }
         .padding(12)
@@ -1040,12 +1079,13 @@ struct ChatView: View {
         // not is not something to depend on; this makes the two orders
         // equivalent.
         //
-        // `openScheduledTaskName` belongs in this list too: a task with
-        // no runs yet opens `AgentSessionView` on that field ALONE
-        // (ContentView's router tests for it), with no session id to
-        // trip the first guard. Without it, clicking such a task re-keys
-        // this view onto the new-chat slot on its way out — exactly the
-        // hole the guard exists to close.
+        // `openScheduledTaskName` belongs in this list too: a task's
+        // page opens `AgentSessionView` on that field ALONE (ContentView's
+        // router tests for it), with no session id to trip the first
+        // guard, and nils `openChatSlug` on its way in. Without it,
+        // opening a task's page from a chat re-keys this view onto the
+        // new-chat slot on its way out — exactly the hole the guard
+        // exists to close.
         guard appState.openAgentSessionId == nil,
               appState.openNoteId == nil,
               appState.openScheduledTaskName == nil,
@@ -1053,11 +1093,40 @@ struct ChatView: View {
         let newKey = AppState.chatDraftKey(slug: appState.openChatSlug,
                                            project: appState.openChatProject)
         if let old = loadedDraftKey, old != newKey {
-            appState.setComposerDraft(draft, for: old)
+            // An address is a chat's file, and a chat whose file is gone
+            // was deleted or moved from under this view: its text has
+            // nowhere left to wait — a move carried it already — and
+            // left at the old address it would surface in the next chat
+            // to be given that address.
+            appState.setComposerDraft(loadedChatIsGone ? "" : draft, for: old)
         }
         if loadedDraftKey != newKey {
             draft = appState.composerDraft(for: newKey)
             loadedDraftKey = newKey
+        }
+    }
+
+    /// The loaded chat was saved once and its file is no longer there.
+    /// Never true for the unsent new chat, which has no file to lose.
+    private var loadedChatIsGone: Bool {
+        guard let slug = loadedChatSlug, !slug.isEmpty else { return false }
+        return !FileManager.default.fileExists(
+            atPath: SipaiPaths.chatStateFile(slug: slug, project: loadedChatProject).path)
+    }
+
+    /// Move the live text to a new address for this same conversation —
+    /// its first save, a move, a branch — and leave nothing at the old
+    /// one. The text has to be CARRIED, not just re-keyed: `draft` does
+    /// not change here, so no `onChange` fires to re-file it. And the
+    /// new address may be one a deleted chat used to have — a slug is
+    /// minted from the title — so whatever is stored there is replaced,
+    /// never restored.
+    private func rekeyComposerDraft(to newKey: String) {
+        let previousKey = loadedDraftKey
+        loadedDraftKey = newKey
+        stashComposerDraft()
+        if let previousKey, previousKey != newKey {
+            appState.setComposerDraft("", for: previousKey)
         }
     }
 
@@ -1203,17 +1272,9 @@ struct ChatView: View {
         }
         // The chat's ADDRESS changed, not the conversation — re-key the
         // draft in step so the reload this triggers sees no switch and
-        // leaves whatever is half-typed alone. The text has to be
-        // CARRIED, not just re-keyed: `draft` doesn't change here, so
-        // no `onChange` fires, so the store would otherwise keep the
-        // text filed under an address that no longer exists.
-        let previousKey = loadedDraftKey
-        loadedDraftKey = AppState.chatDraftKey(slug: loadedChatSlug,
-                                               project: loadedChatProject)
-        stashComposerDraft()
-        if let previousKey, previousKey != loadedDraftKey {
-            appState.setComposerDraft("", for: previousKey)
-        }
+        // leaves whatever is half-typed alone.
+        rekeyComposerDraft(to: AppState.chatDraftKey(slug: loadedChatSlug,
+                                                     project: loadedChatProject))
     }
 
     private func send() {
@@ -1225,11 +1286,11 @@ struct ChatView: View {
         guard let modelId = appState.activeModel ?? config.defaultModel else {
             if agents.hasInstalledAgent {
                 errorBanner = String(
-                    localized: "To chat with a model provider, add one in Settings → Models. For agent sessions, use the sidebar.",
+                    localized: "To chat with a model provider, add one in Settings → Chat models.",
                     comment: "Send-time error when no chat model is configured but an agent CLI is available.")
             } else {
                 errorBanner = String(
-                    localized: "No chat model configured. Add one in Settings → Models.",
+                    localized: "No chat model configured. Add one in Settings → Chat models.",
                     comment: "Send-time error when no chat model and no agent CLI is available.")
             }
             return
@@ -1388,21 +1449,15 @@ struct ChatView: View {
         ))
 
         // Adopt the branch as the loaded identity FIRST (see above), and
-        // carry the composer draft with it — the text isn't changing, so
-        // no `onChange` will fire to re-file it.
-        let previousDraftKey = loadedDraftKey
+        // carry the composer draft with it.
         loadedChatSlug = branch.slug
         loadedChatProject = branch.project
         liveMessages = prefix
         liveTitle = branch.title
         liveLastUserMessageAt = branch.lastUserMessageAt
         messageDisplayCap = 40
-        loadedDraftKey = AppState.chatDraftKey(slug: branch.slug,
-                                               project: branch.project)
-        stashComposerDraft()
-        if let previousDraftKey, previousDraftKey != loadedDraftKey {
-            appState.setComposerDraft("", for: previousDraftKey)
-        }
+        rekeyComposerDraft(to: AppState.chatDraftKey(slug: branch.slug,
+                                                     project: branch.project))
 
         cancelMessageEdit()
         appState.openChatSlug = branch.slug
@@ -1444,7 +1499,7 @@ struct ChatView: View {
         guard let modelId = config.noteGeneratingModel
                 ?? appState.activeModel ?? config.defaultModel else {
             errorBanner = String(
-                localized: "No chat model configured. Add one in Settings → Models.",
+                localized: "No chat model configured. Add one in Settings → Chat models.",
                 comment: "Error shown when generating a note without a configured model")
             return
         }
@@ -1545,6 +1600,13 @@ struct ChatView: View {
         if slug.isEmpty {
             loadedChatSlug = saved.slug
             loadedChatProject = saved.project
+            // The minted address takes THIS chat's text before routing
+            // publishes it below. Otherwise the reload that publication
+            // triggers restores whatever a deleted chat left there —
+            // `uniqueSlug` hands a freed slug to the next chat opening
+            // with the same words — into this chat's composer.
+            rekeyComposerDraft(to: AppState.chatDraftKey(slug: saved.slug,
+                                                         project: saved.project))
             if appState.openChatSlug == nil {
                 appState.openChatSlug = saved.slug
                 appState.openChatProject = saved.project
@@ -1561,6 +1623,19 @@ struct ChatView: View {
 /// Mimics the Claude desktop app's input box design.
 struct UnifiedInputCard: View {
     @EnvironmentObject var config: ConfigManager
+    /// The TIER scale: the card sits below the message list, outside
+    /// its content re-scope (see `chatMessagesView`), so every size
+    /// here is the design-size convention.
+    @Environment(\.sipFontScale) private var fontScale
+    @Environment(\.sipLineSpacingFactor) private var lineSpacingFactor
+
+    /// The box's type: 14 pt at Default, with the tier's line spacing
+    /// between wrapped lines — the agent composer's rule exactly.
+    private var inputFontSize: CGFloat { SipFont.scaled(14, fontScale) }
+    private var inputLineSpacing: CGFloat { inputFontSize * lineSpacingFactor }
+    /// Frames that bound the scaled text — the box's height clamp and
+    /// the control row's pinned height — grow by the same ratio.
+    private var frameRatio: CGFloat { SipFont.ratio(fontScale) }
 
     @Binding var draft: String
     /// Read-only: the turn belongs to `ChatManager`, not to this card
@@ -1615,7 +1690,8 @@ struct UnifiedInputCard: View {
     var body: some View {
         VStack(spacing: 0) {
             if !attachments.isEmpty {
-                AttachmentChipRow(attachments: attachments, onRemove: onRemoveAttachment)
+                AttachmentChipRow(attachments: attachments, onRemove: onRemoveAttachment,
+                                  frameRatio: frameRatio)
                     .padding(.horizontal, 10)
                     .padding(.top, 8)
             }
@@ -1626,7 +1702,7 @@ struct UnifiedInputCard: View {
                 if draft.isEmpty {
                     Text("How can I help you today?")
                         .foregroundColor(SipDesign.textHint)
-                        .font(.system(size: 14))
+                        .sipFont(14)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 6)
                         .allowsHitTesting(false)
@@ -1635,8 +1711,10 @@ struct UnifiedInputCard: View {
                                    onSubmit: onSend,
                                    spellChecking: config.display.spellCheck,
                                    onDropFiles: onDropFiles,
-                                   onDropTargeted: { dropTargeted = $0 })
-                    .frame(minHeight: 21, maxHeight: 93)
+                                   onDropTargeted: { dropTargeted = $0 },
+                                   fontSize: inputFontSize,
+                                   lineSpacing: inputLineSpacing)
+                    .frame(minHeight: 21 * frameRatio, maxHeight: 93 * frameRatio)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
             }
@@ -1648,7 +1726,7 @@ struct UnifiedInputCard: View {
                     onUpload()
                 } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 14, weight: .medium))
+                        .sipFont(14, weight: .medium)
                         .foregroundStyle(.secondary)
                         .padding(4)
                         .background(
@@ -1680,12 +1758,12 @@ struct UnifiedInputCard: View {
                                     .scaleEffect(0.75)
                             } else {
                                 Image(systemName: "note.text")
-                                    .font(.system(size: 14, weight: .medium))
+                                    .sipFont(14, weight: .medium)
                                     .foregroundStyle(canGenerateNote ? AnyShapeStyle(.secondary)
                                                                      : AnyShapeStyle(SipDesign.textHint))
                             }
                         }
-                        .frame(width: 22, height: 22)
+                        .frame(width: 22 * frameRatio, height: 22 * frameRatio)
                         .padding(2)
                         .background(
                             RoundedRectangle(cornerRadius: 6)
@@ -1739,9 +1817,9 @@ struct UnifiedInputCard: View {
                 if hasSomethingToSend && !sending {
                     Button(action: onSend) {
                         Image(systemName: "arrow.up.circle.fill")
-                            .font(.system(size: 24))
+                            .sipFont(24)
                             .foregroundColor(SipDesign.blue)
-                            .frame(width: 26, height: 26)
+                            .frame(width: 26 * frameRatio, height: 26 * frameRatio)
                     }
                     .buttonStyle(.plain)
                     .help("Send message")
@@ -1749,9 +1827,9 @@ struct UnifiedInputCard: View {
                 } else if sending {
                     Button(action: onStop) {
                         Image(systemName: "stop.circle.fill")
-                            .font(.system(size: 24))
+                            .sipFont(24)
                             .foregroundColor(SipDesign.textHint)
-                            .frame(width: 26, height: 26)
+                            .frame(width: 26 * frameRatio, height: 26 * frameRatio)
                     }
                     .buttonStyle(.plain)
                     .help("Stop")
@@ -1759,7 +1837,8 @@ struct UnifiedInputCard: View {
             }
             // Fixed: the tallest PERMANENT control (the 22+4 pt note
             // button). Controls that come and go must fit inside it.
-            .frame(height: 26)
+            // Scaled with the glyphs it pins, or a larger tier clips them.
+            .frame(height: 26 * frameRatio)
             .padding(.horizontal, 10)
             .padding(.bottom, 5)
             .padding(.top, 0)
@@ -1863,13 +1942,13 @@ struct NoteOptionsPopover: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Note instructions",
                      comment: "Header of the note prompt box")
-                    .font(.system(size: 12, weight: .semibold))
+                    .sipFont(12, weight: .semibold)
                     .foregroundColor(SipDesign.textSecondary)
                 TextField(String(localized: "e.g. Focus on the decisions and open questions",
                                  comment: "Placeholder in the note prompt box"),
                           text: $promptText, axis: .vertical)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
+                    .sipFont(13)
                     .lineLimit(3...6)
                     .frame(width: 240)
                     .padding(8)
