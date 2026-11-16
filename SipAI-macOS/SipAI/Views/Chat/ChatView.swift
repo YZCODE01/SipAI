@@ -130,6 +130,7 @@ struct ChatView: View {
     @EnvironmentObject var chats: ChatManager
     @EnvironmentObject var agents: AgentManager
     @EnvironmentObject var notesManager: NotesManager
+    @EnvironmentObject var projects: ProjectManager
 
     @State private var draft: String = ""
     /// Identity `draft` was typed under, and the stash target on the
@@ -148,10 +149,14 @@ struct ChatView: View {
     /// plain `@State` — nothing it holds is rendered, so mutating it
     /// must not invalidate this body.
     @State private var follow = TranscriptFollow(label: "chat")
+    /// The message being read, kept under the top of the list when the
+    /// text size changes while the chat is on screen — the agent
+    /// transcript's rule. A class in plain `@State`: never drawn.
+    @State private var readingPlace = ReadingPlace()
     /// How many of the newest messages render. The message stack is
     /// laid out EAGERLY (see the ScrollView's note below), so this is
     /// the knob that bounds that cost. Smaller step than the agent
-    /// transcript's `historyDisplayCap` (+200): one chat row is a whole
+    /// transcript's `earlierRows` (+200): one chat row is a whole
     /// turn, where one transcript row is a single tool call.
     /// Reset per chat by `reloadFromAppState`; this view is reused
     /// across chats rather than re-created, so nothing else resets it.
@@ -210,6 +215,20 @@ struct ChatView: View {
     private var transcriptGapScale: CGFloat {
         SipFont.transcriptGapScale(fontScale: SipFont.contentScale(fontScale),
                                    lineSpacingFactor: lineSpacingFactor)
+    }
+
+    /// The size the messages are laid out at — what tells `readingPlace`
+    /// a layout from the one before it.
+    private var readingSize: ReadingPlace.Size {
+        ReadingPlace.Size(fontScale: fontScale, lineSpacing: lineSpacingFactor)
+    }
+
+    /// Back to the message being read after a change of size. Asked only for
+    /// a reader who was not following the end — `readingPlace` judges that
+    /// on the layout before the change, since a page that shrinks can
+    /// clamp a reader mid-page to the end.
+    private func restoreReadingPlace(_ offset: CGFloat) {
+        chatScrollPosition.scrollTo(y: offset)
     }
 
     private var apiClient: APIClient { APIClient(config: config) }
@@ -382,7 +401,7 @@ struct ChatView: View {
             // instead. Goes with the first model. One literal with an
             // inline link (no interpolation, so the markdown pass is
             // safe); the link is blue and underlined and opens
-            // Settings → Chat models through `.openSettingsTab`.
+            // Settings → Chat Settings through `.openSettingsTab`.
             if !config.hasChatModel {
                 Spacer().frame(height: 16)
                 Text(Self.noModelIntroduction)
@@ -390,6 +409,7 @@ struct ChatView: View {
                     .foregroundColor(ChatDesign.textSecondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
+                    .linkPointers(Self.noModelIntroduction)
                     .frame(maxWidth: 520)
                     .padding(.horizontal, 20)
                     .environment(\.openURL, OpenURLAction { url in
@@ -459,8 +479,8 @@ struct ChatView: View {
     /// link: blue, underlined. Built from the localized markdown once
     /// per pass — the string is static, the styling is not.
     private static var noModelIntroduction: AttributedString {
-        var text = AttributedString(localized: "The Chat section talks to AI models through their API endpoints and is billed per token. To add a model, click the model chip at the lower right of the chat box, or open Settings → Chat models. If you would rather use a subscription plan than an API key, the **Chat only** mode of an agent session gives you a similar kind of conversation — it is limited to the agent providers SipAI supports. [Learn more](sipai://settings/models)",
-                                    comment: "Empty chat page while no chat model is configured. Keep the [Learn more](sipai://settings/models) link and the **Chat only** mode name (the mode chip's row).")
+        var text = AttributedString(localized: "The Chat section talks to AI models through their API endpoints and is billed per token. To add a model, click the model chip at the lower right of the chat box, or open Settings → Chat Settings. If you would rather use a subscription plan than an API key, the **Chat only** mode of an agent session gives you a similar kind of conversation — it is limited to the agent providers SipAI supports. [Learn more](sipai://settings/chat)",
+                                    comment: "Empty chat page while no chat model is configured. Keep the [Learn more](sipai://settings/chat) link and the **Chat only** mode name (the mode chip's row).")
         for run in text.runs where run.link != nil {
             text[run.range].underlineStyle = .single
             text[run.range].foregroundColor = SipDesign.blue
@@ -711,8 +731,9 @@ struct ChatView: View {
                                     // sent into. Hold the button instead.
                                     busy: sending,
                                     explanation: String(
-                                        localized: "Starts a new chat from this point. This one is kept as it is.",
-                                        comment: "Explanation under the branch editor in a chat"),
+                                        localized: "Send replaces this message and the replies after it. Create Branch starts a new chat and keeps this one.",
+                                        comment: "Explanation under the message editor in a chat"),
+                                    onSend: { editChatInPlace(from: msg.id) },
                                     onCreate: { createChatBranch(from: msg.id) },
                                     onCancel: cancelMessageEdit
                                 )
@@ -720,10 +741,7 @@ struct ChatView: View {
                                 MessageBubble(
                                     message: displayMessage(msg),
                                     onEdit: canBranch(from: msg)
-                                        ? { beginMessageEdit(msg) } : nil,
-                                    editHint: String(
-                                        localized: "Create a new chat branch from here",
-                                        comment: "Tooltip for the branch pencil on a sent chat message")
+                                        ? { beginMessageEdit(msg) } : nil
                                 )
                             }
                         }
@@ -732,6 +750,8 @@ struct ChatView: View {
                         // how many matches precede it. `.inactive` — and
                         // free — whenever the bar is closed.
                         .environment(\.sipSearchSlot, find.slot(forRow: msg.id))
+                        .readingPlaceRow(msg.id, place: readingPlace, size: readingSize,
+                                         restore: restoreReadingPlace)
                     }
                     if sending, let startedAt = turnStartedAt {
                         TimelineView(.periodic(from: startedAt, by: 1.0)) { context in
@@ -751,14 +771,19 @@ struct ChatView: View {
                 }
                 .padding(.horizontal, 90)
                 .padding(.vertical, 16)
+                .coordinateSpace(.named(ReadingPlace.space))
             }
             .scrollPosition($chatScrollPosition)
-            .onScrollGeometryChange(for: TranscriptGeometry.self) { geo in
-                TranscriptGeometry(geo)
-            } action: { old, new in
-                if follow.geometryChanged(from: old, to: new) == .snapToEnd {
+            // One sample for the follow engine and `readingPlace`, so the
+            // verdict that rides with an edge is the verdict for that edge.
+            .onScrollGeometryChange(for: ScrollSample.self) { geo in
+                ScrollSample(geo)
+            } action: { [readingSize] old, new in
+                if new.geometry != old.geometry,
+                   follow.geometryChanged(from: old.geometry, to: new.geometry) == .snapToEnd {
                     chatScrollPosition.scrollTo(edge: .bottom)
                 }
+                readingPlace.noteEdge(new.edge, following: follow.isNearBottom, size: readingSize)
             }
             // Who is moving the scroll view, asked of the scroll view
             // itself — geometry deltas can say the end moved but never
@@ -768,6 +793,7 @@ struct ChatView: View {
                                        geometry: TranscriptGeometry(context.geometry)) {
                     chatScrollPosition.scrollTo(edge: .bottom)
                 }
+                if follow.readerIsScrolling { readingPlace.readerScrolled() }
             }
             .onChange(of: liveMessages.count) { _, _ in
                 // Real content — restores the geometry path's snap
@@ -775,6 +801,9 @@ struct ChatView: View {
                 follow.noteInput()
                 refreshFind()
             }
+            // A change of text size re-lays out every message: real
+            // input, so the follow engine may spend snaps keeping the end.
+            .onChange(of: readingSize) { _, _ in follow.noteInput() }
             .onChange(of: appState.openChatSlug) { _, _ in
                 // A different conversation entirely — always its end.
                 follow.forceFollow()
@@ -1024,8 +1053,8 @@ struct ChatView: View {
     /// user typed, so a follow-up question about the file still has the
     /// file. Images and PDFs are deliberately absent — they ride the
     /// one request that carries them (see `ChatAttachment`).
-    private func outgoingContent(for text: String) -> String {
-        let blocks = pendingAttachments.compactMap { a -> String? in
+    private func outgoingContent(for text: String, attachments: [ChatAttachment]) -> String {
+        let blocks = attachments.compactMap { a -> String? in
             guard a.isText, let t = a.text else { return nil }
             return ChatAttachment.inlineBlock(name: a.name, text: t,
                                               truncated: a.textTruncated)
@@ -1278,36 +1307,60 @@ struct ChatView: View {
     }
 
     private func send() {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        sendMessage(draft, attachments: pendingAttachments, fromComposer: true)
+    }
+
+    /// One message into this chat. From the composer it is what the
+    /// composer holds, and the composer empties. An edited message — Send
+    /// in the message editor, or a new branch's first message — goes with
+    /// its own words alone and leaves the composer as it was: a half-typed
+    /// message and the files staged there are not part of the edit.
+    ///
+    /// `replacingFrom` is where the edited message stood: it and everything
+    /// after it leave the conversation, once the send is known to go (a
+    /// chat with no model sends nothing and keeps every message).
+    /// Answers whether the message went.
+    @discardableResult
+    private func sendMessage(_ raw: String, attachments: [ChatAttachment],
+                             fromComposer: Bool, replacingFrom cut: Int? = nil) -> Bool {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         // An image with no words is a legitimate message — "what is
         // this?" is implied by the act of attaching it.
-        guard !text.isEmpty || !pendingAttachments.isEmpty, !sending else { return }
+        guard !text.isEmpty || !attachments.isEmpty, !sending else { return false }
 
         guard let modelId = appState.activeModel ?? config.defaultModel else {
             if agents.hasInstalledAgent {
                 errorBanner = String(
-                    localized: "To chat with a model provider, add one in Settings → Chat models.",
+                    localized: "To chat with a model provider, add one in Settings → Chat Settings.",
                     comment: "Send-time error when no chat model is configured but an agent CLI is available.")
             } else {
                 errorBanner = String(
-                    localized: "No chat model configured. Add one in Settings → Chat models.",
+                    localized: "No chat model configured. Add one in Settings → Chat Settings.",
                     comment: "Send-time error when no chat model and no agent CLI is available.")
             }
-            return
+            return false
         }
 
-        var userMessage = ChatMessage(role: "user", content: outgoingContent(for: text))
-        if !pendingAttachments.isEmpty {
+        if let cut, cut <= liveMessages.count {
+            liveMessages.removeSubrange(cut...)
+        }
+        var userMessage = ChatMessage(role: "user", content: outgoingContent(for: text, attachments: attachments))
+        if !attachments.isEmpty {
             // The one trace an image leaves on disk, and the key the
             // CLI writes and reads for the same purpose.
-            userMessage.files = pendingAttachments.map(\.name).joined(separator: ", ")
+            userMessage.files = attachments.map(\.name).joined(separator: ", ")
+        } else if !fromComposer {
+            // An edit keeps the files whose text it still carries; an
+            // image was never stored, so an edit cannot send it again.
+            let kept = AttachmentInline.names(in: text)
+            if !kept.isEmpty { userMessage.files = kept.joined(separator: ", ") }
         }
         // Images and PDFs ride THIS request and are never stored, so
         // they have to be carried into the turn separately. The text
         // ones are already inside `userMessage.content`; sending them
         // again here would put every attached file in twice.
-        let sentAttachments = pendingAttachments.filter { !$0.isText }
-        pendingAttachments = []
+        let sentAttachments = attachments.filter { !$0.isText }
+        if fromComposer { pendingAttachments = [] }
         liveMessages.append(userMessage)
         // What the sidebar shows and orders by. Stamped HERE, at the
         // send, not by the save that follows: the reply's own save
@@ -1318,10 +1371,12 @@ struct ChatView: View {
         // another chat while the reply is in flight.
         let targetSlug = persistCurrentChat()
         let targetProject = loadedChatProject
-        draft = ""
-        // Drop the stashed copy too, or switching away and back would
-        // resurrect the just-sent text into the composer.
-        stashComposerDraft()
+        if fromComposer {
+            draft = ""
+            // Drop the stashed copy too, or switching away and back would
+            // resurrect the just-sent text into the composer.
+            stashComposerDraft()
+        }
         errorBanner = nil
         infoBanner = nil
         // Whatever the PREVIOUS turn left unsaid is settled — this one
@@ -1383,15 +1438,20 @@ struct ChatView: View {
         // without the manager knowing, and `endTurn` can never race
         // ahead of the `beginTurn` it undoes.
         chats.beginTurn(slug: targetSlug, project: targetProject,
+                        provider: providerName(forModel: modelId),
+                        group: targetProject.flatMap { slug in
+                            projects.projects.first { $0.slug == slug }?.name
+                        },
                         startedAt: startedAt, task: task)
+        return true
     }
 
-    // MARK: - Branching from an earlier message
+    // MARK: - Editing an earlier message
 
-    /// Whether this row offers the branch pencil. User messages only,
-    /// and not while a reply is in flight — the branch inherits the
-    /// conversation as it stands, and "as it stands" is not a settled
-    /// question mid-turn.
+    /// Whether this row offers the edit pencil. User messages only, and
+    /// not while a reply is in flight — Send replaces the conversation
+    /// from the message on and a branch inherits it as it stands, and "as
+    /// it stands" is not a settled question mid-turn.
     private func canBranch(from message: ChatMessage) -> Bool {
         message.role == "user" && !sending && editingMessageId == nil
     }
@@ -1463,11 +1523,26 @@ struct ChatView: View {
         appState.openChatSlug = branch.slug
         appState.openChatProject = branch.project
 
-        // Straight down the ordinary send path, so attachments, usage
-        // accounting, the turn clock and the in-flight identity capture
-        // all behave exactly as they do for a typed message.
-        draft = text
-        send()
+        // Straight down the ordinary send path, so usage accounting, the
+        // turn clock and the in-flight identity capture all behave exactly
+        // as they do for a typed message — with the edited words alone:
+        // the composer's own text and files went to the branch with it.
+        sendMessage(text, attachments: [], fromComposer: false)
+    }
+
+    /// Send the edit in place: the message and every reply after it leave
+    /// this chat, and the edited text is sent in their stead — the same
+    /// chat, its name and its place kept. The first message is no
+    /// different: the chat starts again from the edit. The editor stays
+    /// open when nothing could be sent (no model), with the text in it.
+    private func editChatInPlace(from messageId: UUID) {
+        let text = editDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !sending,
+              let index = liveMessages.firstIndex(where: { $0.id == messageId })
+        else { return }
+        if sendMessage(text, attachments: [], fromComposer: false, replacingFrom: index) {
+            cancelMessageEdit()
+        }
     }
 
     /// Stop button: cancel the in-flight request. URLSession surfaces
@@ -1499,7 +1574,7 @@ struct ChatView: View {
         guard let modelId = config.noteGeneratingModel
                 ?? appState.activeModel ?? config.defaultModel else {
             errorBanner = String(
-                localized: "No chat model configured. Add one in Settings → Chat models.",
+                localized: "No chat model configured. Add one in Settings → Chat Settings.",
                 comment: "Error shown when generating a note without a configured model")
             return
         }
@@ -1553,6 +1628,13 @@ struct ChatView: View {
                     comment: "Error banner shown when note generation throws")
             }
         }
+    }
+
+    /// The name the user knows the model's provider by — what the notice
+    /// beside the logo says when the reply lands while they are elsewhere.
+    private func providerName(forModel modelId: String) -> String {
+        guard let model = config.models.first(where: { $0.id == modelId }) else { return modelId }
+        return config.provider(for: model.providerKey)?.name ?? model.providerKey
     }
 
     @discardableResult

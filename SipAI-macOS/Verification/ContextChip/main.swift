@@ -429,7 +429,10 @@ check("kimi's chip is refreshed mid-turn like codex's",
 check("the compacting state is never written into events",
       !runner.contains("kind: .compaction") )
 check("a compaction does not end the 'Sipping…' wait",
-      view.contains("case .systemInit, .compaction: continue"))
+      view.contains("WaitingRow.awaitsAgent(runner.events, compactionIsOutput: false)")
+        && WaitingRow.awaitsAgent([StreamEvent(kind: .userMessage(text: "go")),
+                                   StreamEvent(kind: .compaction(preTokens: 90_000, postTokens: 9_000))],
+                                  compactionIsOutput: false))
 check("the settings toggle names context usage",
       settings.contains("\"Show context usage\""))
 check("the FAQ no longer calls the chip a total",

@@ -13,8 +13,9 @@ struct RootChatsSection: View {
     @EnvironmentObject var chats: ChatManager
     @Environment(\.sipFontScale) private var fontScale
 
-    let searchText: String
     @Binding var expanded: Bool
+    /// The header ⋮'s Hide. The sidebar asks first, and owns the switch.
+    let hide: () -> Void
 
     /// Same cap, and the same reveal row, as an agent section's session
     /// groups — the two lists sit in one sidebar, so a column that stays
@@ -27,12 +28,13 @@ struct RootChatsSection: View {
                           comment: "Sidebar section header for chats not in any project"),
             isExpanded: $expanded,
             live: chats.hasChatInFlight(inProject: nil),
-            unread: chats.hasChatUnread(inProject: nil)
+            unread: chats.hasChatUnread(inProject: nil),
+            accessory: { SectionHideMenu(hide: hide) }
         ) {
             newChatRow
             // Replying first, then unread, then the rest — the agent
             // sections' order (`SidebarTier`), newest first within each.
-            let visible = chats.sidebarOrdered(filtered(chats.rootChats))
+            let visible = chats.sidebarOrdered(chats.rootChats)
             if visible.isEmpty {
                 emptyRow
             } else {
@@ -76,22 +78,14 @@ struct RootChatsSection: View {
 
     private var emptyRow: some View {
         HStack {
-            Text(searchText.isEmpty
-                 ? String(localized: "No chats yet.",
-                          comment: "Root Chats section: empty placeholder")
-                 : String(localized: "No matching chats.",
-                          comment: "Root Chats section: empty after filtering"))
+            Text("No chats yet.",
+                 comment: "Root Chats section: empty placeholder")
                 .font(.system(size: SipFont.sidebarHint(fontScale)))
                 .foregroundStyle(.secondary)
             Spacer()
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-    }
-
-    private func filtered(_ list: [StoredChat]) -> [StoredChat] {
-        guard !searchText.isEmpty else { return list }
-        return list.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
     }
 }
 
@@ -104,9 +98,10 @@ struct ProjectsSection: View {
     @EnvironmentObject var config: ConfigManager
     @Environment(\.sipFontScale) private var fontScale
 
-    let searchText: String
     @Binding var expanded: Bool
     @Binding var expandedProjects: Set<String>
+    /// The header ⋮'s Hide. The sidebar asks first, and owns the switch.
+    let hide: () -> Void
 
     /// Project being renamed inline (⋮ → Rename, or freshly created via
     /// the header's +). Slug-keyed; one at a time.
@@ -128,7 +123,8 @@ struct ProjectsSection: View {
                           comment: "Sidebar section header for chat groups"),
             isExpanded: $expanded,
             live: projects.projects.contains { chats.hasChatInFlight(inProject: $0.slug) },
-            unread: projects.projects.contains { chats.hasChatUnread(inProject: $0.slug) }
+            unread: projects.projects.contains { chats.hasChatUnread(inProject: $0.slug) },
+            accessory: { SectionHideMenu(hide: hide) }
         ) {
             newProjectRow
             if projects.projects.isEmpty {
@@ -212,7 +208,7 @@ struct ProjectsSection: View {
 
     @ViewBuilder
     private func projectRows(_ project: ProjectInfo) -> some View {
-        let projChats = chats.sidebarOrdered(filtered(chats.projectChats[project.slug] ?? []))
+        let projChats = chats.sidebarOrdered(chats.projectChats[project.slug] ?? [])
         let isProjectExpanded = expandedProjects.contains(project.slug)
 
         VStack(alignment: .leading, spacing: 2) {
@@ -237,11 +233,8 @@ struct ProjectsSection: View {
             if isProjectExpanded {
                 if projChats.isEmpty {
                     HStack {
-                        Text(searchText.isEmpty
-                             ? String(localized: "No chats in this group yet.",
-                                      comment: "Empty placeholder inside an expanded chat group")
-                             : String(localized: "No matching chats.",
-                                      comment: "Empty after filtering inside a chat group"))
+                        Text("No chats in this group yet.",
+                             comment: "Empty placeholder inside an expanded chat group")
                             .font(.system(size: SipFont.sidebarHint(fontScale)))
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -459,11 +452,6 @@ struct ProjectsSection: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-    }
-
-    private func filtered(_ list: [StoredChat]) -> [StoredChat] {
-        guard !searchText.isEmpty else { return list }
-        return list.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
     }
 }
 
@@ -851,6 +839,23 @@ struct DisclosureSection<Content: View, Accessory: View>: View {
             }
             .buttonStyle(.plain)
             accessory()
+        }
+    }
+}
+
+/// The ⋮ on the Notes, Chats and Chat groups headers, holding Hide. The
+/// section only asks: `LeftSidebar` confirms, saying where the switch to
+/// bring it back is (Settings → Display), and writes it — an alert hung
+/// on the section would leave with the section it hides.
+struct SectionHideMenu: View {
+    let hide: () -> Void
+
+    var body: some View {
+        RowEllipsisMenu {
+            Button(action: hide) {
+                Text("Hide",
+                     comment: "Menu item on the Notes, Chats and Chat groups section headers, and the button confirming it: takes the section off the sidebar")
+            }
         }
     }
 }

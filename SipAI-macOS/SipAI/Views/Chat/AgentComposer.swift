@@ -20,7 +20,7 @@ struct AgentComposer: View {
     /// Which CLI the open session belongs to — an
     /// `AgentManager.registry` key. Drives the per-agent option
     /// catalogs (see `isCodex`).
-    var agentKey: String = "claude_code"
+    var agentKey: String
     var sending: Bool
     /// External Claude Code process mid-turn on this session's JSONL.
     /// Send disabled, typing allowed.
@@ -43,18 +43,26 @@ struct AgentComposer: View {
     /// (`ClaudeFastModeReport`). Empty for the other agents. The switch
     /// is the request, this is the outcome, and the chip shows both.
     var fastModeReport = ClaudeFastModeReport()
+    /// What codex said about the faster speed the session's latest message
+    /// asked for (`CodexSpeedReport`) — the request is the switch, this is
+    /// the answer, as for claude above. Empty for the other agents.
+    var codexSpeedReport = CodexSpeedReport()
     /// The account claude runs on, when known — on a plan fast mode is
     /// paid from usage credits, on an API key at a higher rate. nil off
     /// claude.
     var claudeAccount: PlanAccountKind? = nil
+    /// The speed codex saved for this session's thread
+    /// (`CodexKeptSpeed`); nil while there is no session yet — a draft
+    /// before its first send. Off codex, never read.
+    var codexSessionSpeed: CodexKeptSpeed.Saved? = nil
 
-    /// Files staged for the next message — the chat page's mechanism,
-    /// offered while the mode chip is on Chat only, where the `+` and a
-    /// drop ATTACH instead of inserting paths (the agent has no tools to
-    /// read a path with). Owned by `AgentSessionView`, like the draft
-    /// text, and stashed with it. `onStageFiles` is the one door both
-    /// routes go through, so a drop refuses what the picker refuses.
-    var attachments: [ChatAttachment] = []
+    /// Files staged for the next message, drawn as the chat page's chips
+    /// in every mode: a path the agent reads itself, or under Chat only
+    /// the file's content (`AgentAttachment`). Owned by
+    /// `AgentSessionView`, like the draft text, and stashed with it.
+    /// `onStageFiles` is the one door the `+` and a drop go through, so a
+    /// drop refuses what the picker refuses.
+    var attachments: [AgentAttachment] = []
     var onStageFiles: (([URL]) -> Void)? = nil
     var onRemoveAttachment: ((UUID) -> Void)? = nil
     /// What the last attach refused or cut short — the chat page's
@@ -80,6 +88,16 @@ struct AgentComposer: View {
     /// become a scheduled task, so offering the control there was a
     /// dead end.
     var scheduleAvailable: Bool = true
+
+    /// The schedule set up for this new session. While `enabled`, the
+    /// send button creates a scheduled task from the input box's text
+    /// instead of running a live turn. Owned by `AgentSessionView` and
+    /// kept on `AppState` with the text, for the text's reason: the
+    /// router replaces the page on every detour to a chat, a note or
+    /// Settings, so a schedule held in this view (or in the popover,
+    /// whose state goes each time it closes) would be gone when the user
+    /// came back.
+    @Binding var scheduleDraft: ScheduleDraft
 
     /// Set when the open session is a run of a scheduled task: the
     /// task's name and when this run happened. Rendered as a quiet
@@ -107,6 +125,18 @@ struct AgentComposer: View {
     /// move under the pointer.
     var canFind: Bool = true
 
+    /// The skills chosen for this session (the robot chip beside "+").
+    /// nil hides the chip — an agent whose headless turn cannot load a
+    /// skill by name, or a context with no session to load one into.
+    var skillPicks: [String]? = nil
+    var onSkillPicksChange: (([String]) -> Void)? = nil
+    /// Lower-cased names of the chosen skills the conversation holds
+    /// now. Asked when the chip opens, never per render: it reads the
+    /// transcript and the live buffer.
+    var skillHeld: (() -> Set<String>)? = nil
+    /// Opens Settings → Agent Skills, from the picker's empty state.
+    var onOpenSkillSettings: (() -> Void)? = nil
+
     /// Tokens of context on the newest API call — the input side,
     /// cached prefix included. 0 = nothing recorded yet (chip hidden).
     var contextTokens: Int
@@ -127,7 +157,16 @@ struct AgentComposer: View {
     /// turn costs one small view redraw per second instead of a
     /// re-render of this whole column — the same reason
     /// `AgentSessionView` does not observe the runner at all.
+    ///
+    /// Already moved later by every wait on a card the turn has
+    /// finished, so counting from it counts the turn's working time.
     var turnStartedAt: Date? = nil
+
+    /// When the running turn began waiting on the user — a question, a
+    /// plan or a permission card — or nil while it works. The clock holds
+    /// still at this instant until the card is answered (`AgentRunner
+    /// .userWait`).
+    var turnPausedAt: Date? = nil
 
     /// Seconds the latest finished turn took — the value the chip rests
     /// on. Either the same clock read at claude's `result` event for a
@@ -138,6 +177,20 @@ struct AgentComposer: View {
 
     var onSend: () -> Void
     var onStop: () -> Void
+
+    /// The messages sent while the turn runs (`HeldMessage`), stuck to the
+    /// top of the box; nil hides the strip. The queue is observed by the
+    /// strip alone, so this column does not redraw on it.
+    var held: HeldMessageQueue? = nil
+    var onSteerHeld: ((UUID) -> Void)? = nil
+    var onSendHeld: ((UUID) -> Void)? = nil
+    var onCancelHeld: ((UUID) -> Void)? = nil
+
+    /// Codex's review picker, shown over the box after `/review` (the folder
+    /// it reviews in); nil hides it.
+    var reviewPickerFolder: URL? = nil
+    var onReviewChosen: ((CodexReviewTarget, String) -> Void)? = nil
+    var onReviewCancelled: (() -> Void)? = nil
     /// Fired after a scheduled task is created, with its directory
     /// name, so the sidebar lists it at once and then rescans.
     var onScheduleCreated: (String) -> Void
@@ -146,10 +199,11 @@ struct AgentComposer: View {
     @ObservedObject private var caps = ClaudeCapabilities.shared
     @ObservedObject private var codexCaps = CodexCatalog.shared
     @ObservedObject private var kimiCaps = KimiCatalog.shared
+    @ObservedObject private var skillCatalog = SkillCatalog.shared
     /// The installed versions the Chat only gate reads (`ChatOnlyGate`).
     @ObservedObject private var cliUpdates = AgentCLIUpdateMonitor.shared
-    /// A file drag over the input card while Chat only is on, for the
-    /// border tint the chat card draws for the same thing.
+    /// A file drag over the input card, for the border tint the chat
+    /// card draws for the same thing.
     @State private var dropTargeted = false
     /// The TIER scale: this composer is a sibling of the transcript,
     /// outside its content re-scope, so every size here is the
@@ -162,12 +216,9 @@ struct AgentComposer: View {
     @State private var showingModelPopover = false
     @State private var showingEffortPopover = false
     @State private var showingSchedulePopover = false
-    /// Armed schedule settings. While `enabled`, the send button
-    /// creates a scheduled task from the input box's text instead of
-    /// running a live turn. Lives here (not in the popover) so the
-    /// fields survive the popover's transient dismissal while the user
-    /// types the prompt.
-    @State private var scheduleDraft = ScheduleDraft()
+    @State private var showingSkillPopover = false
+    /// What the conversation held when the chip opened.
+    @State private var skillHeldAtOpen: Set<String> = []
     /// Validation / creation failure shown inside the popover.
     @State private var scheduleError: String? = nil
     @State private var creatingTask = false
@@ -203,10 +254,32 @@ struct AgentComposer: View {
         options.chatOnly && !ChatOnlyGate.settled(agentKey: agentKey)
     }
 
+    /// A message may go now — or, while this session's own turn runs, be
+    /// held above the box until it is steered in or the turn ends. Never
+    /// while another process runs a turn on the session.
     private var canSend: Bool {
         // An attached file is a message on its own, as on the chat page.
-        (hasText || (chatOnlyActive && !attachments.isEmpty))
-            && !sending && !externalBusy && !chatOnlyPending
+        (hasText || !attachments.isEmpty)
+            && !externalBusy && !chatOnlyPending && askingHold == nil
+            && !shellCommandWaits
+            && !(sending && held == nil)
+    }
+
+    // MARK: Asking modes
+
+    /// The modes in which this composer's agent can ask the user mid-turn,
+    /// offered right now (`AskingModeGate`): none until the installed CLI
+    /// has been read and found to run them.
+    private var askingModesOffered: [String] {
+        AskingModeGate.offered(agentKey: agentKey) ?? []
+    }
+
+    /// A saved asking pick the send must hold: its gate not read yet, or
+    /// not met. Held, never run as a mode that does not ask — Ask When
+    /// Needed must not turn into Never Ask without a word.
+    private var askingHold: AskingModeGate.Hold? {
+        AskingModeGate.hold(agentKey: agentKey, mode: options.permissionMode,
+                            chatOnly: options.chatOnly)
     }
 
     var body: some View {
@@ -227,7 +300,7 @@ struct AgentComposer: View {
             if scheduleDraft.enabled && scheduleAvailable {
                 armedScheduleBanner
             }
-            if let notice = attachmentNotice, chatOnlyActive {
+            if let notice = attachmentNotice {
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .sipFont(11)
@@ -274,6 +347,47 @@ struct AgentComposer: View {
                     kimiCaps.ensureLoaded()
                 }
             }
+            if let hold = askingHold, let mode = options.permissionMode {
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Image(systemName: hold == .pending ? "hourglass" : "exclamationmark.triangle.fill")
+                        .sipFont(11)
+                        .foregroundStyle(.orange)
+                    // String expressions: the agent label is user-set.
+                    Text(hold == .pending
+                         ? String(localized: "Checking whether \(agentName) offers \(AgentAskingMode.title(for: mode)). Send waits for the answer — pick another mode to send now.",
+                                  comment: "Above the agent composer: a saved pick of a mode in which the agent can ask the user is held until the installed CLI's support for it has been read; placeholders are the agent's name and the mode's name")
+                         : String(localized: "\(AgentAskingMode.title(for: mode)) isn’t available in the installed \(agentName). Pick another mode to send.",
+                                  comment: "Above the agent composer: a saved pick of a mode in which the agent can ask the user cannot run with the installed CLI; placeholders are the mode's name and the agent's name"))
+                        .sipFont(12)
+                        .foregroundColor(SipDesign.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .transition(.opacity)
+                .onAppear {
+                    codexCaps.ensureLoaded()
+                    kimiCaps.ensureLoaded()
+                    if isCodex { codexCaps.ensureCollaborationModesLoaded() }
+                }
+            }
+            if let shell = shellCommand {
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Image(systemName: shellHintIcon(shell))
+                        .sipFont(11)
+                        .foregroundStyle(shell == .runs ? SipDesign.blue : .orange)
+                    // String expression: the agent label is user-set.
+                    Text(shellHintText(shell))
+                        .sipFont(12)
+                        .foregroundColor(SipDesign.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .transition(.opacity)
+                // The installed tool not read yet: asked again here.
+                .onAppear {
+                    guard shell == .pending else { return }
+                    caps.ensureLoaded()
+                    Task { await AgentCLIUpdateMonitor.shared.refreshLocal() }
+                }
+            }
             if let hint = slashCommandHint {
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
                     Image(systemName: "info.circle.fill")
@@ -289,6 +403,17 @@ struct AgentComposer: View {
                 }
                 .transition(.opacity)
             }
+            if let held {
+                HeldMessageStrip(queue: held, agentName: agentName, externalBusy: externalBusy,
+                                 onSteer: { onSteerHeld?($0) },
+                                 onSend: { onSendHeld?($0) },
+                                 onCancel: { onCancelHeld?($0) })
+            }
+            if let reviewFolder = reviewPickerFolder {
+                CodexReviewPicker(folder: reviewFolder,
+                                  onChoose: { onReviewChosen?($0, $1) },
+                                  onCancel: { onReviewCancelled?() })
+            }
             inputCard
             controlRow
         }
@@ -297,13 +422,16 @@ struct AgentComposer: View {
             codexCaps.ensureLoaded()
             kimiCaps.ensureLoaded()
             refreshConfiguredDefault()
-            if !isCodex && !isKimi { caps.refreshUsageCreditsBlock() }
-            if isCodex { codexCaps.refreshSpeedSettings(forFolder: codexFolder) }
+            if isClaude { caps.refreshUsageCreditsBlock() }
+            if isCodex {
+                codexCaps.refreshSpeedSettings(forFolder: codexFolder)
+                codexCaps.ensureCollaborationModesLoaded()
+            }
             // "Other models" is anchored on what each alias resolves
             // to NOW; every appearance re-derives it from the current
             // inputs (cheap, idempotent) rather than trusting a
             // section computed at some earlier harvest.
-            if !isCodex && !isKimi {
+            if isClaude {
                 ClaudeModelCatalog.refreshOtherModels(config: config)
             }
         }
@@ -311,19 +439,51 @@ struct AgentComposer: View {
             refreshConfiguredDefault()
             if isCodex { codexCaps.refreshSpeedSettings(forFolder: codexFolder) }
         }
-        .onChange(of: scheduleAvailable) { _, available in
-            // Disarm when the composer moves somewhere scheduling
-            // doesn't exist (draft → existing migration, or switching
-            // to an existing session). The armed @State otherwise
-            // survives the transition and hijacks Send with no visible
-            // banner, button, or popover anchor to disarm it.
-            if !available { scheduleDraft = ScheduleDraft() }
-        }
         .animation(.easeInOut(duration: 0.15), value: hasText)
         .animation(.easeInOut(duration: 0.15), value: sending)
         .animation(.easeInOut(duration: 0.15), value: externalBusy)
         .animation(.easeInOut(duration: 0.2), value: scheduleNotice)
         .animation(.easeInOut(duration: 0.15), value: slashCommandHint)
+        .animation(.easeInOut(duration: 0.15), value: shellCommand)
+    }
+
+    // MARK: Shell command hint
+
+    /// A draft that starts with `!` is a shell command in each agent's
+    /// terminal (`ShellCommands`), whose box switches into a shell mode for
+    /// it. Said here before Send, so a sentence that happens to start with
+    /// "!" is never run by surprise: run in the user's shell where SipAI can
+    /// run it the agent's way (`ShellCommandRoute`), waiting while the
+    /// installed tool is unread or too old, sent as an ordinary message
+    /// where the agent offers no route. A message with files staged is a
+    /// message.
+    private var shellCommand: ShellCommandVerdict? {
+        guard attachments.isEmpty, ShellCommandInput.command(in: draft) != nil else { return nil }
+        return ShellCommandRoute.verdict(agentKey: agentKey)
+    }
+
+    /// A `!` command the installed tool cannot run yet waits — never sent
+    /// to the model as words.
+    private var shellCommandWaits: Bool {
+        shellCommand == .pending || shellCommand == .needsNewer
+    }
+
+    private func shellHintIcon(_ verdict: ShellCommandVerdict) -> String {
+        switch verdict {
+        case .runs: return "terminal"
+        case .pending: return "hourglass"
+        case .needsNewer: return "exclamationmark.triangle.fill"
+        case .noRoute: return "info.circle.fill"
+        }
+    }
+
+    private func shellHintText(_ verdict: ShellCommandVerdict) -> String {
+        switch verdict {
+        case .runs: return ShellCommandWords.runsInShell(agentName: agentName)
+        case .pending: return ShellCommandWords.checking(agentName: agentName)
+        case .needsNewer: return ShellCommandWords.needsNewer(agentName: agentName)
+        case .noRoute: return ShellCommandWords.sentAsMessage(agentName: agentName)
+        }
     }
 
     // MARK: Slash-command hint
@@ -338,7 +498,20 @@ struct AgentComposer: View {
     /// a slash, and the sentence reads correctly for that case too —
     /// which is what makes a non-blocking hint the right shape here.
     private var slashCommandHint: String? {
-        guard AgentSlashCommands.resolvesLocally(agentKey: agentKey) == false,
+        // Codex's `/compact` (on a session) and `/review` (outside Chat
+        // only) run as codex's own commands here, as in its terminal.
+        if isCodex, frontEnd == .offered, attachments.isEmpty,
+           let command = CodexCommand.parse(draft),
+           command == .review ? !chatOnlyActive : !folderEditable {
+            return nil
+        }
+        // Whether the session is new decides only which of kimi's two
+        // headless front ends a Chat only send takes; the verdict is the
+        // same for both.
+        let driver = AgentTurnDriver.pick(agentKey: agentKey, options: options,
+                                          isNewSession: false,
+                                          frontEndOffered: frontEnd == .offered)
+        guard AgentSlashCommands.resolvesLocally(agentKey: agentKey, driver: driver) == false,
               AgentSlashCommands.leadingCommand(in: draft) != nil
         else { return nil }
         return String(
@@ -356,10 +529,11 @@ struct AgentComposer: View {
 
     private var inputCard: some View {
         VStack(spacing: 0) {
-            if chatOnlyActive, !attachments.isEmpty, let onRemoveAttachment {
+            if !attachments.isEmpty, let onRemoveAttachment {
                 // The chat page's strip: each chip is the receipt for an
                 // attach and carries the only control that removes it.
-                AttachmentChipRow(attachments: attachments, onRemove: onRemoveAttachment,
+                AttachmentChipRow(items: attachments.map { $0.chipItem(agentName: agentName, chatOnly: chatOnlyActive) },
+                                  onRemove: onRemoveAttachment,
                                   frameRatio: SipFont.ratio(fontScale))
                     .padding(.horizontal, 10)
                     .padding(.top, 8)
@@ -379,11 +553,11 @@ struct AgentComposer: View {
                         measuredHeight: $inputHeight,
                         onSubmit: { if canSend { handleSendTapped() } },
                         spellChecking: config.display.spellCheck,
-                        // Chat only: a dropped file ATTACHES, through the
-                        // same door as the +; every other row keeps
-                        // AppKit's own answer, the path typed in.
-                        onDropFiles: chatOnlyActive ? onStageFiles : nil,
-                        onDropTargeted: chatOnlyActive ? { dropTargeted = $0 } : nil,
+                        // A dropped file ATTACHES, through the same door
+                        // as the +. Left to AppKit, the text view would
+                        // type the file's path into the message instead.
+                        onDropFiles: onStageFiles,
+                        onDropTargeted: { dropTargeted = $0 },
                         fontSize: inputFontSize,
                         lineSpacing: inputLineSpacing,
                         sessionIdTokens: sessionIdTokens
@@ -406,17 +580,14 @@ struct AgentComposer: View {
                 .fill(SipDesign.surface)
                 .overlay(
                     RoundedRectangle(cornerRadius: 12)
-                        .stroke(dropTargeted && chatOnlyActive ? SipDesign.blue : SipDesign.borderLight,
-                                lineWidth: dropTargeted && chatOnlyActive ? 2 : 1)
+                        .stroke(dropTargeted ? SipDesign.blue : SipDesign.borderLight,
+                                lineWidth: dropTargeted ? 2 : 1)
                 )
         )
         // A drop on the card OUTSIDE the text view (the strip, the
-        // padding) — the text view forwards its own. Chat only alone:
-        // everywhere else a dropped path is meant to be typed in, and
-        // a card-level target would swallow the drop before the text
-        // view saw it.
-        .onDrop(of: [.fileURL], isTargeted: chatOnlyActive ? $dropTargeted : .constant(false)) { providers in
-            guard chatOnlyActive, let onStageFiles else { return false }
+        // padding) — the text view forwards its own.
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            guard let onStageFiles else { return false }
             // Collected into ONE batch before staging — per-provider
             // delivery stages a multi-file drop as several batches, and
             // each batch's refusals would overwrite the last one's.
@@ -451,18 +622,37 @@ struct AgentComposer: View {
             // can kill; a turn running in another terminal keeps the
             // shape but disabled — it stops where it runs.
             let stoppable = sending || externalStoppable
-            Button(action: onStop) {
-                Image(systemName: "stop.circle.fill")
-                    .sipFont(22)
-                    .foregroundColor(SipDesign.textHint)
-                    .opacity(stoppable ? 1 : 0.4)
+            HStack(spacing: 4) {
+                // Our own turn: what is typed now is held above the box,
+                // to steer into the turn or send when it ends.
+                if sending, canSend {
+                    Button(action: handleSendTapped) {
+                        Image(systemName: scheduleArmed
+                              ? "calendar.circle.fill" : "arrow.up.circle.fill")
+                            .sipFont(22)
+                            .foregroundColor(creatingTask ? SipDesign.textHint : SipDesign.blue)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(creatingTask)
+                    .help(scheduleArmed
+                          ? String(localized: "Create the scheduled task from this prompt",
+                                   comment: "Composer send button tooltip while scheduling is armed")
+                          : String(localized: "Send — it waits above the box until you steer it in or this turn ends",
+                                   comment: "Composer send button tooltip while the agent is working: the message is held, to be steered into the turn or sent when it ends"))
+                }
+                Button(action: onStop) {
+                    Image(systemName: "stop.circle.fill")
+                        .sipFont(22)
+                        .foregroundColor(SipDesign.textHint)
+                        .opacity(stoppable ? 1 : 0.4)
+                }
+                .buttonStyle(.plain)
+                .disabled(!stoppable)
+                .help(stoppable
+                      ? String(localized: "Stop", comment: "Composer stop button tooltip")
+                      : String(localized: "Running in another terminal — stop it from there",
+                               comment: "Composer stop button tooltip when the turn belongs to another terminal"))
             }
-            .buttonStyle(.plain)
-            .disabled(!stoppable)
-            .help(stoppable
-                  ? String(localized: "Stop", comment: "Composer stop button tooltip")
-                  : String(localized: "Running in another terminal — stop it from there",
-                           comment: "Composer stop button tooltip when the turn belongs to another terminal"))
         } else {
             Button(action: handleSendTapped) {
                 Image(systemName: scheduleArmed
@@ -531,12 +721,14 @@ struct AgentComposer: View {
                     scheduleButton
                 }
             }
-            HoverHighlight(hint: chatOnlyActive
-                           ? String(localized: "Attach file",
-                                    comment: "Instant hover hint for the add-files button in Chat only")
-                           : String(localized: "Add file",
-                                    comment: "Instant hover hint for the add-files button")) {
+            HoverHighlight(hint: String(localized: "Attach file",
+                                        comment: "Instant hover hint for the add-files button")) {
                 addFilesButton
+            }
+            if let picks = skillPicks {
+                HoverHighlight(hint: skillChipHint(picks)) {
+                    skillChip(picks)
+                }
             }
             if onGenerateNote != nil && config.display.showNoteAgent {
                 HoverHighlight(hint: String(localized: "Note",
@@ -565,20 +757,29 @@ struct AgentComposer: View {
                     effortButton
                 }
             }
-            if isKimi && !chatOnlyOffered {
+            if isKimi && frontEnd == .unavailable && !chatOnlyOffered
+                && askingHold == nil && !chatOnlyPending {
                 // A statement, not a choice: `highlight: false` so it
                 // doesn't read as a button, and the hint says WHY there
-                // is nothing to pick. With Chat only offered the slot is
-                // a two-row picker instead (Auto-approve · Chat only).
+                // is nothing to pick — a kimi with no front end runs
+                // headless whatever is picked, which is Never Ask. With
+                // Chat only or the front end offered the slot is a picker
+                // instead — and while a saved pick HOLDS the send too (its
+                // gate unread, or unmet): the line above says "pick another
+                // mode", and the picker is that way out. A readout there
+                // would leave the session unsendable.
                 HoverHighlight(
-                    hint: KimiCapabilities.autoApproveHint(agentName: agentName),
+                    hint: KimiCapabilities.neverAskHint(agentName: agentName),
                     highlight: false
                 ) {
-                    autoApproveChip
+                    neverAskChip
                 }
             } else {
                 HoverHighlight(hint: chatOnlyActive
                                ? chatOnlyHint
+                               : nonStopInForce
+                               ? String(localized: "Mode · Non-stop is on",
+                                        comment: "Instant hover hint for the permission-mode chip while the Non-stop switch is on: the agent is never stopped to ask the user a question")
                                : String(localized: "Mode",
                                         comment: "Instant hover hint for the permission-mode chip")) {
                     modeChip
@@ -599,6 +800,7 @@ struct AgentComposer: View {
                 HoverHighlight(hint: turnClockHint, highlight: false,
                                hintAlignment: .trailing) {
                     TurnClockChip(startedAt: turnStartedAt,
+                                  pausedAt: turnPausedAt,
                                   finished: lastTurnDuration)
                 }
             }
@@ -643,10 +845,10 @@ struct AgentComposer: View {
             comment: "Accessibility label of the context chip's help glyph; placeholder is the window as a compact token count")
         return { collapse in
             AnyView(HintHelpGlyph(accessibilityLabel: label) {
-                // The bubble is folded BEFORE the sheet opens: a view
-                // under a sheet gets no hover-exit, so left alone the
-                // hint would still be floating there when the sheet
-                // closed.
+                // The bubble is folded BEFORE Help opens: a view that is
+                // covered rather than replaced gets no hover-exit, so
+                // left alone the hint could still be floating over the
+                // chip on the way back.
                 collapse()
                 HelpTopic.codexContextWindow.open()
             })
@@ -689,6 +891,10 @@ struct AgentComposer: View {
 
     private var turnClockHint: String {
         if let started = turnStartedAt {
+            if let paused = turnPausedAt {
+                return String(localized: "Paused while \(agentName) waits for you — \(Self.durationText(paused.timeIntervalSince(started))) so far",
+                              comment: "Instant hover hint on the composer's turn clock while the agent's turn waits on the user — a question to answer, a plan to approve or a permission to give; placeholders are the agent label and the working time so far")
+            }
             return String(localized: "This turn has been running for \(Self.durationText(Date().timeIntervalSince(started)))",
                           comment: "Instant hover hint on the composer's turn clock while a turn is running")
         }
@@ -712,6 +918,11 @@ struct AgentComposer: View {
     /// choices that cannot be sent. See `AgentLaunchOptions.kimiFlags`.
     private var isKimi: Bool { agentKey == "kimi" }
 
+    /// True when this composer drives a Claude Code session. Named, never
+    /// "not codex and not kimi": an agent this app has no code for would
+    /// otherwise be offered claude's modes, models, efforts and fast mode.
+    private var isClaude: Bool { agentKey == "claude_code" }
+
     /// The composer's agent under whatever name the user gave it in
     /// Settings. Every user-visible sentence names the agent through
     /// this — a hardcoded "Claude Code" would name the wrong agent on
@@ -723,16 +934,16 @@ struct AgentComposer: View {
     }
 
     /// The chip's title: Chat only where it is in force, else the
-    /// agent's mode, else Default (kimi: its auto-approve readout).
+    /// agent's mode, else Default (`AgentMenus.modeTitle`).
     private var selectedModeTitle: String {
-        if chatOnlyActive { return Self.chatOnlyTitle }
-        if isKimi { return KimiCapabilities.autoApproveTitle }
-        if let name = options.permissionMode {
-            return isCodex ? CodexCapabilities.title(for: name)
-                           : AgentPermissionMode(name: name).title
-        }
-        return String(localized: "Default",
-                      comment: "Mode chip label when no permission mode override is set")
+        AgentMenus.modeTitle(agentKey: agentKey, mode: options.permissionMode,
+                             chatOnly: chatOnlyActive, frontEnd: frontEnd)
+    }
+
+    /// Whether the installed CLI has its own front end — what Default runs
+    /// through on codex and kimi.
+    private var frontEnd: AgentAskingMode.Availability {
+        AskingModeGate.frontEnd(agentKey: agentKey)
     }
 
     /// The row's name — one key, used by the chip, the rows and the
@@ -742,49 +953,13 @@ struct AgentComposer: View {
                comment: "Mode chip row: a turn with no file or command tools, only web lookups, drawing on the user's plan")
     }
 
-    /// The Chat only row, offered first among the overrides — the same
-    /// row on every agent, its subtitle naming the agent through the
-    /// label.
-    private var chatOnlyRow: ComposerOptionRow {
-        ComposerOptionRow(
-            value: ChatOnlyMode.rowValue,
-            title: Self.chatOnlyTitle,
-            subtitle: String(localized: "\(agentName) can look things up on the web but can't read or change files. Attach files with +.",
-                             comment: "Hint under the Chat only mode row; placeholder is the agent label"))
-    }
-
+    /// The mode menu's rows (`AgentMenus.modeRows`): Default, Chat only,
+    /// the agent's own modes.
     private var modeRows: [ComposerOptionRow] {
-        let defaultRow = ComposerOptionRow(
-            value: nil,
-            title: String(localized: "Default",
-                          comment: "Permission-mode menu row — no override"),
-            subtitle: isCodex
-                ? String(localized: "\(agentName) decides, using your codex config",
-                         comment: "Hint for the no-override sandbox row on a codex session; placeholder is the agent label")
-                : String(localized: "\(agentName) decides; approvals appear here",
-                         comment: "Hint for the no-override permission mode row; placeholder is the agent label"))
-        let overrides = chatOnlyOffered ? [chatOnlyRow] : []
-        if isKimi {
-            // Kimi's own mode cannot be chosen (`--prompt` refuses one),
-            // so its list is the auto-approve readout — now a row — and
-            // Chat only.
-            let autoRow = ComposerOptionRow(
-                value: nil,
-                title: KimiCapabilities.autoApproveTitle,
-                subtitle: String(localized: "\(agentName) approves its own tool calls on a headless run",
-                                 comment: "Hint under the kimi Auto-approve mode row; placeholder is the agent label"))
-            return [autoRow] + overrides
-        }
-        if isCodex {
-            return [defaultRow] + overrides + CodexCapabilities.modePresets.map {
-                ComposerOptionRow(value: $0.value,
-                                  title: CodexCapabilities.title(for: $0.value),
-                                  subtitle: $0.hint)
-            }
-        }
-        return [defaultRow] + overrides + caps.permissionModes.map {
-            ComposerOptionRow(value: $0.name, title: $0.title, subtitle: $0.hint)
-        }
+        AgentMenus.modeRows(agentKey: agentKey, agentName: agentName,
+                            chatOnlyOffered: chatOnlyOffered,
+                            askingModesOffered: askingModesOffered,
+                            claudeModes: caps.permissionModes, frontEnd: frontEnd)
     }
 
     /// No resting background — flat like the other controls, with the
@@ -795,32 +970,110 @@ struct AgentComposer: View {
         Button {
             showingModePopover = true
         } label: {
-            Text(selectedModeTitle)
-                .sipFont(11, weight: .semibold)
-                .foregroundColor(options.permissionMode == nil && !chatOnlyActive
-                                 ? SipDesign.textSecondary : SipDesign.blue)
-                .padding(.vertical, 3)
-                .padding(.horizontal, 5)
-                .contentShape(Rectangle())
+            HStack(spacing: 3) {
+                Text(selectedModeTitle)
+                    .sipFont(11, weight: .semibold)
+                    .foregroundColor(options.permissionMode == nil && !chatOnlyActive
+                                     ? SipDesign.textSecondary : SipDesign.blue)
+                // Non-stop changes what a turn does without changing the
+                // mode, so the chip carries a mark of its own — blue on any
+                // mode, since it is always a choice the user made.
+                if nonStopInForce {
+                    Image(systemName: "forward.fill")
+                        .sipFont(8)
+                        .foregroundColor(SipDesign.blue)
+                }
+            }
+            .padding(.vertical, 3)
+            .padding(.horizontal, 5)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .popover(isPresented: $showingModePopover, arrowEdge: .bottom) {
             ComposerOptionList(rows: modeRows,
                                selected: chatOnlyActive
-                                   ? ChatOnlyMode.rowValue : options.permissionMode) { value in
+                                   ? ChatOnlyMode.rowValue : options.permissionMode,
+                               onPick: { value in
                 // One writer for both fields — see `ChatOnlyMode.select`.
                 ChatOnlyMode.select(value, into: &options)
                 showingModePopover = false
-            }
+            }, footer: { nonStopFooter })
         }
     }
 
-    /// The mode chip's Kimi stand-in while Chat only is not offered:
-    /// the same slot, same type size, but a readout. Secondary colour
-    /// like an unset chip — nothing has been overridden here, because
-    /// nothing can be.
-    private var autoApproveChip: some View {
-        Text(KimiCapabilities.autoApproveTitle)
+    // MARK: Non-stop
+
+    /// The switch's name — one key, used by the switch and the chip's hint.
+    static var nonStopTitle: String {
+        String(localized: "Non-stop",
+               comment: "Mode menu switch: the agent is never stopped to ask the user a question mid-turn; it chooses for itself and carries on")
+    }
+
+    /// Whether a turn in the chip's mode can ask the user a question:
+    /// claude in any mode but Chat only, codex and kimi only in the modes
+    /// that run through their own protocols (`AgentAskingMode`).
+    private var modeAsksQuestions: Bool {
+        AgentAskingMode.asksQuestions(agentKey: agentKey, mode: options.permissionMode,
+                                      chatOnly: chatOnlyActive,
+                                      frontEndOffered: frontEnd != .unavailable,
+                                      kimiDefaultPermission: kimiCaps.defaultPermissionMode)
+    }
+
+    /// Non-stop decides this composer's next send: a turn that can ask.
+    private var nonStopInForce: Bool {
+        options.nonStop && modeAsksQuestions
+    }
+
+    /// Whether the switch is drawn at all: claude always; codex and kimi
+    /// once a mode in which they ask questions is on offer — codex's
+    /// Default among them, where it runs through codex's front end.
+    private var nonStopOffered: Bool {
+        if isClaude { return true }
+        if isCodex && frontEnd == .offered { return true }
+        return askingModesOffered.contains {
+            AgentAskingMode.asksQuestions(agentKey: agentKey, mode: $0, chatOnly: false)
+        }
+    }
+
+    /// Under the mode rows: whether a question the agent asks mid-turn is
+    /// shown here for the user to answer (off), or answered at once (on) —
+    /// claude told to choose for itself and carry on, codex and kimi given
+    /// their own "not answered". In a mode that cannot ask, the switch is
+    /// shown off and says so. A flip lands on the turn in flight too
+    /// (`AgentRunner.setNonStop`).
+    @ViewBuilder
+    private var nonStopFooter: some View {
+        if nonStopOffered {
+            menuSwitch(
+                title: Self.nonStopTitle,
+                // Off where it decides nothing: drawn on and greyed, it
+                // would read as a turn that will not stop to ask in a mode
+                // that never asks anyway. The pick itself is kept.
+                isOn: Binding(get: { options.nonStop && modeAsksQuestions },
+                              set: { options.nonStop = $0 }),
+                enabled: modeAsksQuestions,
+                lines: [nonStopLine])
+        }
+    }
+
+    private var nonStopLine: String {
+        if chatOnlyActive {
+            return String(localized: "Chat only turns never stop to ask.",
+                          comment: "Mode menu Non-stop switch subtitle while Chat only is picked: such a turn cannot ask the user a question")
+        }
+        if !modeAsksQuestions {
+            return String(localized: "\(agentName) never stops to ask questions in this mode.",
+                          comment: "Mode menu Non-stop switch subtitle while the picked mode is one in which the agent cannot ask the user a question; placeholder is the agent label")
+        }
+        return AskingModeGate.nonStopLine(agentName: agentName)
+    }
+
+    /// The mode chip's Kimi stand-in where the installed kimi can run
+    /// nothing but its headless Never Ask: the same slot, same type size,
+    /// but a readout. Secondary colour like an unset chip — nothing has
+    /// been overridden here, because nothing can be.
+    private var neverAskChip: some View {
+        Text(KimiCapabilities.neverAskTitle)
             .sipFont(11, weight: .semibold)
             .foregroundColor(SipDesign.textSecondary)
             .padding(.vertical, 3)
@@ -965,31 +1218,30 @@ struct AgentComposer: View {
 
     // MARK: Schedule
 
-    /// The mode a scheduled (unattended) run will use: the chip's
-    /// selection, or bypassPermissions when the chip is on Default —
-    /// claude's interactive default would stall a cron run on its
-    /// first approval.
-    private var effectiveScheduleMode: String {
-        // Chat only never reaches a task: it is not a permission mode,
-        // and `options.permissionMode` is nil while it is on, so a task
-        // scheduled from a Chat only composer gets the agent's
-        // unattended default below — an agent task, with tools.
-        // Kimi writes NO mode into the task file. There is no unattended
-        // default to pick because there is no attended one either — its
-        // headless runs already approve every tool call, and any value
-        // written here would be a flag its CLI refuses to start with.
-        // An empty string is dropped by `ScheduledTaskDefinition.write`.
-        if isKimi { return "" }
-        return options.permissionMode
-            ?? (isCodex ? CodexCapabilities.unattendedDefaultMode
-                        : "bypassPermissions")
+    /// The mode a task scheduled from here runs in: the chip's, exactly —
+    /// Default stays Default, an asking mode stays one, Chat only is
+    /// carried as Chat only (`ScheduledTaskCreator.Request.chatOnly`). A
+    /// run does what its task says (`AgentLaunchOptions.scheduledRun`).
+    /// Spelled as the task's file spells it (`AgentAskingMode.taskFileMode`):
+    /// kimi's Default is written out, and a kimi whose one row is Never Ask
+    /// writes Never Ask.
+    private var effectiveScheduleMode: String? {
+        chatOnlyActive ? nil
+            : AgentAskingMode.taskFileMode(agentKey: agentKey, mode: options.permissionMode,
+                                           frontEnd: frontEnd)
     }
 
-    /// Chip label for the mode an unattended run would use.
+    /// Whether a task scheduled from here is Non-stop: the switch, where
+    /// the mode can ask at all.
+    private var scheduleNonStop: Bool { nonStopInForce }
+
+    /// The mode a task scheduled from here runs in, as the chip names it —
+    /// with Non-stop beside it when it is on.
     private var effectiveScheduleModeTitle: String {
-        if isKimi { return KimiCapabilities.autoApproveTitle }
-        return isCodex ? CodexCapabilities.title(for: effectiveScheduleMode)
-                       : AgentPermissionMode(name: effectiveScheduleMode).title
+        scheduleNonStop
+            ? String(localized: "\(selectedModeTitle), Non-stop",
+                     comment: "Schedule popover: the mode the task's runs use, with the Non-stop switch on; placeholder is the mode's name")
+            : selectedModeTitle
     }
 
     private var scheduleButton: some View {
@@ -1046,6 +1298,7 @@ struct AgentComposer: View {
                 Text(hasText
                      ? String(localized: "Send creates scheduled task “\(scheduleDraft.displayName)” in \(scheduleFolderLabel) — \(scheduleDraft.summary)",
                               comment: "Banner above the input while scheduling is armed and a prompt is typed")
+                       + scheduleSkillsSuffix
                      : String(localized: "Scheduling armed — type the task prompt below, then send",
                               comment: "Banner above the input while scheduling is armed and the input is empty"))
                     .sipFont(12)
@@ -1063,6 +1316,16 @@ struct AgentComposer: View {
         .transition(.opacity)
     }
 
+    /// The skills a task scheduled from here loads on every run: the
+    /// chip's, carried like the model and effort.
+    private var taskSkills: [String] { chatOnlyActive ? [] : (skillPicks ?? []) }
+
+    private var scheduleSkillsSuffix: String {
+        guard !taskSkills.isEmpty else { return "" }
+        return " · " + String(localized: "each run loads \(taskSkills.joined(separator: ", "))",
+                              comment: "Armed-schedule banner: the skills the new task's runs load; placeholder lists them")
+    }
+
     /// Tilde path of the folder the task will run in — the value that
     /// actually goes into the task's `cwd:`, so the banner and the file
     /// can never disagree.
@@ -1075,7 +1338,18 @@ struct AgentComposer: View {
     /// clear the input like a normal send.
     private func createScheduledTask() {
         guard !creatingTask else { return }
-        let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A task's prompt is its file's text. A Chat only run cannot read a
+        // file off disk, so a task scheduled over an attachment would run
+        // without it — said here, where the files can still be taken off
+        // or pasted in. Every other row's run reads the file itself, so
+        // its path goes into the prompt (`AgentAttachment.taskPrompt`).
+        if chatOnlyActive, !attachments.isEmpty {
+            scheduleError = String(localized: "A scheduled task can’t carry attached files. Remove them, or put what the task needs into the message.",
+                                   comment: "Schedule validation: the Chat only composer has files attached, which a scheduled task's prompt cannot hold")
+            showingSchedulePopover = true
+            return
+        }
+        let prompt = AgentAttachment.taskPrompt(draft, with: attachments)
         guard !prompt.isEmpty else { return }
         if ScheduledTaskCreator.slugify(scheduleDraft.name).isEmpty {
             scheduleError = String(localized: "Give the task a name.",
@@ -1098,14 +1372,17 @@ struct AgentComposer: View {
             prompt: prompt,
             cwd: folder,
             mode: effectiveScheduleMode,
+            chatOnly: chatOnlyActive,
+            nonStop: scheduleNonStop,
             model: options.model,
             effort: options.effort,
             // The speed rides with the model it belongs to: claude's
             // switch only where the model takes it, codex's as its switch
             // shows it (`codexTaskSpeedPick`).
-            fastMode: !isCodex && !isKimi && options.fastMode
+            fastMode: isClaude && options.fastMode
                 && fastModeSupported(forModel: options.model),
             serviceTier: isCodex ? codexTaskSpeedPick : nil,
+            skills: taskSkills,
             agent: agentKey
         )
         creatingTask = true
@@ -1167,6 +1444,83 @@ struct AgentComposer: View {
         .buttonStyle(.plain)
     }
 
+    // MARK: Skills
+
+    /// The robot: plain until a skill is chosen, then orange — the
+    /// glyph alone, with no fill behind it: a tinted box under the icon
+    /// reads as a second, permanent hover state beside the strip's
+    /// other controls, which fill only under the pointer. Its
+    /// popover opens on the picker when nothing is chosen and on the
+    /// summary when something is. Opening it reads the folder, and
+    /// looks below it for subfolders with skills of their own, read one
+    /// after another as they are found (`SkillCatalog.loadSubfolders`).
+    private func skillChip(_ picks: [String]) -> some View {
+        let active = !picks.isEmpty && !chatOnlyActive
+        return Button {
+            skillHeldAtOpen = skillHeld?() ?? []
+            skillCatalog.ensureLoaded(folder: folder, maxAge: 20)
+            skillCatalog.loadSubfolders(below: folder)
+            showingSkillPopover = true
+        } label: {
+            Image("SkillRobot")
+                .sipFont(12, weight: .medium)
+                .foregroundColor(active ? .orange : SipDesign.textSecondary)
+                .padding(.vertical, 3)
+                .padding(.horizontal, 5)
+                .contentShape(Rectangle())
+                .opacity(chatOnlyActive ? 0.4 : 1)
+        }
+        .buttonStyle(.plain)
+        .disabled(chatOnlyActive)
+        .accessibilityLabel(String(localized: "Skills", comment: "Accessibility label of the skill chip"))
+        .popover(isPresented: $showingSkillPopover, arrowEdge: .bottom) {
+            SkillChipPopover(
+                agentLabel: agentName,
+                oneAtATime: SkillAgent.oneSkillPerMessage(agentKey),
+                folderName: folder.lastPathComponent,
+                choices: skillChoices,
+                picks: skillPicks ?? [],
+                statuses: SkillPickReport.statuses(
+                    picks: skillPicks ?? [], choices: skillChoices, held: skillHeldAtOpen,
+                    missing: String(localized: "Not available in this folder",
+                                    comment: "Skill chip summary: a chosen skill this folder does not have"),
+                    stillReading: skillCatalog.readingSubfolders(below: folder)),
+                held: skillHeldAtOpen,
+                onDone: { picked in
+                    onSkillPicksChange?(picked)
+                    showingSkillPopover = false
+                },
+                onClose: { showingSkillPopover = false },
+                onOpenSettings: onOpenSkillSettings.map { open in
+                    { showingSkillPopover = false; open() }
+                })
+        }
+    }
+
+    /// The folder's skills for this agent, or nil while they are being
+    /// read for the first time — a subfolder's as this send can reach
+    /// them: through Codex's app-server, for Codex (`SkillSubfolderReach`).
+    private var skillChoices: [SkillChoice]? {
+        guard skillCatalog.snapshot(folder: folder) != nil else { return nil }
+        return skillCatalog.choices(
+            agent: agentKey, folder: folder,
+            codexSend: AskingModeGate.subfolderSkillSend(
+                agentKey: agentKey, mode: options.permissionMode, chatOnly: chatOnlyActive),
+            kimiCanLoad: frontEnd != .unavailable)
+    }
+
+    private func skillChipHint(_ picks: [String]) -> String {
+        if chatOnlyActive {
+            return String(localized: "Skills are off in Chat only",
+                          comment: "Instant hover hint for the skill chip in Chat only")
+        }
+        if picks.isEmpty {
+            return String(localized: "Skills", comment: "Instant hover hint for the skill chip")
+        }
+        return String(localized: "Skills · \(picks.count) chosen",
+                      comment: "Instant hover hint for the skill chip with skills chosen; placeholder is how many")
+    }
+
     // MARK: Session note
 
     private var noteButton: some View {
@@ -1195,7 +1549,7 @@ struct AgentComposer: View {
         .help(canGenerateNote
               ? String(localized: "Generate a note from this session",
                        comment: "Tooltip for the session-note button")
-              : String(localized: "Needs at least one turn and a chat model (Settings → Chat models)",
+              : String(localized: "Needs at least one turn and a chat model (Settings → Chat Settings)",
                        comment: "Tooltip for the session-note button when disabled"))
         .popover(isPresented: $showingNoteOptions, arrowEdge: .top) {
             NoteOptionsPopover(isPresented: $showingNoteOptions,
@@ -1221,134 +1575,33 @@ struct AgentComposer: View {
                        comment: "Tooltip for the transcript find button when the transcript is empty"))
     }
 
-    /// The agent reads files itself, so attaching = referencing the
-    /// paths in the prompt text — except in Chat only, where it has no
-    /// tools to read a path with and the file travels WITH the message
-    /// instead, through the chat page's mechanism.
+    /// Stage files through the door a drop also takes. Outside Chat only
+    /// the agent reads what is attached itself, so a folder is as good
+    /// as a file. Chat only gives it no tool to read either with, and a
+    /// file's content travels with the message — files alone, then.
     private func addFiles() {
-        if chatOnlyActive, let onStageFiles {
-            let panel = NSOpenPanel()
-            panel.canChooseFiles = true
-            panel.canChooseDirectories = false
-            panel.allowsMultipleSelection = true
-            panel.prompt = String(localized: "Attach",
-                                  comment: "Confirm button of the chat attachment picker")
-            panel.message = String(localized: "Attached files are sent with your message",
-                                   comment: "File picker explanatory text for the agent composer in Chat only")
-            panel.directoryURL = folder
-            guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
-            onStageFiles(panel.urls)
-            return
-        }
+        guard let onStageFiles else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
-        panel.canChooseDirectories = true
+        panel.canChooseDirectories = !chatOnlyActive
         panel.allowsMultipleSelection = true
-        panel.prompt = String(localized: "Add",
-                              comment: "File picker confirm button for the composer")
-        panel.message = String(localized: "Selected paths are inserted into your message for \(agentName) to read",
-                               comment: "File picker explanatory text for the composer; placeholder is the agent label")
+        panel.prompt = String(localized: "Attach",
+                              comment: "Confirm button of the chat attachment picker")
+        panel.message = chatOnlyActive
+            ? String(localized: "Attached files are sent with your message",
+                     comment: "File picker explanatory text for the agent composer in Chat only")
+            : String(localized: "Select files or folders to attach. \(agentName) reads them itself.",
+                     comment: "File picker explanatory text for the agent composer outside Chat only; placeholder is the agent label")
         panel.directoryURL = folder
         guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
-        let quoted = panel.urls.map { url -> String in
-            let p = url.path
-            return p.contains(" ") ? "'\(p)'" : p
-        }
-        var text = draft
-        if !text.isEmpty && !text.hasSuffix(" ") && !text.hasSuffix("\n") {
-            text += " "
-        }
-        draft = text + quoted.joined(separator: " ")
+        onStageFiles(panel.urls)
     }
 
     // MARK: Model / effort pickers
 
     private var modelRows: [ComposerOptionRow] {
-        if isKimi {
-            // Kimi slugs are literal, like codex's — no alias layer to
-            // resolve and no version to derive, so they show as
-            // recorded. The list can legitimately be EMPTY (nothing
-            // configured, nothing run yet): "Default" alone is the
-            // honest offer, where a hardcoded fallback list would name
-            // models `--model` may reject.
-            return [ComposerOptionRow(
-                value: nil,
-                title: String(localized: "Default",
-                              comment: "Model menu row — kimi's default model"),
-                // Kimi's own `display_name` for whatever `default_model`
-                // points at, the same way the codex row names its
-                // default rather than printing a raw slug.
-                subtitle: kimiCaps.defaultModel.map(kimiCaps.displayName(forModel:)))]
-            + kimiCaps.models.map {
-                ComposerOptionRow(value: $0.slug, title: $0.displayName,
-                                  subtitle: nil)
-            }
-        }
-        if isCodex {
-            // Codex model ids are literal (`gpt-5.6-sol`) — there is no
-            // alias layer to resolve and no version to derive, so they
-            // are shown as recorded. Running them through
-            // `ClaudeModelDisplay` would rename them; offering claude's
-            // ALIASES here would put `-m opus` on a codex command line.
-            return [ComposerOptionRow(
-                value: nil,
-                title: String(localized: "Default",
-                              comment: "Model menu row — codex's default model"),
-                // What a send with no explicit pick actually runs as,
-                // in this folder, as codex's own config resolves it —
-                // the codex counterpart of claude's configured-default
-                // subtitle, and named the same way its own row would be.
-                subtitle: codexCaps.defaultModel(forFolder: codexFolder).map { slug in
-                    codexCaps.models.first { $0.slug == slug }?
-                        .displayName ?? slug
-                })]
-            + codexCaps.models.map {
-                ComposerOptionRow(value: $0.slug, title: $0.displayName,
-                                  subtitle: nil)
-            }
-        }
-        var rows = [ComposerOptionRow(
-            value: nil,
-            title: String(localized: "Default",
-                          comment: "Model menu row — claude's default model"),
-            // What a send with no --model runs as: claude's own
-            // configured default first, else what such a send was last
-            // observed to resolve to ("Fable 5").
-            subtitle: claudeDefaultName)]
-        rows += caps.modelAliases.map { alias in
-            ComposerOptionRow(value: alias,
-                              title: rememberedName(forAlias: alias),
-                              subtitle: nil)
-        }
-        // "Other models": per family, the previous version this Mac
-        // has run and the installed claude still names — offered under
-        // its FULL id, which `--model` takes verbatim. Ordered by the
-        // alias rows above so the section reads in the same sequence.
-        // Grouped by the family the alias NAMES — the casing table's
-        // word, else the installed catalog's (`family(ofAlias:)`), the
-        // same rule that admitted the row. Grouped on the table alone,
-        // a family only the binary names would have a row and no place
-        // to draw it. One row per id: a family with two aliases lists
-        // its previous version once.
-        let catalog = ClaudeModelCatalog.installedCatalog()
-        var listed: Set<String> = []
-        let others = caps.modelAliases.flatMap { alias -> [ClaudeOtherModel] in
-            guard let family = ClaudeModelCatalog.family(ofAlias: alias, catalog: catalog)
-            else { return [] }
-            return caps.otherModels.filter {
-                $0.family == family && listed.insert($0.fullId).inserted
-            }
-        }
-        if !others.isEmpty {
-            rows.append(.header(String(localized: "Other models",
-                                       comment: "Model menu section header: previous model versions the CLI still offers")))
-            rows += others.map {
-                ComposerOptionRow(value: $0.fullId,
-                                  title: $0.displayName,
-                                  subtitle: nil)
-            }
-        }
-        return rows
+        AgentMenus.modelRows(agentKey: agentKey, config: config, codexFolder: codexFolder,
+                             claudeDefaultName: claudeDefaultName)
     }
 
     /// The Default row's subtitle and the chip's resting title for
@@ -1365,7 +1618,7 @@ struct AgentComposer: View {
     }
 
     private func refreshConfiguredDefault() {
-        guard !isCodex, !isKimi else { return }
+        guard isClaude else { return }
         let found = ClaudeModelCatalog.configuredDefaultModel(cwd: folder)
         if found != configuredDefault { configuredDefault = found }
     }
@@ -1379,11 +1632,13 @@ struct AgentComposer: View {
     /// does not mark every Opus — and never through a cloud provider
     /// (`claudeCloudProvider`). A model nothing resolves is allowed,
     /// and claude then reports on it itself.
-    /// Codex: the model advertises a service tier and codex's
-    /// `fast_mode` feature is on. Kimi: never.
+    /// Codex: one of its speed switches can be turned on for the model
+    /// (`CodexCatalog.offersSpeed`). Kimi, and any agent this app has no
+    /// code for: never.
     private func fastModeSupported(forModel value: String?) -> Bool {
         if isKimi { return false }
         if isCodex { return codexCaps.offersSpeed(forModel: value, folder: codexFolder) }
+        guard isClaude else { return false }
         if claudeCloudProvider != nil { return false }
         let id = config.resolvedClaudeModelId(picked: value,
                                               configuredDefault: configuredDefault)
@@ -1420,27 +1675,60 @@ struct AgentComposer: View {
     private var codexFolder: String { folder.path }
 
     /// Codex's speed for this composer's model: the tier a send runs at
-    /// (nil = standard), under codex's own interactive rule.
+    /// (nil = standard), under codex's own interactive rule — or, where
+    /// codex keeps the session's speed, the one it keeps.
     private var codexEffectiveTier: String? {
-        codexCaps.effectiveServiceTier(for: options, folder: codexFolder)
+        if codexSpeedLocked, let saved = codexSessionSpeed {
+            return CodexKeptSpeed.runningTier(saved)
+        }
+        return codexCaps.effectiveServiceTier(for: options, folder: codexFolder)
     }
 
-    /// The tier codex's Fast mode switch turns on for this model — nil
-    /// when the model advertises none, or codex's `fast_mode` feature is
-    /// off (codex then drops every tier, even one on the command line).
-    private var codexFastTier: CodexServiceTier? {
-        guard codexCaps.speedSettings(forFolder: codexFolder).featureEnabled else { return nil }
-        return codexCaps.fastTier(forModel: options.model, folder: codexFolder)
+    /// Whether codex keeps the session's speed on the route the next send
+    /// takes (`CodexKeptSpeed.applies`): `codex exec` — Chat only — on a
+    /// codex that keeps it. The app-server's route, every other mode on
+    /// such a codex, takes a speed per turn.
+    private var codexKeepsSpeed: Bool {
+        guard isCodex else { return false }
+        let driver = AgentTurnDriver.pick(agentKey: agentKey, options: options,
+                                          isNewSession: codexSessionSpeed == nil,
+                                          frontEndOffered: frontEnd == .offered)
+        return CodexKeptSpeed.applies(
+            codexVersion: AgentCLIUpdateMonitor.shared.installed["codex"]?.text, driver: driver)
     }
 
-    /// Whether codex's Fast mode switch reads on: the model advertises a
-    /// tier the switch can name, and the send runs at a faster one. The
-    /// chip's bolt, its hover and a task scheduled from here read this
-    /// same answer, so a configured tier on a model codex's catalog does
-    /// not list — one the switch cannot offer, and one codex judges by
-    /// itself — lights nothing anywhere.
-    private var codexFastOn: Bool {
-        codexFastTier != nil && CodexSpeed.isFaster(codexEffectiveTier)
+    /// The switches no longer move: the session's thread has a saved speed
+    /// codex keeps. A session with none recorded (a thread from an older
+    /// codex) takes the next send's pick, and codex keeps that one after.
+    private var codexSpeedLocked: Bool {
+        guard codexKeepsSpeed, let saved = codexSessionSpeed,
+              case .tier = saved else { return false }
+        return true
+    }
+
+    /// Codex's speed switches for this model: Fast mode, then every other
+    /// faster speed the catalog lists anywhere (Ultrafast), each greyed
+    /// out where this model or codex's config does not allow it.
+    private var codexSpeedSwitches: [CodexSpeed.SpeedSwitch] {
+        codexCaps.speedSwitches(forModel: options.model, folder: codexFolder)
+    }
+
+    /// The switch the send runs at, if a faster one — its speed is a
+    /// switch this model offers. The chip's bolt, its hover and a task
+    /// scheduled from here read this same answer, so a configured tier on
+    /// a model codex's catalog does not list — one no switch can offer,
+    /// and one codex judges by itself — lights nothing anywhere.
+    private var codexSpeedOn: CodexSpeed.SpeedSwitch? {
+        guard CodexSpeed.isFaster(codexEffectiveTier),
+              let tier = CodexSpeed.normalized(codexEffectiveTier) else { return nil }
+        return codexSpeedSwitches.first { $0.offered && $0.tier.id == tier }
+    }
+
+    /// The speed switched on is the one codex ran the latest message
+    /// without — its own list did not include it then. The bolt is struck
+    /// through and the hover says why, as for claude's fast mode.
+    private var codexSpeedDropped: Bool {
+        codexSpeedReport.drops(codexSpeedOn?.tier.id)
     }
 
     /// A faster tier in codex's own words for this model ("2x speed,
@@ -1458,9 +1746,23 @@ struct AgentComposer: View {
     private var fastModeHint: String? {
         if isKimi { return nil }
         if isCodex {
-            guard codexFastOn, let tier = codexEffectiveTier else { return nil }
-            return String(localized: "Fast mode is on · \(codexTierDescription(tier))",
-                          comment: "Model chip hover: codex's fast mode is on for the next turn; the placeholder is codex's own description of the tier (“2x speed, increased usage”)")
+            guard let on = codexSpeedOn else { return nil }
+            if codexSpeedDropped {
+                let why = CodexSpeedWords.notServed(agentName: agentName)
+                if on.isFast {
+                    return String(localized: "Fast mode requested, but not running · \(why)",
+                                  comment: "Model chip hover: fast mode is switched on, but the calls run at standard speed; the placeholder says why")
+                }
+                return String(localized: "\(on.tier.name) requested, but not running · \(why)",
+                              comment: "Model chip hover: a faster codex speed other than Fast is switched on, but codex ran the last message at standard speed; the first placeholder is codex's name for the speed (“Ultrafast”), the second says why")
+            }
+            let description = codexTierDescription(on.tier.id)
+            if on.isFast {
+                return String(localized: "Fast mode is on · \(description)",
+                              comment: "Model chip hover: codex's fast mode is on for the next turn; the placeholder is codex's own description of the tier (“2x speed, increased usage”)")
+            }
+            return String(localized: "\(on.tier.name) is on · \(description)",
+                          comment: "Model chip hover: a faster codex speed other than Fast is on for the next turn; the first placeholder is codex's name for the speed (“Ultrafast”), the second codex's own description of it")
         }
         switch claudeFastVerdict {
         case .off:
@@ -1478,12 +1780,13 @@ struct AgentComposer: View {
     }
 
     /// The chip's glyph: a bolt while a faster speed is what runs, a
-    /// struck-through bolt while claude's switch is on and its calls
-    /// run at standard speed anyway.
+    /// struck-through bolt while the switch is on and the agent ran its
+    /// latest call (claude) or message (codex) at standard speed anyway.
     private var fastModeIcon: String? {
         if isKimi { return nil }
         if isCodex {
-            return codexFastOn ? "bolt.fill" : nil
+            guard codexSpeedOn != nil else { return nil }
+            return codexSpeedDropped ? "bolt.slash.fill" : "bolt.fill"
         }
         switch claudeFastVerdict {
         case .off: return nil
@@ -1492,16 +1795,30 @@ struct AgentComposer: View {
         }
     }
 
-    /// Under the model rows: one Fast mode switch — claude's opt-in, or
-    /// codex's Fast tier. Nothing for kimi, which has no such mode: its
+    /// Under the model rows: claude's one Fast mode switch, or codex's
+    /// speed switches. Nothing for kimi, which has no such mode: its
     /// faster option is a separate high-speed MODEL, listed with the rest.
     @ViewBuilder
     private var fastModeFooter: some View {
         if isCodex {
-            codexFastModeSwitch
-        } else if !isKimi {
+            ForEach(codexSpeedSwitches, id: \.tier.id) { speed in
+                codexSpeedSwitch(speed)
+            }
+            if codexKeepsSpeed {
+                Text(verbatim: CodexSpeedWords.keptNote(started: codexSpeedLocked,
+                                                        mode: selectedModeTitle,
+                                                        agentName: agentName))
+                    .sipFont(11)
+                    .foregroundColor(SipDesign.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(width: 230 * SipFont.ratio(fontScale), alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 5)
+            }
+        } else if isClaude {
             let supported = fastModeSupported(forModel: options.model)
-            fastModeSwitch(
+            menuSwitch(
+                title: fastModeTitle,
                 isOn: Binding(get: { options.fastMode && supported },
                               set: { options.fastMode = $0 }),
                 enabled: supported,
@@ -1512,62 +1829,59 @@ struct AgentComposer: View {
         }
     }
 
-    /// Codex's Fast mode, the switch codex's own compact picker draws: on
-    /// runs the model's Fast tier, off pins standard (`default`) — so off
-    /// holds even where codex's config turns a tier on by itself. Until
-    /// it is flipped, it shows what codex itself would run here (its
-    /// config for this folder, else the model's default) and says so.
-    @ViewBuilder
-    private var codexFastModeSwitch: some View {
-        let fast = codexFastTier
-        let on = codexFastOn
-        fastModeSwitch(
+    /// One of codex's speed switches, the shape of codex's own toggles
+    /// (`/fast`, `/ultrafast`): on runs that speed, off pins standard
+    /// (`default`) — so off holds even where codex's config turns a speed
+    /// on by itself — and turning one on turns the other off, since a turn
+    /// runs at one speed. Until one is flipped, the switches show what
+    /// codex itself would run here (its config for this folder, else the
+    /// model's default) and say so.
+    private func codexSpeedSwitch(_ speed: CodexSpeed.SpeedSwitch) -> some View {
+        let on = codexSpeedOn?.tier.id == speed.tier.id
+        return menuSwitch(
+            title: speed.isFast ? fastModeTitle : speed.tier.name,
             isOn: Binding(get: { on }, set: { turnOn in
                 var updated = options
-                updated.serviceTier = turnOn ? fast?.id : CodexSpeed.standard
+                updated.serviceTier = turnOn ? speed.tier.id : CodexSpeed.standard
                 // A value saved before codex had a speed choice here is
                 // superseded by any flip.
                 updated.fastMode = false
                 options = updated
             }),
-            enabled: fast != nil,
-            lines: codexFastModeLines(fast: fast, on: on))
+            // Greyed where codex keeps the session's speed; the line under
+            // the switches says why.
+            enabled: speed.enabled && !codexSpeedLocked,
+            lines: CodexSpeedWords.lines(
+                speed, on: on,
+                picked: codexSpeedLocked
+                    || codexCaps.speedPick(for: options, folder: codexFolder) != nil,
+                agentName: agentName,
+                dropped: codexSpeedReport.drops(speed.tier.id)),
+            divider: speed.isFast)
     }
 
     /// The codex speed a task scheduled from here keeps — the speed the
-    /// switch shows (`CodexSpeed.carriedToTask`).
+    /// switches show (`CodexSpeed.carriedToTask`).
     private var codexTaskSpeedPick: String? {
         CodexSpeed.carriedToTask(pick: codexCaps.speedPick(for: options, folder: codexFolder),
-                                 effective: codexFastOn ? codexEffectiveTier : nil)
+                                 effective: codexSpeedOn?.tier.id)
     }
 
-    private func codexFastModeLines(fast: CodexServiceTier?, on: Bool) -> [String] {
-        guard let fast else {
-            return [codexCaps.speedSettings(forFolder: codexFolder).featureEnabled
-                    ? String(localized: "Not offered for this model",
-                             comment: "Model menu switch subtitle: the selected model has no fast mode")
-                    : String(localized: "Turned off in \(agentName)'s config (features.fast_mode)",
-                             comment: "Codex speed: the fast_mode feature is disabled in the user's codex config; placeholder is the agent label")]
-        }
-        var lines = [fast.description.isEmpty ? fast.name : fast.description]
-        if on, codexCaps.speedPick(for: options, folder: codexFolder) == nil {
-            lines.append(String(localized: "On by default in \(agentName)",
-                                comment: "Fast mode switch: on because codex itself turns it on here — its config, or the model's own default — and not because it was picked; the placeholder is the agent label"))
-        }
-        return lines
-    }
-
-    /// The one switch both agents draw: the title, and each line under it
-    /// wrapped at a fixed width. A popover takes its size when it opens,
-    /// and a line that lengthens after that — the credits verdict is
-    /// re-read as the menu opens — would otherwise be cut short.
-    private func fastModeSwitch(isOn: Binding<Bool>, enabled: Bool,
-                                lines: [String]) -> some View {
+    /// The switch the chip menus draw — Fast mode (and codex's other
+    /// speeds) under the model rows, Non-stop under the mode rows: the
+    /// title, and each line under it wrapped at a fixed width. A popover
+    /// takes its size when it opens, and a line that lengthens after that
+    /// — the credits verdict is re-read as the menu opens — would
+    /// otherwise be cut short. A divider sets it off from the rows above;
+    /// a switch that continues a group (codex's second speed under Fast
+    /// mode) goes without one.
+    private func menuSwitch(title: String, isOn: Binding<Bool>, enabled: Bool,
+                            lines: [String], divider: Bool = true) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Divider().padding(.vertical, 4)
+            if divider { Divider().padding(.vertical, 4) }
             Toggle(isOn: isOn) {
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(fastModeTitle)
+                    Text(title)
                         .sipFont(13)
                         .foregroundColor(SipDesign.textPrimary)
                     ForEach(lines, id: \.self) { line in
@@ -1712,10 +2026,15 @@ struct AgentComposer: View {
         Button {
             // The credits verdict the switch's line states moves with
             // every claude API response; two stats when it has not.
-            if !isCodex && !isKimi { caps.refreshUsageCreditsBlock() }
+            if isClaude { caps.refreshUsageCreditsBlock() }
             // Codex's answer for this folder, fresh for the choice the
-            // menu is about to state.
-            if isCodex { codexCaps.refreshSpeedSettings(forFolder: codexFolder, force: true) }
+            // menu is about to state — and the list codex last saved for
+            // the account, which any codex run may have rewritten since
+            // (two stats when it has not).
+            if isCodex {
+                codexCaps.ensureLoaded()
+                codexCaps.refreshSpeedSettings(forFolder: codexFolder, force: true)
+            }
             showingModelPopover = true
         } label: {
             trailingMenuLabel(modelChipTitle, icon: fastModeIcon)
@@ -1724,45 +2043,15 @@ struct AgentComposer: View {
         .help(modelHelp)
         .popover(isPresented: $showingModelPopover, arrowEdge: .bottom) {
             ComposerOptionList(rows: modelRows, selected: options.model, onPick: { value in
-                // One assignment → one onChange: the picked alias replaces
+                // One assignment → one save: the picked alias replaces
                 // both the flag value and the recorded-id display.
                 var updated = options
                 updated.model = value
                 updated.modelFullId = nil
                 // Every agent's levels are per model, so a model change
-                // can strand an effort the new model does not accept —
-                // picking `gpt-5.5` while `ultra` was selected would send
-                // `-c model_reasoning_effort=ultra` for a model whose
-                // catalog stops at `xhigh`, a kimi model that publishes
-                // no levels would keep a KIMI_MODEL_THINKING_EFFORT the
-                // picker no longer shows, and claude runs Haiku with no
-                // effort at all. The picker stops OFFERING it at that
-                // point, so leaving it set means sending a value the
-                // user can no longer even see.
-                //
-                // Safe for claude while its catalog is still loading: an
-                // unread catalog answers the WHOLE list, never an empty
-                // one, so nothing is cleared on a guess.
-                if let effort = updated.effort, !effort.isEmpty,
-                   !effortLevels(forModel: value).contains(effort) {
-                    updated.effort = nil
-                }
-                // Same rule for the fast switch: a model that does not
-                // offer it must not carry a request the picker no
-                // longer shows — claude's own toggle turns itself off
-                // on a model switch for the same reason.
-                if updated.fastMode, !fastModeSupported(forModel: value) {
-                    updated.fastMode = false
-                }
-                // And for codex's speed: a tier the new model does not
-                // advertise goes back to Default. Standard is a speed
-                // every model has.
-                if isCodex, let tier = updated.serviceTier,
-                   tier != CodexSpeed.standard,
-                   codexCaps.serviceTier(id: tier, forModel: value, folder: codexFolder) == nil {
-                    updated.serviceTier = nil
-                }
-                options = updated
+                // can strand an effort, a fast switch or a codex speed the
+                // new model does not take (`fitted`).
+                options = updated.fitted(to: modelPickOffer(forModel: value))
                 showingModelPopover = false
             }, footer: { fastModeFooter })
         }
@@ -1774,30 +2063,36 @@ struct AgentComposer: View {
     }
 
     /// Faster → smarter, same axis claude's own /effort gauge uses.
+    /// Kimi records a `default_effort` per model, so its Default row can
+    /// name what it resolves to ("Max") the way the model menu's Default
+    /// row names the model. Codex's and claude's catalogs carry a per-model
+    /// default as well, but it is not their last word (codex's config and
+    /// claude's served settings outrank it), so it is not named.
     private var effortRows: [ComposerOptionRow] {
-        [ComposerOptionRow(
-            value: nil,
-            title: String(localized: "Default",
-                          comment: "Effort menu row — claude's default effort"),
-            // Kimi records a `default_effort` per model, so this row can
-            // name what it resolves to ("Max") the way the model menu's
-            // Default row names the model. Codex's and claude's catalogs
-            // carry a per-model default as well, but it is not their
-            // last word (codex's config and claude's served settings
-            // outrank it), so it is not named here.
-            subtitle: isKimi
-                ? kimiCaps.defaultEffort(forModel: options.model)
-                    .map(Self.effortDisplayName)
-                : nil)]
-        // Levels are PER MODEL for all three agents — codex's catalog
-        // says `gpt-5.6-terra` accepts `ultra` where `gpt-5.5` stops at
-        // `xhigh`, kimi's config lists `support_efforts` per model, and
-        // claude's catalog gives Haiku no effort at all — so the list
-        // follows the model this composer would actually send with.
-        // Every list arrives already ordered fast → deep.
-        + effortLevels.map {
-            ComposerOptionRow(value: $0, title: Self.effortDisplayName($0), subtitle: nil)
-        }
+        AgentMenus.effortRows(levels: effortLevels,
+                              defaultSubtitle: isKimi
+                                ? kimiCaps.defaultEffort(forModel: options.model)
+                                    .map(Self.effortDisplayName)
+                                : nil)
+    }
+
+    /// What a model picked from the menu offers, for the chips it fits
+    /// (`AgentLaunchOptions.fitted`): this agent's effort levels for it,
+    /// its fast switch — claude's own toggle turns itself off on a switch
+    /// to a model that does not take it — and the codex speeds it lists.
+    /// Safe for claude while its catalog is still loading: an unread
+    /// catalog answers the WHOLE list of levels, never an empty one, so no
+    /// effort is cleared on a guess. A codex model the catalog lists no
+    /// speeds for keeps none but Standard: the menu has just read codex's
+    /// answer, and a speed it does not advertise is dropped by codex per
+    /// request.
+    private func modelPickOffer(forModel value: String?) -> ModelOffer {
+        ModelOffer(
+            efforts: effortLevels(forModel: value),
+            fastMode: fastModeSupported(forModel: value),
+            tiers: isCodex
+                ? codexCaps.speedTiers(forModel: value, folder: codexFolder)?.tiers.map(\.id) ?? []
+                : nil)
     }
 
     /// This agent's effort levels, fast → deep.
@@ -1812,6 +2107,8 @@ struct AgentComposer: View {
                 : codexCaps.defaultModel(forFolder: codexFolder)
             return codexCaps.effortLevels(forModel: slug)
         }
+        // An agent this app has no code for has no levels to offer.
+        guard isClaude else { return [] }
         // The model a send runs as — the pick, else claude's configured
         // default, else its Default — read off the catalog the installed
         // binary resolves through (`ClaudeModelCatalog.effortLevels`).
@@ -2019,53 +2316,39 @@ private struct HoverHighlight<Content: View>: View {
 }
 
 /// The "?" inside the context chip's hint on a codex session. A plain
-/// glyph that fills and takes the accent on hover, with a pointing
-/// hand — the one thing in the strip's hints that can be clicked, and
-/// it has to look it.
+/// glyph that fills and takes the accent on hover, with the link
+/// pointer — the one thing in the strip's hints that can be clicked,
+/// and it has to look it. The pointer is SwiftUI's own (`LinkButton`
+/// says why a pushed one does not stay).
 private struct HintHelpGlyph: View {
     let accessibilityLabel: String
     let action: () -> Void
     @State private var hovered = false
-    /// At most one outstanding cursor push — same guard as the
-    /// sidebar's resize handle.
-    @State private var cursorPushed = false
 
     var body: some View {
-        Button {
-            // The click opens a sheet over this window, and a view
-            // covered by a sheet is not promised a hover-exit — so the
-            // cursor is restored here, before the sheet, not left to it.
-            setPointingHand(false)
-            hovered = false
-            action()
-        } label: {
+        Button(action: action) {
             Image(systemName: hovered ? "questionmark.circle.fill" : "questionmark.circle")
                 .sipFont(11, weight: .medium)
                 .foregroundColor(hovered ? SipDesign.blue : SipDesign.textSecondary)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { inside in
-            hovered = inside
-            setPointingHand(inside)
-        }
+        .onHover { hovered = $0 }
+        .pointerStyle(.link)
         .accessibilityLabel(accessibilityLabel)
-    }
-
-    private func setPointingHand(_ active: Bool) {
-        if active, !cursorPushed {
-            NSCursor.pointingHand.push()
-            cursorPushed = true
-        } else if !active, cursorPushed {
-            NSCursor.pop()
-            cursorPushed = false
-        }
     }
 }
 
 /// One row in a `ComposerOptionList`. `value` nil is the "Default"
 /// (no-flag) choice.
-private struct ComposerOptionRow: Identifiable {
+/// The composer's own name for a menu row.
+private typealias ComposerOptionRow = AgentMenuRow
+
+/// One row of a mode, model or effort menu. The composer and the
+/// scheduled-task card both list these (`AgentMenus`), so the two offer the
+/// same choices in the same order under the same names; the card draws the
+/// title alone.
+struct AgentMenuRow: Identifiable, Equatable {
     let value: String?
     let title: String
     let subtitle: String?
@@ -2073,8 +2356,221 @@ private struct ComposerOptionRow: Identifiable {
     var isHeader: Bool = false
     var id: String { isHeader ? "__header__" + title : (value ?? "__default__") }
 
-    static func header(_ title: String) -> ComposerOptionRow {
-        ComposerOptionRow(value: nil, title: title, subtitle: nil, isHeader: true)
+    static func header(_ title: String) -> AgentMenuRow {
+        AgentMenuRow(value: nil, title: title, subtitle: nil, isHeader: true)
+    }
+}
+
+/// The rows of the mode, model and effort menus, spelled once for the
+/// composer's chips and the scheduled-task card's pickers.
+enum AgentMenus {
+    /// Under the Default mode row: SipAI passes no mode, and the agent's
+    /// own default setting applies.
+    static func defaultModeSubtitle(agentName: String) -> String {
+        String(localized: "\(agentName)’s own default setting",
+               comment: "Hint under the Default mode row: SipAI passes no mode, so the agent's own default setting applies; placeholder is the agent label")
+    }
+
+    /// The mode rows, in the chip's order. A row's value is nil for
+    /// Default, `ChatOnlyMode.rowValue` for Chat only, else the mode.
+    ///
+    /// Kimi without its own front end runs headless whatever is picked —
+    /// which is Never Ask — so that is what its first row is called, and
+    /// there is no other; with it, Default is kimi's own configured mode
+    /// and Never Ask a row of its own, in kimi's order (Ask When Needed,
+    /// Never Ask, then Plan).
+    @MainActor static func modeRows(agentKey: String, agentName: String,
+                                    chatOnlyOffered: Bool,
+                                    askingModesOffered: [String],
+                                    claudeModes: [AgentPermissionMode],
+                                    frontEnd: AgentAskingMode.Availability) -> [AgentMenuRow] {
+        let defaultRow = AgentMenuRow(value: nil,
+                                      title: String(localized: "Default",
+                                                    comment: "Permission-mode menu row — no override"),
+                                      subtitle: defaultModeSubtitle(agentName: agentName))
+        let chatOnly = chatOnlyOffered
+            ? [AgentMenuRow(value: ChatOnlyMode.rowValue, title: AgentComposer.chatOnlyTitle,
+                            subtitle: String(localized: "\(agentName) can look things up on the web but can't read or change files. Attach files with +.",
+                                             comment: "Hint under the Chat only mode row; placeholder is the agent label"))]
+            : []
+        let asking = askingModesOffered.map {
+            AgentMenuRow(value: $0, title: AgentAskingMode.title(for: $0),
+                         subtitle: AskingModeGate.subtitle(for: $0, agentName: agentName))
+        }
+        switch agentKey {
+        case "kimi":
+            let neverAsk = AgentMenuRow(value: AgentAskingMode.kimiNeverAsk,
+                                        title: KimiCapabilities.neverAskTitle,
+                                        subtitle: KimiCapabilities.neverAskSubtitle)
+            guard frontEnd != .unavailable else {
+                return [AgentMenuRow(value: nil, title: neverAsk.title, subtitle: neverAsk.subtitle)]
+                    + chatOnly
+            }
+            let plan = asking.filter { $0.value == AgentAskingMode.kimiPlan }
+            return [defaultRow] + chatOnly
+                + asking.filter { $0.value != AgentAskingMode.kimiPlan } + [neverAsk] + plan
+        case "codex":
+            return [defaultRow] + chatOnly + asking + CodexCapabilities.modePresets.map {
+                AgentMenuRow(value: $0.value, title: CodexCapabilities.title(for: $0.value),
+                             subtitle: $0.hint)
+            }
+        case "claude_code":
+            return [defaultRow] + chatOnly + claudeModes.map {
+                AgentMenuRow(value: $0.name, title: $0.title, subtitle: $0.hint)
+            }
+        default:
+            // An agent this app has no code for: Default alone, never
+            // another CLI's permission modes.
+            return [defaultRow]
+        }
+    }
+
+    /// The mode chip's title: Chat only, the mode's own name, else Default
+    /// — Never Ask on a kimi that runs headless whatever is picked.
+    @MainActor static func modeTitle(agentKey: String, mode: String?, chatOnly: Bool,
+                                     frontEnd: AgentAskingMode.Availability) -> String {
+        if chatOnly { return AgentComposer.chatOnlyTitle }
+        guard let mode else {
+            if agentKey == "kimi", frontEnd == .unavailable { return KimiCapabilities.neverAskTitle }
+            return String(localized: "Default",
+                          comment: "Mode chip label when no permission mode override is set")
+        }
+        switch agentKey {
+        case "kimi":
+            // A value kimi's front end does not run — Never Ask's own, or
+            // one that strayed in from elsewhere — runs headless, which is
+            // Never Ask: the chip says what the turn does, never a raw value.
+            return AgentAskingMode.isAsking(mode, agentKey: agentKey)
+                ? AgentAskingMode.title(for: mode) : KimiCapabilities.neverAskTitle
+        case "codex":
+            return AgentAskingMode.isAsking(mode, agentKey: agentKey)
+                ? AgentAskingMode.title(for: mode) : CodexCapabilities.title(for: mode)
+        case "claude_code":
+            return AgentPermissionMode(name: mode).title
+        default:
+            // Its only row is Default; a value left from elsewhere reads so.
+            return String(localized: "Default",
+                          comment: "Mode chip label when no permission mode override is set")
+        }
+    }
+
+    /// The effort rows: Default, then the model's levels, fast → deep.
+    /// `defaultSubtitle` names what Default runs at where the agent says.
+    static func effortRows(levels: [String], defaultSubtitle: String?) -> [AgentMenuRow] {
+        [AgentMenuRow(value: nil,
+                      title: String(localized: "Default",
+                                    comment: "Effort menu row — claude's default effort"),
+                      subtitle: defaultSubtitle)]
+        + levels.map { AgentMenuRow(value: $0, title: AgentEffort.displayName($0), subtitle: nil) }
+    }
+
+    /// The model rows, in the chip's order: Default (naming what it runs
+    /// as), the agent's models, and for claude the "Other models" section.
+    @MainActor static func modelRows(agentKey: String, config: ConfigManager,
+                                     codexFolder: String,
+                                     claudeDefaultName: String?) -> [AgentMenuRow] {
+        let isKimi = agentKey == "kimi", isCodex = agentKey == "codex"
+        let kimiCaps = KimiCatalog.shared, codexCaps = CodexCatalog.shared
+        let caps = ClaudeCapabilities.shared
+        func rememberedName(forAlias alias: String) -> String {
+            config.rememberedModelName(forAlias: alias)
+        }
+        if isKimi {
+            // Kimi slugs are literal, like codex's — no alias layer to
+            // resolve and no version to derive, so they show as
+            // recorded. The list can legitimately be EMPTY (nothing
+            // configured, nothing run yet): "Default" alone is the
+            // honest offer, where a hardcoded fallback list would name
+            // models `--model` may reject.
+            // A model Moonshot refused for this account's plan says so (`KimiPlanRefusals`).
+            let refused = KimiPlanRefusals.refused(account: UsageMonitor.shared.accounts["kimi"]?.kimiRefusalAccount)
+            return [AgentMenuRow(
+                value: nil,
+                title: String(localized: "Default",
+                              comment: "Model menu row — kimi's default model"),
+                // Kimi's own `display_name` for whatever `default_model`
+                // points at, the same way the codex row names its
+                // default rather than printing a raw slug.
+                subtitle: kimiCaps.defaultModel.map { alias in
+                    KimiPlanRefusals.defaultSubtitle(name: kimiCaps.displayName(forModel: alias),
+                                                     alias: alias, refused: refused)
+                })]
+            + kimiCaps.models.map {
+                AgentMenuRow(value: $0.slug, title: $0.displayName,
+                             subtitle: KimiPlanRefusals.rowNote(forAlias: $0.slug, refused: refused))
+            }
+        }
+        if isCodex {
+            // Codex model ids are literal (`gpt-5.6-sol`) — there is no
+            // alias layer to resolve and no version to derive, so they
+            // are shown as recorded. Running them through
+            // `ClaudeModelDisplay` would rename them; offering claude's
+            // ALIASES here would put `-m opus` on a codex command line.
+            return [AgentMenuRow(
+                value: nil,
+                title: String(localized: "Default",
+                              comment: "Model menu row — codex's default model"),
+                // What a send with no explicit pick actually runs as,
+                // in this folder, as codex's own config resolves it —
+                // the codex counterpart of claude's configured-default
+                // subtitle, and named the same way its own row would be.
+                subtitle: codexCaps.defaultModel(forFolder: codexFolder).map { slug in
+                    codexCaps.models.first { $0.slug == slug }?
+                        .displayName ?? slug
+                })]
+            + codexCaps.models.map {
+                AgentMenuRow(value: $0.slug, title: $0.displayName,
+                                  subtitle: nil)
+            }
+        }
+        // An agent this app has no code for: Default alone. Claude's
+        // aliases on its command line would name models it does not have.
+        guard agentKey == "claude_code" else {
+            let title = String(localized: "Default", comment: "Model menu row — claude's default model")
+            return [AgentMenuRow(value: nil, title: title, subtitle: nil)]
+        }
+        var rows = [AgentMenuRow(
+            value: nil,
+            title: String(localized: "Default",
+                          comment: "Model menu row — claude's default model"),
+            // What a send with no --model runs as: claude's own
+            // configured default first, else what such a send was last
+            // observed to resolve to ("Fable 5").
+            subtitle: claudeDefaultName)]
+        rows += caps.modelAliases.map { alias in
+            AgentMenuRow(value: alias,
+                              title: rememberedName(forAlias: alias),
+                              subtitle: nil)
+        }
+        // "Other models": per family, the previous version this Mac
+        // has run and the installed claude still names — offered under
+        // its FULL id, which `--model` takes verbatim. Ordered by the
+        // alias rows above so the section reads in the same sequence.
+        // Grouped by the family the alias NAMES — the casing table's
+        // word, else the installed catalog's (`family(ofAlias:)`), the
+        // same rule that admitted the row. Grouped on the table alone,
+        // a family only the binary names would have a row and no place
+        // to draw it. One row per id: a family with two aliases lists
+        // its previous version once.
+        let catalog = ClaudeModelCatalog.installedCatalog()
+        var listed: Set<String> = []
+        let others = caps.modelAliases.flatMap { alias -> [ClaudeOtherModel] in
+            guard let family = ClaudeModelCatalog.family(ofAlias: alias, catalog: catalog)
+            else { return [] }
+            return caps.otherModels.filter {
+                $0.family == family && listed.insert($0.fullId).inserted
+            }
+        }
+        if !others.isEmpty {
+            rows.append(.header(String(localized: "Other models",
+                                       comment: "Model menu section header: previous model versions the CLI still offers")))
+            rows += others.map {
+                AgentMenuRow(value: $0.fullId,
+                                  title: $0.displayName,
+                                  subtitle: nil)
+            }
+        }
+        return rows
     }
 }
 
@@ -2196,6 +2692,138 @@ enum ChatOnlyGate {
             codexVersion: AgentCLIUpdateMonitor.shared.installed["codex"]?.text,
             codexFeatures: CodexCatalog.shared.featureNames,
             kimiVersion: AgentCLIUpdateMonitor.shared.installed["kimi"]?.text)
+    }
+}
+
+/// The MainActor side of the asking modes (`AgentAskingMode`): which
+/// ones an agent offers right now, read from what the app knows of the
+/// installed CLI, and what a saved pick the CLI cannot run does to a
+/// send. Each agent's own part of the feature says when it offers its
+/// modes; an agent it says nothing for offers none, and that is settled.
+/// The composer and the session view both read it, so the chip and the
+/// send cannot disagree.
+enum AskingModeGate {
+    /// What a saved asking pick does to a send while it cannot run.
+    enum Hold: Equatable {
+        /// The installed CLI has not been read yet: the send waits.
+        case pending
+        /// The installed CLI cannot run the mode: pick another.
+        case unavailable
+    }
+
+    /// The asking modes `agentKey` offers, or nil while what decides it
+    /// has not been read.
+    @MainActor static func offered(agentKey: String) -> [String]? {
+        AgentAskingMode.offered(agentKey: agentKey,
+                                kimiVersion: AgentCLIUpdateMonitor.shared.installed["kimi"]?.text,
+                                codexVersion: AgentCLIUpdateMonitor.shared.installed["codex"]?.text,
+                                codexModes: CodexCatalog.shared.collaborationModes)
+    }
+
+    /// Why a send in `mode` must wait, or nil when it may go. Only an
+    /// asking mode is ever held; Chat only is not one, and neither is
+    /// Default — it waits for the installed CLI's version at the turn
+    /// itself (`AgentRunner.frontEndVerdictWait`), so the composer's most
+    /// ordinary row is never stuck on a read.
+    @MainActor static func hold(agentKey: String, mode: String?, chatOnly: Bool) -> Hold? {
+        guard !chatOnly, let mode, AgentAskingMode.isAsking(mode, agentKey: agentKey) else {
+            return nil
+        }
+        switch AgentAskingMode.availability(
+            of: mode, agentKey: agentKey,
+            kimiVersion: AgentCLIUpdateMonitor.shared.installed["kimi"]?.text,
+            codexVersion: AgentCLIUpdateMonitor.shared.installed["codex"]?.text,
+            codexModes: CodexCatalog.shared.collaborationModes) {
+        case .offered: return nil
+        case .pending: return .pending
+        case .unavailable: return .unavailable
+        }
+    }
+
+    /// Whether the installed CLI has its own front end — what Default runs
+    /// through on codex and kimi (`AgentAskingMode.runsThroughFrontEnd`).
+    @MainActor static func frontEnd(agentKey: String) -> AgentAskingMode.Availability {
+        AgentAskingMode.frontEndAvailability(
+            agentKey: agentKey,
+            kimiVersion: AgentCLIUpdateMonitor.shared.installed["kimi"]?.text,
+            codexVersion: AgentCLIUpdateMonitor.shared.installed["codex"]?.text)
+    }
+
+    /// What a Codex send in `mode` can do with a skill of a SUBFOLDER of
+    /// its folder (`SkillSubfolderReach.CodexSend`): only a turn through
+    /// the app-server can be told where one is — every mode but Chat only,
+    /// on a Codex that has the front end and is not known to be older than
+    /// the one the call was measured on. `.exec` for every other agent,
+    /// which the rule does not ask.
+    @MainActor static func subfolderSkillSend(agentKey: String, mode: String?,
+                                              chatOnly: Bool) -> SkillSubfolderReach.CodexSend {
+        guard agentKey == SkillAgent.codex else { return .exec }
+        let version = AgentCLIUpdateMonitor.shared.installed["codex"]?.text
+        return SkillSubfolderReach.codexSend(
+            usesFrontEnd: AgentAskingMode.runsThroughFrontEnd(
+                agentKey: agentKey, mode: mode, chatOnly: chatOnly, frontEndOffered: true),
+            frontEndMissing: frontEnd(agentKey: agentKey) == .unavailable,
+            measured: version.map { ChatOnlyAvailability.versionAtLeast($0, SkillSubfolderReach.codexFloor) } ?? true)
+    }
+
+    /// A mode row's subtitle, in the agent's own words where it has them.
+    @MainActor static func subtitle(for mode: String, agentName: String) -> String? {
+        switch mode {
+        case AgentAskingMode.kimiAskWhenNeeded:
+            return String(localized: "Routine edits and commands run automatically; risky actions, questions, and plans still ask",
+                          comment: "Hint under the kimi Ask When Needed mode row, in kimi's own words")
+        case AgentAskingMode.kimiPlan:
+            return String(localized: "Plans first, and makes no edits until you approve the plan; commands ask",
+                          comment: "Hint under the kimi Plan mode row: kimi plans, asks for the plan's approval, refuses edits until then and asks before commands")
+        case AgentAskingMode.kimiNeverAsk:
+            return KimiCapabilities.neverAskSubtitle
+        case AgentAskingMode.codexPlan:
+            // Codex has no sentence for it. Plan mode is codex's
+            // instructions to the model, not its sandbox, and the row says so.
+            return String(localized: "Explores and asks you questions, then proposes a plan; it’s told to change nothing until you choose to implement it",
+                          comment: "Hint under the codex Plan mode row: codex explores, asks questions and proposes a plan under instructions not to change anything")
+        default:
+            return nil
+        }
+    }
+
+    /// What the Non-stop switch says it does, on every agent alike: a
+    /// question the agent asks is answered for the user — claude told to
+    /// choose for itself, codex's left unanswered so it goes on with the
+    /// option it recommends, kimi's dismissed so it decides itself — and the
+    /// turn runs to its end.
+    static func nonStopLine(agentName: String) -> String {
+        String(localized: "Let \(agentName) choose what it judges best, and keep the run going to the end even when it has questions.",
+               comment: "Non-stop switch subtitle (mode menu and scheduled-task card): with it on, a question the agent asks is answered for the user and the run carries on; placeholder is the agent label")
+    }
+}
+
+// MARK: - What the installed codex offers
+
+extension CodexCatalog {
+    /// Ask the installed codex which collaboration modes it lists
+    /// (`CodexCollaborationModes`) — what offers the Plan row. Once per
+    /// BINARY, like the feature list; a failed ask is not a verdict, and
+    /// the next composer appearance asks again. So does one codex REFUSED:
+    /// the refusal stands meanwhile (no Plan mode to offer, said so), but
+    /// only a list is kept as the binary's own.
+    func ensureCollaborationModesLoaded() {
+        guard let binary = AgentManager.binaryPath(for: "codex"),
+              let key = ClaudeModelCatalog.binaryKey(at: binary),
+              key != collaborationModesKey else { return }
+        collaborationModesKey = key
+        Task.detached(priority: .utility) {
+            let answer = await CodexCollaborationModes.run(binary: binary)
+            await MainActor.run {
+                // A newer binary's ask is on its way: a stale one must not
+                // land last.
+                guard self.collaborationModesKey == key else { return }
+                if !answer.listed { self.collaborationModesKey = nil }
+                if answer.modes != self.collaborationModes {
+                    self.collaborationModes = answer.modes
+                }
+            }
+        }
     }
 }
 
@@ -2385,14 +3013,24 @@ enum ClaudeFastModeWords {
 /// comes from the transcript when the app didn't run the turn, so an
 /// old session shows what its last turn took.
 struct TurnClockChip: View {
-    /// Start of the in-flight turn, or nil when nothing is running.
+    /// Start of the in-flight turn, or nil when nothing is running —
+    /// moved later by every wait on a card that has ended, so it counts
+    /// working time.
     var startedAt: Date?
+    /// When the turn began waiting on a card; the count holds still at
+    /// this instant until the card is answered.
+    var pausedAt: Date? = nil
     /// Seconds the last finished turn took; shown while idle.
     var finished: Double?
 
     var body: some View {
         Group {
-            if let startedAt {
+            if let startedAt, let pausedAt {
+                // Still running — Stop stays — but not working: the count
+                // holds where the card stopped it, and nothing ticks.
+                label(seconds: max(0, pausedAt.timeIntervalSince(startedAt)),
+                      running: true, paused: true)
+            } else if let startedAt {
                 // `.periodic` anchored to the turn's own start, so the
                 // digit flips on the second boundary the number is
                 // actually counting — not on whenever the view appeared.
@@ -2409,7 +3047,9 @@ struct TurnClockChip: View {
     /// Running is tinted; idle is quiet. The colour is the whole
     /// "something is happening" signal now that the spinner row is
     /// gone, so it has to differ from the readouts either side of it.
-    private func label(seconds: Double, running: Bool) -> some View {
+    /// A paused turn is still a running one, so it keeps the tint; the
+    /// glyph says why the number is not moving.
+    private func label(seconds: Double, running: Bool, paused: Bool = false) -> some View {
         // Counting → always the padded form, so the very first frame is
         // "00s" and the width never moves. Resting → the form that can
         // still say "0.4s" for a turn that failed instantly.
@@ -2417,7 +3057,7 @@ struct TurnClockChip: View {
             ? AgentComposer.clockText(seconds)
             : AgentComposer.durationText(seconds)
         return HStack(spacing: 3) {
-            Image(systemName: "clock")
+            Image(systemName: paused ? "pause.circle" : "clock")
                 .sipFont(9)
             Text(verbatim: timeStr)
                 // Fixed-width digits: without this the whole control
@@ -2434,7 +3074,10 @@ struct TurnClockChip: View {
                          : SipDesign.textSecondary)
         .padding(.vertical, 3)
         .padding(.horizontal, 5)
-        .accessibilityLabel(running
+        .accessibilityLabel(paused
+            ? String(localized: "Paused at \(timeStr)",
+                     comment: "Accessibility label for the composer's turn clock while the agent's turn waits on the user")
+            : running
             ? String(localized: "Running for \(timeStr)",
                      comment: "Accessibility label for the composer's turn clock while running")
             : String(localized: "Latest agent response took \(timeStr)",
@@ -2536,12 +3179,11 @@ struct GrowingTextField: NSViewRepresentable {
     /// `DisplaySettings.spellCheck`, passed by the owning view.
     var spellChecking: Bool
     /// Files dropped ON THE TEXT FIELD, handed to the host so a drag
-    /// stages exactly what the + button stages. Set by the composer
-    /// while its mode chip is on Chat only; nil everywhere else, where a
-    /// dragged path is still typed in — see `DropForwardingTextView` for
-    /// why interception, and not a filter, is what takes the drag off
-    /// NSTextView. Re-pointed in `updateNSView` with the rest of the
-    /// host, since the chip moves while this view stands.
+    /// stages exactly what the + button stages; nil leaves the drag to
+    /// NSTextView, which types the file's path in — see
+    /// `DropForwardingTextView` for why interception, and not a filter,
+    /// is what takes the drag off it. Re-pointed in `updateNSView` with
+    /// the rest of the host.
     var onDropFiles: (([URL]) -> Void)? = nil
     var onDropTargeted: ((Bool) -> Void)? = nil
     /// The tier-scaled point size and the spacing between wrapped
@@ -2566,6 +3208,9 @@ struct GrowingTextField: NSViewRepresentable {
         tv.delegate = context.coordinator
         applyDropHandlers(to: tv)
         (tv as? DropForwardingTextView)?.sessionIdTokens = sessionIdTokens
+        // This is the agent composer's box: while it is empty, the arrow
+        // keys and Return belong to a card waiting above it.
+        (tv as? DropForwardingTextView)?.yieldsCardKeys = true
         TextInputTypography.apply(pointSize: fontSize, lineSpacing: lineSpacing, to: tv)
         tv.isRichText = false
         tv.allowsUndo = true
@@ -2824,5 +3469,410 @@ private struct SchedulePopover: View {
         // largest tier a column of one-chip rows.
         .padding(14 * ratio)
         .frame(width: 300 * ratio)
+    }
+}
+
+// MARK: - Messages sent while the agent works
+
+/// The messages sent while the turn runs, stuck to the top of the message
+/// box (`HeldMessage`): each with Steer while the turn takes one, Send once
+/// no turn runs, and × to put it back in the box to be changed. One sent into the turn stays, marked,
+/// until the agent reads it — its row then appears in the transcript, where
+/// the agent's own record puts it. Observes the queue alone: the column it
+/// sits in does not redraw on it.
+private struct HeldMessageStrip: View {
+    @ObservedObject var queue: HeldMessageQueue
+    let agentName: String
+    /// Another process runs a turn on the session: nothing goes now.
+    let externalBusy: Bool
+    let onSteer: (UUID) -> Void
+    let onSend: (UUID) -> Void
+    let onCancel: (UUID) -> Void
+    @Environment(\.sipFontScale) private var fontScale
+
+    private var ratio: CGFloat { SipFont.ratio(fontScale) }
+
+    var body: some View {
+        if !queue.messages.isEmpty || queue.refusal != nil {
+            VStack(alignment: .leading, spacing: 4 * ratio) {
+                ForEach(queue.messages) { message in
+                    row(message)
+                }
+                if let refusal = queue.refusal {
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .sipFont(11)
+                            .foregroundStyle(.orange)
+                        // The agent's words: a String expression, never an
+                        // interpolated literal.
+                        Text(refusal)
+                            .sipFont(12)
+                            .foregroundColor(SipDesign.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .transition(.opacity)
+        }
+    }
+
+    private func row(_ message: HeldMessage) -> some View {
+        HStack(alignment: .center, spacing: 6 * ratio) {
+            Image(systemName: message.steered ? "arrow.turn.down.right" : "clock")
+                .sipFont(11)
+                .foregroundColor(SipDesign.textHint)
+            // The user's own words, verbatim.
+            Text(verbatim: summary(message))
+                .sipFont(13)
+                .foregroundColor(message.steered ? SipDesign.textSecondary : SipDesign.textPrimary)
+                .lineLimit(2)
+                .truncationMode(.tail)
+            Spacer(minLength: 8 * ratio)
+            trailing(message)
+        }
+        .padding(.horizontal, 10 * ratio)
+        .padding(.vertical, 6 * ratio)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(SipDesign.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(SipDesign.borderLight, lineWidth: 1)
+                )
+        )
+    }
+
+    @ViewBuilder
+    private func trailing(_ message: HeldMessage) -> some View {
+        if message.steered {
+            Text(String(localized: "Sent — \(agentName) reads it at its next step",
+                        comment: "Beside a message sent into the running turn, until the agent reads it; placeholder is the agent label"))
+                .sipFont(11)
+                .foregroundColor(SipDesign.textHint)
+                .fixedSize()
+        } else {
+            if queue.turnRunning {
+                if queue.steerable, message.canGoIntoTurn {
+                    textButton(String(localized: "Steer",
+                                      comment: "Button beside a message held while the agent works: send it into the running turn now"),
+                               hint: String(localized: "Send it into the turn now. \(agentName) reads it at its next step.",
+                                            comment: "Hover hint on the Steer button beside a held message; placeholder is the agent label")) {
+                        onSteer(message.id)
+                    }
+                } else {
+                    Text(String(localized: "Sends when this turn ends",
+                                comment: "Beside a message held while the agent works, where it cannot go into the running turn"))
+                        .sipFont(11)
+                        .foregroundColor(SipDesign.textHint)
+                        .fixedSize()
+                }
+            } else {
+                textButton(String(localized: "Send",
+                                  comment: "Button beside a message held while the agent worked, once no turn runs: send it now"),
+                           hint: String(localized: "Send it now",
+                                        comment: "Hover hint on the Send button beside a held message")) {
+                    onSend(message.id)
+                }
+                .disabled(externalBusy)
+                .opacity(externalBusy ? 0.5 : 1)
+            }
+            HoverHighlight(hint: String(localized: "Put it back in the message box",
+                                        comment: "Hover hint on the × beside a message held while the agent works: it is not sent, and its words and files go back into the message box")) {
+                Button { onCancel(message.id) } label: {
+                    Image(systemName: "xmark")
+                        .sipFont(10, weight: .bold)
+                        .foregroundColor(SipDesign.textHint)
+                        .frame(width: 20 * ratio, height: 20 * ratio)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "Put it back in the message box",
+                                           comment: "Hover hint on the × beside a message held while the agent works: it is not sent, and its words and files go back into the message box"))
+            }
+        }
+    }
+
+    /// A word button in the strip's idiom: the hover fill and the instant
+    /// hint every control beside the box answers with.
+    private func textButton(_ title: String, hint: String,
+                            action: @escaping () -> Void) -> some View {
+        HoverHighlight(hint: hint) {
+            Button(action: action) {
+                Text(title)
+                    .sipFont(12, weight: .semibold)
+                    .foregroundColor(SipDesign.blue)
+                    .padding(.horizontal, 6 * ratio)
+                    .padding(.vertical, 2 * ratio)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    /// The row's words: the message on one run of text, else the files it
+    /// carries.
+    private func summary(_ message: HeldMessage) -> String {
+        let words = message.display
+            .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
+            .joined(separator: " ")
+        if !words.isEmpty { return words }
+        return message.attachedFiles.joined(separator: ", ")
+    }
+}
+
+// MARK: - Codex's review picker
+
+/// What `/review` opens in a codex session: codex's own review presets, in
+/// its own words, then the branch or the commit — read off the session's
+/// folder with git — or the user's own instructions. A choice runs codex's
+/// review, or waits above the box while a turn runs; × closes it with
+/// nothing run.
+private struct CodexReviewPicker: View {
+    let folder: URL
+    let onChoose: (CodexReviewTarget, String) -> Void
+    let onCancel: () -> Void
+    @Environment(\.sipFontScale) private var fontScale
+    @State private var step: Step = .presets
+    @State private var search = ""
+    @State private var instructions = ""
+    @State private var branches: [String]? = nil
+    @State private var commits: [CodexReviewGit.Commit]? = nil
+    @FocusState private var fieldFocused: Bool
+
+    private enum Step { case presets, branch, commit, custom }
+
+    private var ratio: CGFloat { SipFont.ratio(fontScale) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6 * ratio) {
+            header
+            switch step {
+            case .presets: presets
+            case .branch: branchStep
+            case .commit: commitStep
+            case .custom: customStep
+            }
+        }
+        .padding(10 * ratio)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(SipDesign.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(SipDesign.borderLight, lineWidth: 1)
+                )
+        )
+        .task(id: step) { await loadStep() }
+    }
+
+    private var title: String {
+        switch step {
+        case .presets: return CodexReviewWords.selectPreset
+        case .branch: return CodexReviewWords.selectBaseBranch
+        case .commit: return CodexReviewWords.selectCommit
+        case .custom: return CodexReviewWords.customInstructions
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 6 * ratio) {
+            if step != .presets {
+                HoverHighlight(hint: String(localized: "Back",
+                                            comment: "Codex review picker: back to the review presets")) {
+                    Button { go(to: .presets) } label: {
+                        Image(systemName: "chevron.left")
+                            .sipFont(11, weight: .semibold)
+                            .foregroundColor(SipDesign.textSecondary)
+                            .frame(width: 20 * ratio, height: 20 * ratio)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(String(localized: "Back",
+                                               comment: "Codex review picker: back to the review presets"))
+                }
+            }
+            Text(title)
+                .sipFont(13, weight: .semibold)
+                .foregroundColor(SipDesign.textPrimary)
+            Spacer(minLength: 8 * ratio)
+            HoverHighlight(hint: String(localized: "Close",
+                                        comment: "Codex review picker: close it with nothing run"),
+                           hintAlignment: .trailing) {
+                Button(action: onCancel) {
+                    Image(systemName: "xmark")
+                        .sipFont(10, weight: .bold)
+                        .foregroundColor(SipDesign.textHint)
+                        .frame(width: 20 * ratio, height: 20 * ratio)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "Close",
+                                           comment: "Codex review picker: close it with nothing run"))
+            }
+        }
+    }
+
+    private var presets: some View {
+        VStack(alignment: .leading, spacing: 2 * ratio) {
+            choiceRow(CodexReviewWords.againstBaseBranch) { go(to: .branch) }
+            choiceRow(CodexReviewWords.uncommittedChanges) {
+                onChoose(.uncommittedChanges, CodexReviewWords.uncommittedChanges)
+            }
+            choiceRow(CodexReviewWords.aCommit) { go(to: .commit) }
+            choiceRow(CodexReviewWords.customInstructions) { go(to: .custom) }
+        }
+    }
+
+    private var branchStep: some View {
+        let shown = (branches ?? []).filter(matches)
+        return VStack(alignment: .leading, spacing: 4 * ratio) {
+            searchField(CodexReviewWords.searchBranches) {
+                if let first = shown.first { chooseBranch(first) }
+            }
+            list(loading: branches == nil, empty: shown.isEmpty,
+                 emptyText: (branches ?? []).isEmpty
+                    ? String(localized: "No branches in this folder.",
+                             comment: "Codex review picker: the session's folder has no git branches to review against")
+                    : String(localized: "No results",
+                             comment: "Codex review picker: nothing matches what was typed in its search field")) {
+                ForEach(shown, id: \.self) { branch in
+                    // A branch name is the repository's text: verbatim.
+                    choiceRow(branch) { chooseBranch(branch) }
+                }
+            }
+        }
+    }
+
+    private var commitStep: some View {
+        let shown = (commits ?? []).filter { matches($0.sha) || matches($0.subject) }
+        return VStack(alignment: .leading, spacing: 4 * ratio) {
+            searchField(CodexReviewWords.searchCommits) {
+                if let first = shown.first { chooseCommit(first) }
+            }
+            list(loading: commits == nil, empty: shown.isEmpty,
+                 emptyText: (commits ?? []).isEmpty
+                    ? String(localized: "No commits in this folder.",
+                             comment: "Codex review picker: the session's folder has no git commits to review")
+                    : String(localized: "No results",
+                             comment: "Codex review picker: nothing matches what was typed in its search field")) {
+                ForEach(shown) { commit in
+                    commitRow(commit)
+                }
+            }
+        }
+    }
+
+    private var customStep: some View {
+        TextField(CodexReviewWords.typeInstructions, text: $instructions)
+            .textFieldStyle(.roundedBorder)
+            .sipFont(13)
+            .focused($fieldFocused)
+            .onSubmit {
+                let words = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !words.isEmpty else { return }
+                onChoose(.custom(words), CodexReviewWords.label(customInstructions: words))
+            }
+    }
+
+    private func searchField(_ placeholder: String, onSubmit: @escaping () -> Void) -> some View {
+        TextField(placeholder, text: $search)
+            .textFieldStyle(.roundedBorder)
+            .sipFont(13)
+            .focused($fieldFocused)
+            .onSubmit(onSubmit)
+    }
+
+    @ViewBuilder
+    private func list<Rows: View>(loading: Bool, empty: Bool, emptyText: String,
+                                  @ViewBuilder rows: () -> Rows) -> some View {
+        if loading {
+            ProgressView()
+                .controlSize(.small)
+                .padding(.vertical, 4 * ratio)
+        } else if empty {
+            Text(emptyText)
+                .sipFont(12)
+                .foregroundColor(SipDesign.textHint)
+                .padding(.vertical, 4 * ratio)
+        } else {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2 * ratio) {
+                    rows()
+                }
+            }
+            .frame(maxHeight: 180 * ratio)
+        }
+    }
+
+    private func choiceRow(_ text: String, action: @escaping () -> Void) -> some View {
+        HoverHighlight {
+            Button(action: action) {
+                Text(verbatim: text)
+                    .sipFont(13)
+                    .foregroundColor(SipDesign.textPrimary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 6 * ratio)
+                    .padding(.vertical, 4 * ratio)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func commitRow(_ commit: CodexReviewGit.Commit) -> some View {
+        HoverHighlight {
+            Button { chooseCommit(commit) } label: {
+                HStack(spacing: 8 * ratio) {
+                    Text(verbatim: commit.shortSha)
+                        .sipFont(12, design: .monospaced)
+                        .foregroundColor(SipDesign.textSecondary)
+                    Text(verbatim: commit.subject)
+                        .sipFont(13)
+                        .foregroundColor(SipDesign.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 6 * ratio)
+                .padding(.vertical, 4 * ratio)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private func matches(_ text: String) -> Bool {
+        let query = search.trimmingCharacters(in: .whitespaces)
+        return query.isEmpty || text.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+    }
+
+    private func go(to next: Step) {
+        search = ""
+        step = next
+        fieldFocused = next != .presets
+    }
+
+    private func chooseBranch(_ branch: String) {
+        onChoose(.baseBranch(branch), CodexReviewWords.label(baseBranch: branch))
+    }
+
+    private func chooseCommit(_ commit: CodexReviewGit.Commit) {
+        onChoose(.commit(sha: commit.sha, title: commit.subject.isEmpty ? nil : commit.subject),
+                 CodexReviewWords.label(commit: commit.shortSha, subject: commit.subject))
+    }
+
+    /// The step's list, read once per picker: a picker is opened for one
+    /// review.
+    private func loadStep() async {
+        switch step {
+        case .branch where branches == nil:
+            branches = await CodexReviewGit.branches(in: folder)
+        case .commit where commits == nil:
+            commits = await CodexReviewGit.commits(in: folder)
+        default:
+            break
+        }
     }
 }

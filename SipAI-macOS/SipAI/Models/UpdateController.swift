@@ -34,11 +34,12 @@
 // already nil. A hold that only this delegate knew about looked, to
 // the person who clicked, like a button that does not work. So the
 // hold is governed by `UpdateInstallHold` (the pure rule), asked about
-// at the click (a sheet on Sparkle's own window), said beside the
-// sidebar's logo the moment it starts, marked by the Settings badge
-// and the line in Settings → Updates for as long as it lasts, endable
-// from there, and ABANDONED on quit so an explicit ⌘Q ends in
-// Sparkle's install-on-quit rather than a relaunch nobody asked for.
+// at the click (a sheet on Sparkle's own window), shown beside the
+// sidebar's logo with Install Now from the moment it starts, marked by
+// the Settings badge and the line in Settings → Updates for as long as
+// it lasts, endable from either, and ABANDONED on quit so an explicit ⌘Q
+// ends in Sparkle's install-on-quit rather than a relaunch nobody asked
+// for.
 
 import AppKit
 import Foundation
@@ -283,7 +284,9 @@ final class UpdateController: NSObject, ObservableObject {
     /// news even where the release was already seen.
     private func publishBadge() {
         var items: [UpdateBadgeItem] = []
-        if let availableUpdate { items.append(.app(version: availableUpdate.version)) }
+        if let availableUpdate {
+            items.append(.app(version: availableUpdate.version, display: availableUpdate.display))
+        }
         if let heldUpdateVersion { items.append(.appInstall(version: heldUpdateVersion)) }
         UpdateBadge.shared.setAppItems(items)
     }
@@ -313,12 +316,9 @@ final class UpdateController: NSObject, ObservableObject {
             exists: { FileManager.default.fileExists(atPath: $0) })
         defaults.set(outcome.records, forKey: CopyLaunchRecord.defaultsKey)
         guard outcome.updated else { return }
-        // The same sentence a tool's update uses, so one translation
-        // serves both. The name is not translated anywhere.
-        let name = "SipAI"
-        UpdateAnnouncer.shared.announce(
-            String(localized: "\(name) just updated to \(currentVersion)",
-                   comment: "Sidebar, in place of the SipAI wordmark for a few seconds: a command-line tool (or SipAI itself) has just been updated; placeholders are the tool's label and the new version number"))
+        // The same words a tool's update uses, so one translation serves
+        // both. The name is not translated anywhere.
+        SidebarNotices.shared.post(.updated(name: "SipAI", version: currentVersion))
     }
 
     // MARK: - The hold, driven by the rule
@@ -380,16 +380,14 @@ final class UpdateController: NSObject, ObservableObject {
 
     private func beginHold() {
         heldUpdateVersion = pendingVersion
+        // Shown where it can be seen, for as long as it lasts: Sparkle's
+        // window goes quiet from here on (see the file header), and a
+        // click that changed nothing on screen reads as a button that did
+        // nothing. The held install stands beside the logo with Install
+        // Now — offered anew each time the user chooses to wait, whatever
+        // was closed before — and the badge marks the same in Settings.
+        SidebarNotices.shared.reopen(key: UpdateBadgeItem.appInstallKey)
         publishBadge()
-        // Said where it can be seen, once: Sparkle's window goes quiet
-        // from here on (see the file header), and a click that changed
-        // nothing on screen reads as a button that did nothing. The
-        // badge then marks where Install Now is.
-        if let version = pendingVersion {
-            UpdateAnnouncer.shared.announce(
-                String(localized: "SipAI \(version) will install once the running turn finishes.",
-                       comment: "Sidebar, in place of the SipAI wordmark for a few seconds: the user chose to wait for a running agent turn before an update installs; placeholder is the new version"))
-        }
         startQuietMomentPoll()
         // Sparkle's "Ready to Install" window is inert from the click
         // on — see `sparkleStatusWindow()`. It is hidden one run-loop

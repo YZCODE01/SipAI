@@ -3,6 +3,7 @@
 
 import SwiftUI
 import AppKit
+import Combine
 import UserNotifications
 
 /// Activation policy + dock icon for the SPM-launched executable, plus
@@ -88,6 +89,9 @@ struct SipAIApp: App {
     private let notificationCoordinator = NotificationCoordinator()
 
     init() {
+        // First, before anything opens it: the web cache an earlier
+        // SipAI kept provider requests in — keys and chat text included.
+        WebCache.removeLeftovers()
         // Make sure the Mac app's data directory exists
         // (~/Library/Application Support/SipAI/).
         SipaiPaths.ensureDataDir()
@@ -101,6 +105,14 @@ struct SipAIApp: App {
             await ShellEnvironment.prepare()
             return AgentRunner.buildEnvironment()
         }
+        // Codex's compressed rollouts (`.jsonl.zst`) are read through the
+        // bundled zstd decoder — installed before any session is read.
+        SessionFileCompression.decoder = ZstdFileDecoder.open
+        SessionFileCompression.statedSize = ZstdFileDecoder.statedSize
+        // Codex's speeds come from the list it saved for the account while
+        // it is signed in with ChatGPT (`CodexCatalog.preferred`); the
+        // sign-in is the usage window's verdict on codex's account.
+        CodexCatalog.chatGPTSignIn = { UsageMonitor.shared.accounts["codex"]?.isPlan == true }
     }
 
     var body: some Scene {
@@ -118,13 +130,20 @@ struct SipAIApp: App {
                 // Configured app shrinks to 640×480, small enough that two
                 // windows tile side by side on a laptop display. Below ~640
                 // the agent composer's control strip starts clipping with the
-                // sidebar open. Onboarding keeps the roomier floor its fixed
-                // 420-pt cards were designed around.
+                // sidebar open. The welcome page keeps the roomier floor its
+                // column and button are laid out for.
                 .frame(
-                    minWidth: configManager.needsOnboarding ? 720 : 640,
-                    minHeight: configManager.needsOnboarding ? 540 : 480
+                    minWidth: configManager.needsOnboarding ? FirstWindowSize.floor.width : 640,
+                    minHeight: configManager.needsOnboarding ? FirstWindowSize.floor.height : 480
                 )
-                .preferredColorScheme(appState.theme.colorScheme)
+                // Settings → Display → Appearance is the whole app's look:
+                // every window, sheet, alert, file panel and menu takes it,
+                // and going back to System reaches every view at once (see
+                // `AppTheme.appearance` for why it is not SwiftUI's
+                // colour-scheme preference).
+                .onChange(of: appState.theme, initial: true) { _, theme in
+                    NSApp.appearance = theme.appearance
+                }
                 // NOTE: no `.environment(\.locale, …)`. The UI language
                 // is resolved by the bundle at launch from
                 // `AppleLanguages` (see `AppLanguage`); overriding the
@@ -150,6 +169,12 @@ struct SipAIApp: App {
                     // answering, write every thread's stack to
                     // ~/Library/Logs/SipAI — and touch nothing else.
                     HangCapture.start()
+                    // The View menu's zoom keys, ⌘= with them — see
+                    // `ZoomKeys`. Installed once; another window's
+                    // onAppear finds it in place.
+                    ZoomKeys.install { [weak configManager = configManager] step in
+                        configManager?.zoom(step) ?? false
+                    }
                     configManager.reload()
                     // Before the reload below, which prunes the unread
                     // replies of chats that are gone through it.
@@ -174,6 +199,9 @@ struct SipAIApp: App {
                     // its restore) is put right before anything else
                     // touches it.
                     agentManager.healKimiToolPolicies()
+                    // And one an ACP turn left bound to ACP's runtime,
+                    // which runs without its file and command tools.
+                    agentManager.healKimiRuntimeBindings()
                     // Images a codex Chat only turn was handed, left
                     // behind by a crash or a force-quit. A directory
                     // walk, so not on the main thread.
@@ -190,14 +218,10 @@ struct SipAIApp: App {
                     // knows to wait for a running turn of that tool.
                     AgentCLIUpdateMonitor.shared.start(config: configManager,
                                                        agents: agentManager)
-                    // The update lines beside the logo follow Settings →
-                    // Display → Show update messages. Off, nothing is
-                    // queued or spoken. The logo and name they take the
-                    // place of are always drawn.
-                    UpdateAnnouncer.shared.isEnabled = { [weak configManager] in
-                        guard let display = configManager?.display else { return true }
-                        return display.showUpdateMessages
-                    }
+                    // What the notices beside the logo ask of the app —
+                    // before `noteLaunch`, which may already have
+                    // something to say.
+                    wireSidebarNotices()
                     // This launch may be the relaunch an update installed;
                     // if so it is said beside the logo, like a tool's.
                     updateController.noteLaunch()
@@ -245,16 +269,19 @@ struct SipAIApp: App {
                         // Session-id match first.
                         if !sessionId.isEmpty,
                            let session = agentManager.sessions.first(where: { $0.id == sessionId }) {
-                            appState.openAgentSessionId = session.id
-                            appState.openAgentSessionPath = session.fileURL
+                            openSession(session)
                             return
                         }
                         // Task-uuid (draft) match — unusual but supported:
                         // the user clicked a notification for a session that
                         // hasn't been migrated to a session_id yet.
+                        // Only a draft that has SENT has a runner, and only
+                        // its runner can have asked: an unsent draft gets
+                        // none here — creating one would freeze the folder
+                        // the user can still change (`cachedRunner`).
                         if !taskUuid.isEmpty,
-                           let draft = appState.pendingClaudeSessionDraft {
-                            let runner = agentManager.runner(forDraft: draft)
+                           let draft = appState.pendingClaudeSessionDraft,
+                           let runner = agentManager.cachedRunner(forDraft: draft) {
                             if runner.taskUuidForBridge == taskUuid {
                                 // Already focused on the right draft; no-op.
                                 return
@@ -267,8 +294,7 @@ struct SipAIApp: App {
                             agentManager.reloadSessions()
                             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                                 if let session = agentManager.sessions.first(where: { $0.id == sessionId }) {
-                                    appState.openAgentSessionId = session.id
-                                    appState.openAgentSessionPath = session.fileURL
+                                    openSession(session)
                                 }
                             }
                         }
@@ -296,9 +322,12 @@ struct SipAIApp: App {
                         // lands a beat later. The draft on screen is that
                         // session, so it is judged by its uuid — or a card
                         // the user is looking at posts a notification.
+                        // Never a runner made for the occasion: an unsent
+                        // draft has none, and making one would freeze the
+                        // folder the user can still change.
                         if let tu = req.taskUuid, !tu.isEmpty,
-                           let draft = appState.pendingClaudeSessionDraft {
-                            let runner = agentManager.runner(forDraft: draft)
+                           let draft = appState.pendingClaudeSessionDraft,
+                           let runner = agentManager.cachedRunner(forDraft: draft) {
                             return runner.taskUuidForBridge == tu
                         }
                         return false
@@ -325,7 +354,12 @@ struct SipAIApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
-        .defaultSize(width: 720, height: 540)
+        // Only where macOS has no frame saved for the window — a first
+        // launch; afterwards the window opens where it was left.
+        .defaultWindowPlacement { _, context in
+            WindowPlacement(.center,
+                            size: FirstWindowSize.size(visible: context.defaultDisplay.visibleRect.size))
+        }
         .commands {
             // Conventional slot: directly under "About SipAI" in the
             // app menu, which is where every Mac user already looks for
@@ -355,7 +389,164 @@ struct SipAIApp: App {
                     withAnimation { appState.leftSidebarVisible.toggle() }
                 }
                 .keyboardShortcut("s", modifiers: [.command, .control])
+                Divider()
+                // Settings → Display → Zoom, a size at a time. Their keys
+                // are answered by `ZoomKeys`, installed at launch.
+                ZoomMenuItems(setting: configManager)
+                Divider()
+                // Settings → Display → Agent sessions → Compact view, the
+                // toolbar window's switch.
+                CompactViewMenuItem(setting: configManager)
             }
         }
+    }
+}
+
+// MARK: - The first window's size
+
+/// The size the window opens at when macOS has none saved for it: about
+/// 70 % of the screen's free area, held between the welcome page's floor
+/// (720 × 540) and 1200 × 800, never larger than the free area itself. A
+/// fixed size reads as a small window on a large display, and the window
+/// that shows the welcome page is the main window once Get started is
+/// clicked. Whole points: a fractional window width leaves a sub-point
+/// residue in the panes' layout.
+enum FirstWindowSize {
+    static let floor = CGSize(width: 720, height: 540)
+    static let ceiling = CGSize(width: 1200, height: 800)
+    static let share: CGFloat = 0.7
+
+    static func size(visible: CGSize) -> CGSize {
+        CGSize(width: fit(visible.width, floor.width, ceiling.width),
+               height: fit(visible.height, floor.height, ceiling.height))
+    }
+
+    private static func fit(_ available: CGFloat, _ low: CGFloat, _ high: CGFloat) -> CGFloat {
+        min(available.rounded(.down), max(low, min(high, (available * share).rounded())))
+    }
+}
+
+// MARK: - The notices beside the logo
+
+extension SipAIApp {
+    /// A session opened from outside the sidebar — a card's macOS
+    /// notification, the bubble beside the logo. A scheduled run opens
+    /// under its task's panel, as from its row; any other session takes
+    /// down a task page left open, whose panel would otherwise stand above
+    /// a transcript that is not its run.
+    @MainActor
+    fileprivate func openSession(_ session: AgentSession) {
+        appState.openAgentSessionId = session.id
+        appState.openAgentSessionPath = session.fileURL
+        appState.openScheduledTaskName = session.scheduledTaskName
+    }
+
+    /// Everything `SidebarNotices` asks of the app: the switch, what keeps
+    /// a notice true, what a click opens, what an update's button runs —
+    /// and the cards it is told of.
+    @MainActor
+    fileprivate func wireSidebarNotices() {
+        let notices = SidebarNotices.shared
+        // Settings → Display → Show notifications beside the logo. Off,
+        // nothing is queued or spoken. The logo and name the bubble takes
+        // the place of are always drawn.
+        notices.isEnabled = { [weak configManager] in
+            configManager?.display.showSidebarNotices ?? true
+        }
+        notices.isStillTrue = { [weak mcpBridge, weak configManager] notice in
+            switch notice.kind {
+            case .needsAction:
+                // A card of that session still waits, and nobody is
+                // looking at it.
+                guard let bridge = mcpBridge else { return false }
+                let cards = bridge.pending.filter { req in
+                    if case .session(let id)? = notice.target {
+                        return bridge.owningSessionId(of: req) == id
+                    }
+                    return req.id == notice.requestId
+                }
+                return cards.contains { !(bridge.isApprovalFocused?($0) ?? false) }
+            case .finished, .failed:
+                // Not opened since: its steady dot is still on the row.
+                switch notice.target {
+                case .session(let id)?:
+                    return configManager?.agentUnreadSessions.contains(id) ?? true
+                case .chat(let slug, let project)?:
+                    return configManager?.chatUnreadKeys
+                        .contains(ChatManager.liveKey(slug: slug, project: project)) ?? true
+                case nil:
+                    return true
+                }
+            case .updated:
+                return true
+            }
+        }
+        notices.open = { [weak appState, notificationCoordinator] target in
+            switch target {
+            case .session(let id):
+                // The road a click on a card's macOS notification takes:
+                // Settings closes, and a session the scan has not reached
+                // yet is looked for again.
+                notificationCoordinator.onApprovalClicked?(id, "")
+            case .chat(let slug, let project):
+                guard let appState else { return }
+                appState.openChatSlug = slug
+                appState.openChatProject = project
+                // Settings is a layer over the routes: left open, it would
+                // go on covering the chat just opened.
+                appState.settingsSection = nil
+            }
+        }
+        notices.performOffer = { [weak updateController] item in
+            switch item.kind {
+            case .app:
+                // Sparkle's own window: the release notes, and Install.
+                guard let updateController, updateController.canCheckForUpdates else { return false }
+                updateController.checkForUpdates()
+                return true
+            case .appInstall:
+                updateController?.installNow()
+                return true
+            case .cli(let key):
+                // The Updates pane's road, and the automatic update's.
+                return AgentCLIUpdateMonitor.shared.startUpdate(agentKey: key)
+            }
+        }
+        mcpBridge.onRequestShown = { [weak mcpBridge, weak agentManager] req in
+            // Not for an agent that is not listed: it has no row to open.
+            guard let bridge = mcpBridge, let agents = agentManager,
+                  agents.isAgentReady(req.agentKey) else { return }
+            // Not for a card the user is looking at: it is right there.
+            if bridge.isApprovalFocused?(req) == true { return }
+            let sessionId = bridge.owningSessionId(of: req)
+            let names = agents.noticeNames(forSession: sessionId, agentKey: req.agentKey)
+            SidebarNotices.shared.post(.needsAction(agent: names.agent, group: names.group,
+                                                    sessionId: sessionId, requestId: req.id))
+        }
+        // What can make a notice untrue: a card answered, a session or a
+        // chat opened, Settings closed over the session a card is on.
+        for signal in [mcpBridge.$pending.map { _ in () }.eraseToAnyPublisher(),
+                       configManager.$agentUnreadSessions.map { _ in () }.eraseToAnyPublisher(),
+                       configManager.$chatUnreadKeys.map { _ in () }.eraseToAnyPublisher(),
+                       appState.$openAgentSessionId.map { _ in () }.eraseToAnyPublisher(),
+                       appState.$pendingClaudeSessionDraft.map { _ in () }.eraseToAnyPublisher(),
+                       appState.$settingsSection.map { _ in () }.eraseToAnyPublisher()] {
+            notices.watch(signal)
+        }
+    }
+}
+
+// The View menu's Zoom In / Zoom Out / Actual Size move this setting
+// (`ZoomMenuItems`). Declared beside the menu rather than beside
+// ConfigManager: the check scripts compile ConfigManager.swift without it.
+extension ConfigManager: ZoomSetting {}
+
+// Compact view's switch — the toolbar window, Settings → Display and the
+// View menu (`TranscriptViewWindow.swift`) — moves this one value, for the
+// same reason declared here.
+extension ConfigManager: CompactViewSetting {
+    var agentCompactView: Bool { display.agentCompactView }
+    func setAgentCompactView(_ on: Bool) {
+        setDisplay { $0.agentCompactView = on }
     }
 }

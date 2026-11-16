@@ -1,5 +1,6 @@
 // NotesSection.swift
-// Sidebar section listing notes from NotesManager. Each row carries a
+// Sidebar section listing notes from NotesManager. Its header's ⋮ hides
+// the section (Settings → Display shows it again). Each row carries a
 // vertical kebab menu (••• rotated) at the trailing edge that hovers
 // independently of the row body and exposes Rename / Save as / Delete.
 // Tapping the row body routes the center column to NoteView via
@@ -15,12 +16,15 @@ struct NotesSection: View {
     @Environment(\.sipFontScale) private var fontScale
 
     @Binding var expanded: Bool
+    /// The header ⋮'s Hide. The sidebar asks first, and owns the switch.
+    let hide: () -> Void
 
     var body: some View {
         DisclosureSection(
             title: String(localized: "Notes",
                           comment: "Sidebar section header for AI-generated notes"),
-            isExpanded: $expanded
+            isExpanded: $expanded,
+            accessory: { SectionHideMenu(hide: hide) }
         ) {
             if notes.notes.isEmpty {
                 emptyRow

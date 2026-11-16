@@ -27,25 +27,45 @@ enum ClaudeSessionStatusStore {
 /// The runner is not compiled here; the readers only need the event
 /// shapes and the one string the interrupted marker uses.
 struct StreamEvent {
+    /// The real one marks a `!` command's row; the readers pass it.
+    var shellCommand: Bool = false
     let kind: StreamEventKind
     let contextTokens: Int?
     let isSystemNotice: Bool
+    let sentIntoTurn: Bool
+    /// And whether a user-column row is part of the agent's answer, which
+    /// the readers and the tailer hand through.
+    var belongsToAnswer: Bool = false
     let fastModeState: String?
     let fastModeDisabledReason: String?
     let callSpeed: String?
     let modelContextWindows: [String: Int]?
+    let turnFailure: String?
+    let refusedAsTooLong: Bool
+    let attachedFiles: [String]
 
     init(kind: StreamEventKind, contextTokens: Int? = nil,
-         isSystemNotice: Bool = false, fastModeState: String? = nil,
+         isSystemNotice: Bool = false, sentIntoTurn: Bool = false, belongsToAnswer: Bool = false,
+         fastModeState: String? = nil,
          fastModeDisabledReason: String? = nil, callSpeed: String? = nil,
-         modelContextWindows: [String: Int]? = nil) {
+         modelContextWindows: [String: Int]? = nil,
+         turnFailure: String? = nil,
+         refusedAsTooLong: Bool = false,
+         attachedFiles: [String] = [],
+         shellCommand: Bool = false) {
+        self.shellCommand = shellCommand
         self.kind = kind
         self.contextTokens = contextTokens
         self.isSystemNotice = isSystemNotice
+        self.sentIntoTurn = sentIntoTurn
+        self.belongsToAnswer = belongsToAnswer
         self.fastModeState = fastModeState
         self.fastModeDisabledReason = fastModeDisabledReason
         self.callSpeed = callSpeed
         self.modelContextWindows = modelContextWindows
+        self.turnFailure = turnFailure
+        self.refusedAsTooLong = refusedAsTooLong
+        self.attachedFiles = attachedFiles
     }
 }
 
@@ -59,6 +79,7 @@ enum StreamEventKind {
     case result(durationMs: Int, totalCostUSD: Double?, numTurns: Int,
                 inputTokens: Int, outputTokens: Int)
     case compaction(preTokens: Int?, postTokens: Int?)
+    case shellOutput(ShellCommandOutput)
     case error(message: String)
     case interrupted(message: String)
 }
@@ -137,7 +158,8 @@ enum CodexConfigWrite {
 
 /// The folder read `CodexCatalog.refreshSpeedSettings` sends — a spawn
 /// as well, and unreachable for the same reason. The request builder
-/// and the answer's parse are the real ones, in AgentLaunchOptions.swift.
+/// and the answers' parse are the real ones, in AgentLaunchOptions.swift.
 extension CodexConfigRead {
-    static func run(binary: String, cwd: String) async -> [String: Any]? { nil }
+    static func run(binary: String, cwd: String) async
+    -> (config: [String: Any]?, requirements: [String: Any]?) { (nil, nil) }
 }

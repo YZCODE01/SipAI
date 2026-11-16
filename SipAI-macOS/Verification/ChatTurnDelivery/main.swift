@@ -254,6 +254,53 @@ func behavioural() async {
     check("a turn the user stopped leaves no mark, even after they left",
           !chats.isChatUnread(slug: stopped.slug, project: nil))
 
+    // The same moments are said beside the logo (`SidebarNotices`, the
+    // REAL driver): a reply that lands unread, by its provider and its
+    // chat group — never for the chat on screen, never after a Stop.
+    let notices = SidebarNotices.shared
+    func said() -> SidebarNotice? {
+        guard let notice = notices.current else { return nil }
+        notices.click(notice)   // read: the next one, if any, shows
+        return notice
+    }
+    func namedTurn(_ slug: String, _ project: String? = nil, group: String? = nil,
+                   stopped: Bool = false, failed: Bool = false) async {
+        let t = Task<Void, Never> { while !Task.isCancelled { await Task.yield() } }
+        chats.beginTurn(slug: slug, project: project, provider: "OpenAI", group: group,
+                        startedAt: Date(), task: t)
+        if stopped { chats.noteTurnOutcome(.interrupted, slug: slug, project: project) }
+        if failed { chats.noteTurnOutcome(.failed("The model refused."), slug: slug, project: project) }
+        chats.endTurn(slug: slug, project: project)
+        t.cancel()
+        await t.value
+    }
+    while said() != nil {}
+    let elsewhere = chats.saveChat(StoredChat(slug: "", title: "Said beside the logo",
+                                              messages: [ChatMessage(role: "user", content: "q")]))
+    chats.noteOpenChat(slug: here.slug, project: nil)
+    await namedTurn(elsewhere.slug)
+    let landed = said()
+    check("a reply that lands unread is said beside the logo, by its provider",
+          landed?.kind == .finished && landed?.target == .chat(slug: elsewhere.slug, project: nil)
+            && landed?.line == "OpenAI chat finished", "\(String(describing: landed?.line))")
+    await namedTurn(here.slug)
+    check("…not for the chat on screen", said() == nil)
+    await namedTurn(elsewhere.slug, stopped: true)
+    check("…nor after a Stop", said() == nil)
+    await namedTurn(elsewhere.slug, failed: true)
+    let failedNotice = said()
+    check("a turn that failed is said as one, never as finished",
+          failedNotice?.kind == .failed && failedNotice?.line == "OpenAI chat failed",
+          "\(String(describing: failedNotice?.line))")
+    _ = chats.moveChat(slug: elsewhere.slug, project: nil, toProject: "work")
+    await namedTurn(elsewhere.slug, "work", group: "Work")
+    let grouped = said()
+    check("…a chat in a group names the group",
+          grouped?.line == "OpenAI chat · Work finished"
+            && grouped?.target == .chat(slug: elsewhere.slug, project: "work"),
+          "\(String(describing: grouped?.line))")
+    chats.noteOpenChat(slug: nil, project: nil)
+
     check("an unread chat is placed in the unread tier",
           chats.sidebarTier(slug: away.slug, project: nil) == .unread)
     chats.noteOpenChat(slug: away.slug, project: nil)

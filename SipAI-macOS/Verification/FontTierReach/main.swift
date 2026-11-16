@@ -462,6 +462,9 @@ checkNoLiteralFonts(in: "SipAI/Views/Settings/SettingsView.swift")
 // while Settings is open: sidebar rows, on the sidebar's own sizes.
 checkNoLiteralFonts(in: "SipAI/Views/Settings/SettingsNavigation.swift")
 checkNoLiteralFonts(in: "SipAI/Views/ModelSetupSheet.swift")
+// The toolbar's agent session window (Compact view's switch), a popover-
+// like overlay of the main window, as the plan-usage window is.
+checkNoLiteralFonts(in: "SipAI/Views/TranscriptViewWindow.swift")
 // The scheduled-task page: once exempted as "window chrome", which it
 // never was — as a banner it is a form above the transcript, and for a
 // task that has not run it IS the centre pane.
@@ -584,6 +587,24 @@ if let src = lines(of: "SipAI/Views/Chat/AgentSessionView.swift") {
     }
     check(constant.isEmpty, "AgentSessionView's transcript stacks no longer carry a constant gap",
           "line \(constant.first.map { $0.offset + 1 } ?? 0)")
+    // The error row sits inside the transcript re-scope beside the
+    // interrupted row: both state their icon and their text at the size
+    // they show at Default. A raw `12 * fontScale` there sets the text 7 %
+    // under its own icon, at every tier.
+    if let start = src.firstIndex(where: { codeOnly($0).contains("private func errorRow(") }) {
+        let row = block(of: src, from: start)
+        let rawSize = try! NSRegularExpression(pattern: #"size:\s*1[0-9]\s*\*\s*fontScale[,)]"#)
+        let raw = row.filter { line in
+            let code = codeOnly(line)
+            return rawSize.firstMatch(in: code, range: NSRange(code.startIndex..., in: code)) != nil
+        }
+        let atDefault = row.filter { codeOnly($0).contains("size: 12 * SipFont.contentRatio(fontScale)") }
+        check(raw.isEmpty && atDefault.count == 2,
+              "the error row's icon and text are both the size they show at Default, as the interrupted row's are",
+              "\(raw.count) raw, \(atDefault.count) at Default")
+    } else {
+        check(false, "AgentSessionView's errorRow found")
+    }
 }
 
 if let src = lines(of: "SipAI/Utilities/MarkdownRenderer.swift") {

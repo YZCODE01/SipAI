@@ -14,8 +14,9 @@
 // So a branch is a new session file:
 //
 //   ~/.claude/projects/<same project dir>/<new uuid>.jsonl
-//       = every record of the source up to (not including) the record
-//         the user is editing, with `sessionId` rewritten and the
+//       = the source's records up to (not including) the record the
+//         user is editing, less any turn a rewind dropped above it
+//         (`ClaudeConversationLine`), with `sessionId` rewritten and the
 //         uuid/parentUuid chain left intact.
 //
 // then `claude --resume <new uuid> -p "<edited text>"`, which is what
@@ -60,9 +61,14 @@ enum AgentSessionFork {
         /// words this one with the agent's label; the description here
         /// names none.
         case agentUnavailable
+        /// An agent SipAI has no branch writer for (`hasWriter`).
+        case agentNotSupported
 
         var errorDescription: String? {
             switch self {
+            case .agentNotSupported:
+                return String(localized: "SipAI doesn’t support this for this agent yet.",
+                              comment: "Refusal for an agent SipAI has no code for")
             case .agentUnavailable:
                 return String(localized: "The command-line tool did not answer, so the branch was not created.",
                               comment: "Branch error when the agent's own fork call got no reply")
@@ -87,6 +93,17 @@ enum AgentSessionFork {
         let fileURL: URL
     }
 
+    /// Whether a branch writer exists for `agentKey` — the agents the
+    /// session view's branch dispatches on. Any other agent is offered no
+    /// pencil: written as another agent's transcript, its branch would be
+    /// a file its own CLI cannot read.
+    static func hasWriter(agentKey: String) -> Bool {
+        switch agentKey {
+        case "claude_code", "codex", "kimi": return true
+        default: return false
+        }
+    }
+
     // MARK: - Per-line rule (pure — exercised headless)
 
     /// What becomes of one source line in the branch.
@@ -107,18 +124,27 @@ enum AgentSessionFork {
     static func verdict(forLine line: String,
                         cutAtRecordUuid: String,
                         newSessionId: String) -> LineVerdict {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return .drop }
-        guard let data = trimmed.data(using: .utf8),
-              var obj = (try? JSONSerialization.jsonObject(with: data))
-                as? [String: Any]
-        else {
+        guard let obj = record(line) else {
             // Unparseable: a line torn by a live writer at EOF, or
             // garbage. It cannot be the cut point and its `sessionId`
             // cannot be rewritten, so carrying it forward would plant
             // the SOURCE's id inside the branch. Drop it.
             return .drop
         }
+        return verdict(forRecord: obj, cutAtRecordUuid: cutAtRecordUuid,
+                       newSessionId: newSessionId)
+    }
+
+    private static func record(_ line: String) -> [String: Any]? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    static func verdict(forRecord record: [String: Any],
+                        cutAtRecordUuid: String,
+                        newSessionId: String) -> LineVerdict {
+        var obj = record
         if (obj["uuid"] as? String) == cutAtRecordUuid {
             return .stop
         }
@@ -144,9 +170,9 @@ enum AgentSessionFork {
         // branch inside the task, count it among the task's runs, and
         // drag the task's "last active" to now. The marker is a paired
         // EMPTY tag with the prompt outside it, so removing it costs the
-        // record nothing else.
-        if (obj["type"] as? String) == "user",
-           trimmed.contains("<scheduled-task") {
+        // record nothing else; a record without one is handed back as it
+        // was.
+        if (obj["type"] as? String) == "user" {
             obj["message"] = strippingScheduledTaskMarker(obj["message"])
         }
         // Every record that carries the session id has to be re-pointed;
@@ -181,17 +207,8 @@ enum AgentSessionFork {
     /// keeps one stray marker is a far smaller problem than a branch
     /// that won't resume.
     static func strippingScheduledTaskMarker(_ message: Any?) -> Any? {
-        guard var dict = message as? [String: Any],
-              let regex = scheduledTaskMarker else { return message }
-        func stripped(_ text: String) -> String? {
-            guard text.contains("<scheduled-task") else { return nil }
-            let out = regex.stringByReplacingMatches(
-                in: text,
-                range: NSRange(text.startIndex..., in: text),
-                withTemplate: ""
-            ).trimmingCharacters(in: .whitespacesAndNewlines)
-            return out.isEmpty ? nil : out
-        }
+        guard var dict = message as? [String: Any] else { return message }
+        func stripped(_ text: String) -> String? { strippedScheduledTaskMarker(fromText: text) }
         if let s = dict["content"] as? String {
             guard let out = stripped(s) else { return message }
             dict["content"] = out
@@ -213,6 +230,18 @@ enum AgentSessionFork {
             return dict
         }
         return message
+    }
+
+    /// `text` without the scheduled-run marker, or nil when it holds none
+    /// — or holds nothing else, which is left as it is (see above).
+    static func strippedScheduledTaskMarker(fromText text: String) -> String? {
+        guard text.contains("<scheduled-task"), let regex = scheduledTaskMarker else { return nil }
+        let out = regex.stringByReplacingMatches(
+            in: text,
+            range: NSRange(text.startIndex..., in: text),
+            withTemplate: ""
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        return out.isEmpty ? nil : out
     }
 
     /// True when a prefix holds an actual conversation — at least one
@@ -255,16 +284,23 @@ enum AgentSessionFork {
     /// the message you sent a minute ago, still in the runner's event
     /// buffer, which never went through the transcript reader. Matching
     /// on the cleaned text is the same identification
-    /// `AgentSessionView.trimmedForInFlight` already makes between a
-    /// live event and its record.
+    /// `TranscriptSeam.cut` already makes between a live event and its
+    /// record.
     ///
     /// Newest-first, because a repeated prompt ("continue") should
     /// branch at the one you can see, not at its first occurrence —
     /// and `skippingNewest` is how many newer occurrences of the same
     /// text the caller can see BELOW the one it means, so the pencil on
     /// the older of two identical live rows cuts at that one.
+    ///
+    /// A message of attached files alone has no words to match: its
+    /// record is the one with no words whose attachment markers name
+    /// `files`, the live row's own (`StreamEvent.attachedFiles`), read
+    /// through the same `AttachmentInline.names` the reader draws the
+    /// paperclip line with.
     /// Reads files; call it off the main thread.
     static func resolveCutPoint(matchingUserText text: String,
+                                attachedFiles files: [String] = [],
                                 in url: URL,
                                 skippingNewest skip: Int = 0) -> String? {
         // The reader's own normalisation on BOTH sides: it sweeps bare
@@ -274,31 +310,41 @@ enum AgentSessionFork {
         // cleaner.
         let wanted = AgentSessionScanner.cleanUserText(text)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !wanted.isEmpty else { return nil }
+        guard !wanted.isEmpty || !files.isEmpty else { return nil }
         // Escalating windows, for the same reason `lastLaunchOptions`
         // needs them: a tool-heavy turn buries its opening user record
-        // well past the standard tail.
-        let attributes = try? FileManager.default
-            .attributesOfItem(atPath: url.path)
-        let size = (attributes?[.size] as? NSNumber)?.uint64Value
+        // well past the standard tail. They count conversation bytes
+        // (`AgentSessionScanner.conversationTail`), not claude's request
+        // records.
         for budget in [256 * 1024, 4 * 1024 * 1024, 64 * 1024 * 1024] {
-            if let found = cutPointScan(text: wanted, in: url, budget: budget,
+            guard let tail = AgentSessionScanner.conversationTail(of: url, budget: budget)
+            else { break }
+            if let found = cutPointScan(text: wanted, files: files, window: tail.text,
                                         skippingNewest: skip) {
                 return found
             }
-            if let size, size <= UInt64(budget) { break }
+            if tail.reachedStart { break }
         }
         return nil
     }
 
-    private static func cutPointScan(text: String, in url: URL,
-                                     budget: Int,
+    private static func cutPointScan(text: String, files: [String], window: String,
                                      skippingNewest skip: Int) -> String? {
-        guard let window = AgentSessionScanner.boundedTail(of: url,
-                                                           budget: budget)
-        else { return nil }
         var remaining = skip
-        for line in window.split(separator: "\n").reversed() {
+        var seen = Set<String>()
+        let lines = Array(window.split(separator: "\n").reversed())
+        // A turn a rewind dropped is still in the file with the same words
+        // as a message on screen; matched newest-first, it would take the
+        // cut meant for the older message the user is editing.
+        var conversation = ClaudeConversationLine()
+        for line in lines.reversed() {
+            if let data = line.trimmingCharacters(in: .whitespaces).data(using: .utf8),
+               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                conversation.note(obj)
+            }
+        }
+        let dropped = conversation.dropped()
+        for (index, line) in lines.enumerated() {
             // Cheap pre-filter; correctness comes from the parse.
             guard line.contains("\"user\"") else { continue }
             guard let data = line.trimmingCharacters(in: .whitespaces)
@@ -309,17 +355,89 @@ enum AgentSessionFork {
                   (obj["isSidechain"] as? Bool) != true,
                   (obj["isMeta"] as? Bool) != true,
                   obj["toolUseResult"] == nil || obj["toolUseResult"] is NSNull,
-                  let uuid = obj["uuid"] as? String
+                  let uuid = obj["uuid"] as? String,
+                  !dropped.contains(uuid),
+                  // One record, one occurrence — the reader's rule
+                  // (`readHistory`). Claude writes a message's record a
+                  // second time under the same uuid when it compacts
+                  // right before sending it (a message sent once more
+                  // after "Prompt is too long"); counted twice, the copy
+                  // takes the skip meant for the older identical row, and
+                  // that row's pencil cuts at the wrong message.
+                  seen.insert(uuid).inserted
             else { continue }
             let msg = obj["message"] as? [String: Any] ?? [:]
-            let body = AgentSessionScanner.cleanUserText(
-                AgentSessionScanner.extractText(
-                    fromContent: msg["content"] ?? obj["content"] ?? ""))
-            guard body == text else { continue }
-            if remaining == 0 { return uuid }
+            let raw = AgentSessionScanner.extractText(
+                fromContent: msg["content"] ?? obj["content"] ?? "")
+            let body = AgentSessionScanner.cleanUserText(raw)
+            // A command the user typed is drawn in the words they typed
+            // (`ClaudeSkillLoadReader`), which is not how its record's
+            // wrappers clean — so a live `/name words` row is matched in
+            // that spelling too.
+            let typed = SkillRecords.claudeCommand(in: raw).map { command in
+                command.args.isEmpty
+                    ? "/" + command.name
+                    : "/" + command.name + " " + AgentSessionScanner.cleanUserText(command.args)
+            }
+            guard body == text || typed == text else { continue }
+            // No words: every record of files alone reads the same, and
+            // the files are what tell this one apart.
+            guard !text.isEmpty || AttachmentInline.names(in: raw) == files else { continue }
+            if remaining == 0 {
+                return skillLoadsAbove(lines[(index + 1)...]) ?? uuid
+            }
             remaining -= 1
         }
         return nil
+    }
+
+    /// The first record of the skill loads a message rode in with, read
+    /// upward from just above it (`older`, newest first) — the handle the
+    /// reopened row carries (`ClaudeSkillLoadReader`), so a branch cut
+    /// at the live row leaves the loads out with the message, exactly as
+    /// one cut at the reopened row does. Nil when no load sits there.
+    private static func skillLoadsAbove<S: Sequence>(_ older: S) -> String?
+    where S.Element == Substring {
+        var cut: String? = nil
+        // The expansion read just below the record being looked at —
+        // whether its text alone says so, and the prompt it belongs to.
+        // Read upward, the expansion comes BEFORE its command, so which
+        // command it follows is settled one record later.
+        var body: (certain: Bool, promptId: String?)? = nil
+        for line in older {
+            guard let data = line.trimmingCharacters(in: .whitespaces)
+                    .data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data))
+                    as? [String: Any]
+            else { continue }
+            let type = obj["type"] as? String
+            guard type == "user" else {
+                // Bookkeeping between the loads (`attachment`,
+                // `queue-operation`) belongs to them; a message from
+                // anyone ends the run.
+                if type == "assistant" || type == "system" { break }
+                continue
+            }
+            if obj["toolUseResult"] != nil, !(obj["toolUseResult"] is NSNull) { break }
+            let msg = obj["message"] as? [String: Any] ?? [:]
+            let raw = AgentSessionScanner.extractText(
+                fromContent: msg["content"] ?? obj["content"] ?? "")
+            if (obj["isMeta"] as? Bool) == true {
+                guard body == nil else { break }
+                body = (SkillRecords.isClaudeSkillBody(raw), obj["promptId"] as? String)
+                continue
+            }
+            guard let expansion = body,
+                  let command = SkillRecords.claudeCommand(in: raw),
+                  command.args.isEmpty,
+                  expansion.certain
+                    || (expansion.promptId != nil && expansion.promptId == obj["promptId"] as? String),
+                  let uuid = obj["uuid"] as? String
+            else { break }
+            cut = uuid
+            body = nil
+        }
+        return cut
     }
 
     // MARK: - Fork
@@ -354,7 +472,14 @@ enum AgentSessionFork {
         }
         defer { try? reader.close() }
 
-        var kept: [String] = []
+        // Each kept line with the record it came from — and, for a
+        // `last-prompt`, the leaf it names — so a turn a rewind dropped
+        // above the cut stays out of the branch: claude resumes a branch
+        // from its newest record, and a dropped turn copied in would
+        // become the conversation the branch continues.
+        var kept: [(uuid: String?, leaf: String?, line: String)] = []
+        var conversation = ClaudeConversationLine()
+        var cutParent: String?
         var leftover = Data()
         var reachedCut = false
 
@@ -364,13 +489,22 @@ enum AgentSessionFork {
             // and a strict decode would fail the WHOLE branch over one
             // edge line. Same rule as `readHistory`.
             let line = String(decoding: lineData, as: UTF8.self)
-            switch verdict(forLine: line,
+            guard let obj = record(line) else { return true }
+            switch verdict(forRecord: obj,
                            cutAtRecordUuid: cutAtRecordUuid,
                            newSessionId: newSessionId) {
-            case .stop:  return false
-            case .drop:  return true
+            case .stop:
+                cutParent = (obj["parentUuid"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                return false
+            case .drop:
+                conversation.note(obj)
+                return true
             case .keep(let rewritten):
-                kept.append(rewritten)
+                conversation.note(obj)
+                let isMarker = obj["type"] as? String == "last-prompt"
+                kept.append((obj["uuid"] as? String,
+                             isMarker ? obj["leafUuid"] as? String : nil,
+                             rewritten))
                 return true
             }
         }
@@ -393,11 +527,25 @@ enum AgentSessionFork {
         }
 
         guard reachedCut else { throw ForkError.cutPointNotFound }
-        guard prefixHoldsConversation(kept) else {
+        // The line above the edited message: its parent and that
+        // parent's line. A message with no parent opens the conversation,
+        // and nothing above it is the conversation — a turn a rewind to
+        // the very start dropped is still there in the file.
+        let lines: [String]
+        if let cutParent {
+            let dropped = conversation.dropped(endingAt: cutParent)
+            lines = kept.filter { line in
+                !(line.uuid.map(dropped.contains) ?? false)
+                    && !(line.leaf.map(dropped.contains) ?? false)
+            }.map(\.line)
+        } else {
+            lines = []
+        }
+        guard prefixHoldsConversation(lines) else {
             throw ForkError.nothingToBranch
         }
 
-        let payload = Data((kept.joined(separator: "\n") + "\n").utf8)
+        let payload = Data((lines.joined(separator: "\n") + "\n").utf8)
         do {
             try payload.write(to: staging, options: .atomic)
             // Never overwrite: `newSessionId` is a fresh UUID, so a

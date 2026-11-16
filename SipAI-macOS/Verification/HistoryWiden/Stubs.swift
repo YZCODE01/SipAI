@@ -1,10 +1,11 @@
-// Minimal stand-ins for the two app types AgentSession.swift touches
+// Minimal stand-ins for the app types AgentSession.swift touches
 // outside the code under test, so the harness compiles the REAL
 // scanner rather than a paraphrase. Only the members it calls exist,
-// and both answer "no signal": the functions that consult them
-// (`endsMidTurn`, `lastTurnDurationSeconds`, the scheduled-task scan)
-// are not what this harness exercises — `readHistory` never touches
-// either.
+// and both functions answer "no signal": the functions that consult
+// them (`endsMidTurn`, `lastTurnDurationSeconds`, the scheduled-task
+// scan) are not what this harness exercises — `readHistory` never
+// touches either. `AgentLaunchOptions` is only a type a new session's
+// draft carries; the harness builds no draft.
 //
 // Nothing here is part of the app target.
 import Foundation
@@ -26,3 +27,5 @@ struct ScheduledTaskDefinition: Equatable {
         nil
     }
 }
+
+struct AgentLaunchOptions: Hashable {}

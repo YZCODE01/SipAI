@@ -207,6 +207,24 @@ func binary(_ key: String) -> String? { AgentManager.binaryPath(for: key) }
 func toolNames(codexBody b: [String: Any]) -> [String] {
     ((b["tools"] as? [[String: Any]]) ?? []).compactMap { $0["name"] as? String }
 }
+/// What codex tells the model it is, wherever this codex's request carries
+/// it: the top-level `instructions` string, else the first `developer`
+/// message of `input` (its `content` a string, or `input_text` parts).
+/// Where codex puts its instructions is codex's to move — one release sends
+/// the field, the next that message — and a lean resume's persona rides the
+/// same way; read from one place alone, such a move reports as no
+/// instructions at all, which is also what a lost persona would look like.
+func instructions(codexBody b: [String: Any]) -> (text: String, place: String) {
+    if let top = b["instructions"] as? String, !top.isEmpty { return (top, "instructions") }
+    let input = (b["input"] as? [[String: Any]]) ?? []
+    guard let developer = input.first(where: { ($0["role"] as? String) == "developer" }) else {
+        return ("", "nowhere")
+    }
+    let place = "input's first developer message"
+    if let text = developer["content"] as? String { return (text, place) }
+    let parts = (developer["content"] as? [[String: Any]]) ?? []
+    return (parts.compactMap { $0["text"] as? String }.joined(), place)
+}
 /// A codex request's HOSTED tools — entries with a `type` and no
 /// `name`, which `toolNames(codexBody:)` cannot see. Codex's web search
 /// is one.
@@ -235,6 +253,44 @@ func toolResults(claudeBody b: [String: Any]) -> [(id: String, text: String, isE
     }
     return found
 }
+/// Kimi's print-mode stdout (OpenAI-shaped, the record shapes
+/// KimiEventParsing.swift documents): each `FetchURL` call's url, and
+/// whether its result says the fetch failed or was refused.
+func kimiFetches(_ out: String) -> [(url: String, failed: Bool)] {
+    var urlById: [String: String] = [:]
+    var fetches: [(url: String, failed: Bool)] = []
+    for line in out.split(separator: "\n") {
+        let o = object(String(line))
+        if o["role"] as? String == "assistant", let calls = o["tool_calls"] as? [[String: Any]] {
+            for call in calls {
+                let function = call["function"] as? [String: Any]
+                guard function?["name"] as? String == "FetchURL", let id = call["id"] as? String else { continue }
+                urlById[id] = object(function?["arguments"] as? String ?? "")["url"] as? String ?? ""
+            }
+        } else if o["role"] as? String == "tool", let id = o["tool_call_id"] as? String,
+                  let url = urlById[id] {
+            let text: String
+            if let s = o["content"] as? String {
+                text = s
+            } else {
+                text = ((o["content"] as? [[String: Any]]) ?? []).compactMap { $0["text"] as? String }.joined()
+            }
+            fetches.append((url, text.contains("Failed to fetch") || text.contains("Refusing to fetch")))
+        }
+    }
+    return fetches
+}
+/// The live kimi lookup's verdict: a lookup ran, nothing was refused, the
+/// page asked for did not fail, and where pages were fetched one came
+/// back. A page the model guessed on the way may 404 — that is the web,
+/// not Chat only — but a turn whose every fetch failed is no lookup,
+/// however the model spelled the page.
+func kimiLookupOK(fetches: [(url: String, failed: Bool)], asked: [String], refused: Bool, fetched: Bool) -> Bool {
+    fetched && !refused
+        && !fetches.contains { asked.contains($0.url) && $0.failed }
+        && (fetches.isEmpty || fetches.contains { !$0.failed })
+}
+
 func toolNames(kimiBody b: [String: Any]) -> [String] {
     ((b["tools"] as? [[String: Any]]) ?? []).compactMap { ($0["function"] as? [String: Any])?["name"] as? String }
 }
@@ -247,6 +303,50 @@ func systemText(claudeBody b: [String: Any]) -> String {
 }
 func bodyBytes(_ b: [String: Any]) -> Int {
     (try? JSONSerialization.data(withJSONObject: b))?.count ?? 0
+}
+/// A JSON value's size as it travels: serialised alone, as in the body.
+func jsonBytes(_ v: Any) -> Int {
+    ((try? JSONSerialization.data(withJSONObject: [v]))?.count ?? 2) - 2
+}
+/// The parts a request is made of, each with its size: every top-level key,
+/// and every content block of every message with the opening of its text.
+/// A failed size check prints these, so the part that grew is named.
+func requestParts(_ b: [String: Any]) -> [String] {
+    var out: [String] = []
+    for key in b.keys.sorted() where key != "messages" {
+        if key == "tools", let tools = b[key] as? [Any] {
+            out.append("tools: \(tools.count) (\(jsonBytes(tools)) bytes)")
+        } else if let value = b[key] {
+            out.append("\(key): \(jsonBytes(value)) bytes")
+        }
+    }
+    for (i, raw) in ((b["messages"] as? [Any]) ?? []).enumerated() {
+        let message = raw as? [String: Any] ?? [:]
+        let role = message["role"] as? String ?? "?"
+        let blocks = (message["content"] as? [[String: Any]])
+            ?? (message["content"] as? String).map { [["type": "text", "text": $0]] } ?? []
+        for block in blocks {
+            var part = "messages[\(i)] \(role) · \(block["type"] as? String ?? "?") \(jsonBytes(block)) bytes"
+            if let text = block["text"] as? String {
+                let opening = String(text.prefix(160)).replacingOccurrences(of: "\n", with: "⏎")
+                part += ": «\(opening)\(text.count > 160 ? "…" : "")»"
+            }
+            out.append(part)
+        }
+    }
+    return out
+}
+/// Writes a request a size check failed on, whole, into the run's
+/// temporary folder (TMPDIR: a runner that hands the run a folder of its
+/// own keeps the file past the run; by hand, the user's temporary folder),
+/// and answers where.
+func keepRequest(_ b: [String: Any], as name: String) -> URL? {
+    let folder = URL(fileURLWithPath: env["TMPDIR"] ?? NSTemporaryDirectory(), isDirectory: true)
+    let file = folder.appendingPathComponent("sipai-chatonly-\(name)-\(UUID().uuidString.prefix(6)).json")
+    guard let data = try? JSONSerialization.data(withJSONObject: b, options: [.prettyPrinted, .sortedKeys]),
+          (try? data.write(to: file)) != nil
+    else { return nil }
+    return file
 }
 
 let persona = ChatOnlyPersona.text
@@ -342,6 +442,40 @@ check("the chip's selected value is the sentinel under Chat only",
       ChatOnlyMode.selectedValue(chat) == ChatOnlyMode.rowValue && ChatOnlyMode.selectedValue(plain) == nil)
 
 // ====================================================================
+print("1b. A FAILED SIZE CHECK KEEPS THE REQUEST IT MEASURED")
+// Claude's Chat only request has been seen now and then at about twice
+// its size, and nothing in the run said why. A failing size check keeps
+// the request and names its parts, so the next one shows what was added.
+let sampleRequest: [String: Any] = [
+    "model": "claude-example",
+    "system": [["type": "text", "text": "You are a helpful assistant."]],
+    "tools": [["name": "WebSearch"], ["name": "WebFetch"]],
+    "messages": [
+        ["role": "user", "content": [
+            ["type": "text", "text": "<system-reminder>\nAn added note, " + String(repeating: "x", count: 400) + "</system-reminder>"],
+            ["type": "text", "text": "Reply with the single word OK."]]],
+    ],
+]
+let sampleParts = requestParts(sampleRequest)
+check("the parts name every top-level key and every content block, with its size",
+      sampleParts.contains { $0.hasPrefix("system: ") && $0.hasSuffix(" bytes") }
+        && sampleParts.contains { $0.hasPrefix("tools: 2 (") }
+        && sampleParts.contains { $0.hasPrefix("model: ") }
+        && sampleParts.filter { $0.hasPrefix("messages[0] user · text ") }.count == 2,
+      sampleParts.joined(separator: " | "))
+check("a block's words open with its first characters, its line breaks shown",
+      sampleParts.contains { $0.contains("«<system-reminder>⏎An added note, xxx") },
+      sampleParts.joined(separator: " | "))
+if let kept = keepRequest(sampleRequest, as: "self-test") {
+    let back = (try? Data(contentsOf: kept)).flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+    check("the whole request is kept in a file that reads back the same",
+          back.map { bodyBytes($0) } == bodyBytes(sampleRequest), kept.path)
+    try? fm.removeItem(at: kept)
+} else {
+    check("the whole request is kept in a file that reads back the same", false, "nothing written")
+}
+
+// ====================================================================
 print("2. CODEX over the fake Responses provider (throwaway CODEX_HOME)")
 
 func codexHome(port: Int) -> URL {
@@ -369,6 +503,13 @@ func threadId(_ out: String) -> String? {
     }
     return nil
 }
+/// The reasoning tokens a `codex exec --json` turn reports on
+/// `turn.completed.usage`; nil when no such record names the key.
+func codexReasoningTokens(_ out: String) -> Int? {
+    let counts = out.split(separator: "\n").filter { $0.contains("\"turn.completed\"") }
+        .compactMap { (object(String($0))["usage"] as? [String: Any])?["reasoning_output_tokens"] as? Int }
+    return counts.isEmpty ? nil : counts.reduce(0, +)
+}
 
 if let codex = binary("codex"), let server = FakeServer() {
     let home = codexHome(port: server.port)
@@ -386,6 +527,12 @@ if let codex = binary("codex"), let server = FakeServer() {
     let firstTools = toolNames(codexBody: firstBody)
     check("first turn: exit 0 and a thread id", first.status == 0 && threadId(first.out) != nil,
           String(first.out.prefix(160)))
+    // The live thoughts check skips a turn that spent no reasoning
+    // tokens, read off this key: a key codex renames must fail here,
+    // not turn that live check into a skip for good.
+    check("first turn: turn.completed.usage names reasoning_output_tokens (the live thoughts check reads it)",
+          codexReasoningTokens(first.out) != nil,
+          String(first.out.split(separator: "\n").last { $0.contains("turn.completed") } ?? "no turn.completed"))
     check("first turn: none of exec_command / write_stdin / view_image / computer-use",
           !firstTools.contains { ["exec_command", "write_stdin", "view_image"].contains($0) || $0.contains("computer") },
           firstTools.joined(separator: ","))
@@ -403,9 +550,10 @@ if let codex = binary("codex"), let server = FakeServer() {
           !first.out.lowercased().contains("unrecognized configuration settings"),
           first.out.components(separatedBy: "\n").first { $0.lowercased().contains("unrecognized") }
               .map { String($0.prefix(240)) } ?? "")
-    let firstInstructions = (firstBody["instructions"] as? String) ?? ""
+    let firstInstructions = instructions(codexBody: firstBody)
     check("first turn: the instructions are codex's own (≥ 20,000 chars) — born plain",
-          firstInstructions.count >= 20_000, "\(firstInstructions.count)")
+          firstInstructions.text.count >= 20_000,
+          "\(firstInstructions.text.count) chars, at \(firstInstructions.place)")
     check("first turn: tools off shrinks the request (≤ 30 KB against ~40 KB default)",
           bodyBytes(firstBody) <= 30_000, "\(bodyBytes(firstBody)) bytes")
 
@@ -416,10 +564,11 @@ if let codex = binary("codex"), let server = FakeServer() {
                        + ChatOnlyArgv.codex(options: chat, bornPlain: true, personaFile: personaFile.path)
                        + [tid, "two"], cwd: cwd, environment: e)
         let leanBody = server.body(server.newest())
-        let leanInstructions = (leanBody["instructions"] as? String) ?? ""
+        let leanInstructions = instructions(codexBody: leanBody)
         check("lean resume: exit 0 on the same thread", lean.status == 0 && threadId(lean.out) == tid)
         check("lean resume: the persona IS the instructions",
-              leanInstructions.contains(personaMarker) && leanInstructions.count < 600, "\(leanInstructions.count) chars")
+              leanInstructions.text.contains(personaMarker) && leanInstructions.text.count < 600,
+              "\(leanInstructions.text.count) chars, at \(leanInstructions.place)")
         check("lean resume: tools still [\"apply_patch\"]", toolNames(codexBody: leanBody) == ["apply_patch"])
         check("lean resume: web search still live", liveWebSearch(codexBody: leanBody),
               String(describing: hostedTools(codexBody: leanBody)))
@@ -428,9 +577,10 @@ if let codex = binary("codex"), let server = FakeServer() {
         let back = run(codex, ["exec", "resume", "--json", "--skip-git-repo-check", tid, "three"],
                        cwd: cwd, environment: e)
         let backBody = server.body(server.newest())
-        let backInstructions = (backBody["instructions"] as? String) ?? ""
+        let backInstructions = instructions(codexBody: backBody)
         check("default resume after a lean one: the full instructions are back (≥ 20,000 chars)",
-              back.status == 0 && backInstructions.count >= 20_000, "\(backInstructions.count)")
+              back.status == 0 && backInstructions.text.count >= 20_000,
+              "\(backInstructions.text.count) chars, at \(backInstructions.place)")
         check("default resume: the tools are back",
               toolNames(codexBody: backBody).contains("exec_command"), toolNames(codexBody: backBody).joined(separator: ","))
         // The rollout's birth record.
@@ -630,10 +780,24 @@ if let claude = binary("claude_code"), let server = FakeServer() {
           String(first.out.prefix(200)))
     check("system.init reports exactly the two web tools",
           initTools(first.out).map(Set.init) == Set(ChatOnlyArgv.claudeWebTools), String(describing: initTools(first.out)))
-    check("the request carries exactly the two web tools, inline (neither deferred)",
-          Set(toolNames(claudeBody: body)) == Set(ChatOnlyArgv.claudeWebTools)
-          && toolNames(claudeBody: body).count == 2
-          && !((body["tools"] as? [[String: Any]]) ?? []).contains { $0["defer_loading"] != nil },
+    // With tool search on — claude turns it on by default behind a custom
+    // ANTHROPIC_BASE_URL, and this stand-in is one — claude adds
+    // `DeferredToolPlaceholder`: an empty-schema tool, itself deferred,
+    // "never call this tool". No tool-search tool rides with it, so nothing
+    // deferred can be loaded; the two web tools stay inline. A request
+    // without the placeholder passes too.
+    let requestTools = (body["tools"] as? [[String: Any]]) ?? []
+    let requestWebTools = requestTools.filter { ChatOnlyArgv.claudeWebTools.contains($0["name"] as? String ?? "") }
+    let otherTools = requestTools.filter { !ChatOnlyArgv.claudeWebTools.contains($0["name"] as? String ?? "") }
+    let placeholderOnly = otherTools.count <= 1 && otherTools.allSatisfy { tool in
+        tool["name"] as? String == "DeferredToolPlaceholder"
+            && tool["defer_loading"] as? Bool == true
+            && (((tool["input_schema"] as? [String: Any])?["properties"] as? [String: Any]) ?? [:]).isEmpty
+    }
+    check("the request carries the two web tools, inline, and nothing else but claude's deferred, schema-less placeholder",
+          Set(requestWebTools.compactMap { $0["name"] as? String }) == Set(ChatOnlyArgv.claudeWebTools)
+          && requestWebTools.count == 2 && requestWebTools.allSatisfy { $0["defer_loading"] == nil }
+          && placeholderOnly,
           toolNames(claudeBody: body).joined(separator: ","))
     // The persona plus claude's own billing-header line (~140 chars) —
     // nothing of claude's ~28 KB agent prompt.
@@ -642,7 +806,12 @@ if let claude = binary("claude_code"), let server = FakeServer() {
     let messagesText = (try? JSONSerialization.data(withJSONObject: body["messages"] ?? [])).map { String(decoding: $0, as: UTF8.self) } ?? ""
     check("CLAUDE.md rides in the MESSAGES, not the system prompt",
           messagesText.contains(marker) && !system.contains(marker))
-    check("the whole request is small (≤ 6 KB)", bodyBytes(body) <= 6_000, "\(bodyBytes(body)) bytes")
+    let requestIsSmall = bodyBytes(body) <= 6_000
+    check("the whole request is small (≤ 6 KB)", requestIsSmall, "\(bodyBytes(body)) bytes")
+    if !requestIsSmall {
+        if let kept = keepRequest(body, as: "claude-first-turn") { note("the request is kept at \(kept.path)") }
+        for part in requestParts(body) { note("  " + part) }
+    }
     check("--system-prompt-snapshot off is accepted (the turn produced a result)",
           first.out.contains("\"type\":\"result\""))
 
@@ -757,6 +926,29 @@ if let claude = binary("claude_code"), let server = FakeServer() {
 // ====================================================================
 print("4. KIMI over the fake chat provider (throwaway KIMI_CODE_HOME)")
 
+// Where a new session's profile and model are bound, by the installed
+// kimi's version: a newer kimi binds them when the session is created
+// and refuses a prompt naming a profile.
+check("kimi from \(KimiWebTurn.Binding.atCreationFloor) binds a new session at creation; an older or unread one on its first prompt",
+      KimiWebTurn.Binding.of(kimiVersion: "2.6.1") == .atCreation
+      && KimiWebTurn.Binding.of(kimiVersion: "2.7.0") == .atCreation
+      && KimiWebTurn.Binding.of(kimiVersion: "2.5.2") == .onFirstPrompt
+      && KimiWebTurn.Binding.of(kimiVersion: nil) == .onFirstPrompt)
+let bodiesCwd = URL(fileURLWithPath: NSTemporaryDirectory())
+let createdBound = KimiWebTurn.createSessionBody(cwd: bodiesCwd, model: "m", binding: .atCreation)
+let promptedBound = KimiWebTurn.promptBody(text: "t", model: "m", disabledTools: ["Bash"], binding: .atCreation)
+check("…bound at creation: agent_config carries the profile and the model, and the prompt names neither, nor any tool",
+      (createdBound["agent_config"] as? [String: String]) == ["profile": KimiWebTurn.profileName, "model": "m"]
+      && promptedBound["profile"] == nil && promptedBound["model"] == nil && promptedBound["disabled_tools"] == nil
+      && promptedBound["content"] != nil)
+let createdUnbound = KimiWebTurn.createSessionBody(cwd: bodiesCwd, model: "m", binding: .onFirstPrompt)
+let promptedUnbound = KimiWebTurn.promptBody(text: "t", model: "m", disabledTools: ["Bash"], binding: .onFirstPrompt)
+check("…bound on the first prompt: no agent_config, and the prompt carries the profile and the model",
+      createdUnbound["agent_config"] == nil
+      && promptedUnbound["profile"] as? String == KimiWebTurn.profileName
+      && promptedUnbound["model"] as? String == "m"
+      && (promptedUnbound["disabled_tools"] as? [String]) == ["Bash"])
+
 func kimiHome(port: Int) -> URL {
     let home = URL(fileURLWithPath: NSTemporaryDirectory())
         .appendingPathComponent("sipai-chatonly-kimi-\(UUID().uuidString.prefix(8))", isDirectory: true)
@@ -780,6 +972,25 @@ func kimiHome(port: Int) -> URL {
     return home
 }
 
+/// A local port nothing listens on: bound, read back, closed — a model
+/// kimi cannot reach, the way it meets no internet.
+func closedPort() -> Int {
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    defer { close(fd) }
+    var address = sockaddr_in()
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_addr.s_addr = inet_addr("127.0.0.1")
+    address.sin_port = 0
+    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+    _ = withUnsafeMutablePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, length) }
+    }
+    _ = withUnsafeMutablePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+    }
+    return Int(UInt16(bigEndian: address.sin_port))
+}
+
 func kimiSessionId(_ out: String) -> String? {
     for line in out.split(separator: "\n") where line.contains("session.resume_hint") {
         if let start = line.firstIndex(of: "{"),
@@ -801,12 +1012,32 @@ func kimiSessionDir(home: URL, id: String) -> URL? {
     return nil
 }
 
+/// A new session's first prompt goes to the server the runner sends it to
+/// (`AgentRunner.runKimiWebTurn`): on a kimi that binds at creation the
+/// session the server made is closed, its policy file written, and a fresh
+/// server opens it — kimi applies the file when it opens the session, and
+/// not a prompt's own list to that prompt's turn. The same server on a
+/// kimi that binds on the first prompt; nil when the reopening failed.
+func serverForFirstPrompt(_ server: KimiWebServerCall.Session, kimi: String, home: URL, cwd: URL,
+                          sessionId: String, disabled: [String],
+                          binding: KimiWebTurn.Binding) async -> KimiWebServerCall.Session? {
+    guard binding == .atCreation else { return server }
+    await server.shutdown()
+    guard let dir = kimiSessionDir(home: home, id: sessionId),
+          (try? KimiToolPolicy.write(names: disabled, to: KimiToolPolicy.disabledFile(sessionDir: dir))) != nil,
+          case .started(let reopened) = await KimiWebServerCall.Session.start(binary: kimi, scratchDirectory: cwd)
+    else { return nil }
+    return reopened
+}
+
 if let kimi = binary("kimi"), let server = FakeServer() {
     let home = kimiHome(port: server.port)
     let cwd = home.appendingPathComponent("cwd", isDirectory: true)
     try? fm.createDirectory(at: cwd, withIntermediateDirectories: true)
     let e = ["KIMI_CODE_HOME": home.path]
     let stream = ["--output-format", "stream-json"]
+    let kimiBinding = KimiWebTurn.Binding.of(
+        kimiVersion: run(kimi, ["--version"]).out.trimmingCharacters(in: .whitespacesAndNewlines))
 
     // (a) The policy file around --prompt --session.
     let first = run(kimi, ["--prompt", "Reply with the single word OK."] + stream, cwd: cwd, environment: e)
@@ -926,42 +1157,95 @@ if let kimi = binary("kimi"), let server = FakeServer() {
         switch await KimiWebServerCall.Session.start(binary: kimi, scratchDirectory: cwd) {
         case .failed(let why):
             check("kimi web started", false, why)
-        case .started(let session):
+        case .started(let firstServer):
             server.clear()
             // Create — with the RESOLVED cwd (the body builder does it).
-            let created = await KimiWebTurn.createSession(session, cwd: cwd)
+            let created = await KimiWebTurn.createSession(firstServer, cwd: cwd, model: "fake/fake-model",
+                                                          binding: kimiBinding)
             guard case .success(let sid) = created else {
                 check("POST /sessions created a session", false, String(describing: created))
-                await session.shutdown(); return
+                await firstServer.shutdown(); return
             }
             check("POST /sessions created a session", true, sid)
-            let dir = kimiSessionDir(home: home, id: sid)
-            check("the directory exists before any turn (state.json, no wire)",
-                  dir != nil && fm.fileExists(atPath: dir!.appendingPathComponent("state.json").path)
-                  && !fm.fileExists(atPath: dir!.appendingPathComponent("agents/main/wire.jsonl").path))
-            let body = KimiWebTurn.createSessionBody(cwd: cwd)
+            let made = kimiSessionDir(home: home, id: sid)
+            if kimiBinding == .atCreation {
+                // What lets the runner write the policy file before the
+                // prompt: the session, bound, is on disk already.
+                let madeWire = made.map { lines(of: $0.appendingPathComponent("agents/main/wire.jsonl")) } ?? []
+                check("a session kimi binds at creation is on disk before any turn, its binding recorded "
+                      + "(state.json; profile.bind, no turn.prompt)",
+                      made.map { fm.fileExists(atPath: $0.appendingPathComponent("state.json").path) } ?? false
+                      && madeWire.contains { $0.contains("\"type\":\"profile.bind\"") }
+                      && !madeWire.contains { $0.contains("\"type\":\"turn.prompt\"") },
+                      made?.path ?? "no directory")
+                // What the runner captures before it writes its own policy
+                // file, and puts back when the turn ends: kimi makes none at
+                // creation. One in a shape SipAI does not read would refuse
+                // every new session's first Chat only turn.
+                let madePolicy = made.map { KimiToolPolicy.capture(at: KimiToolPolicy.disabledFile(sessionDir: $0)) }
+                check("…and holds no tool-policy file of its own: what the runner captures there is \"nothing\", "
+                      + "never a shape it refuses",
+                      madePolicy == .record(.absent), String(describing: madePolicy))
+            } else {
+                // Force unwraps: each follows `made != nil` in the same expression.
+                check("the directory exists before any turn (state.json, no wire)",
+                      made != nil && fm.fileExists(atPath: made!.appendingPathComponent("state.json").path)
+                      && !fm.fileExists(atPath: made!.appendingPathComponent("agents/main/wire.jsonl").path))
+            }
+            let body = KimiWebTurn.createSessionBody(cwd: cwd, model: "fake/fake-model", binding: kimiBinding)
             let sentCwd = ((body["metadata"] as? [String: Any])?["cwd"] as? String) ?? ""
             check("the create body carries the RESOLVED cwd — realpath(3), /private included (kimi refuses the session under --prompt otherwise)",
                   sentCwd == KimiWebTurn.resolvedPath(cwd) && (sentCwd.hasPrefix("/private/") || !cwd.path.hasPrefix("/var/")),
                   sentCwd)
 
-            // (c) The never-prompted refusal: --prompt --session on it.
-            let early = run(kimi, ["--prompt", "x"] + stream + ["--session", sid], cwd: cwd, environment: e)
-            check("a never-prompted server session refuses --prompt: \"model.not_configured: Model not set\"",
-                  early.out.contains("model.not_configured: Model not set"), String(early.out.prefix(200)))
+            // (c) Why a new session's first prompt goes through the server:
+            // another process cannot run a RECORDED turn on a session the
+            // server made and holds. Kimi refuses it one of three ways — an
+            // older kimi outright ("model.not_configured: Model not set"),
+            // a newer one through the session lock its server holds ("write
+            // guard declined; keeping writes in memory", exit 4), and a
+            // newer one by name ("This session is in use by another Kimi
+            // Code Web instance") — and one release took the turn. The day a
+            // kimi records such a turn, the route is worth measuring again.
+            let early = run(kimi, ["--prompt", "early probe"] + stream + ["--session", sid],
+                            cwd: cwd, environment: e)
+            let earlyRecorded = (kimiSessionDir(home: home, id: sid)
+                .map { lines(of: $0.appendingPathComponent("agents/main/wire.jsonl")) } ?? [])
+                .contains { $0.contains("early probe") }
+            let earlyRefusal: String? = early.out.contains("model.not_configured: Model not set")
+                ? "refused, model not set"
+                : early.out.contains("write guard declined") ? "declined by the session lock, exit \(early.status)"
+                : early.out.contains("in use by another Kimi Code Web instance")
+                ? "refused as in use by the server, exit \(early.status)"
+                : nil
+            check("a second process's --prompt on a never-prompted server session records no turn there (\(earlyRefusal ?? "neither refusal"))",
+                  earlyRefusal != nil && !earlyRecorded,
+                  "exit \(early.status), recorded \(earlyRecorded): " + String(early.out.suffix(300)))
 
-            // (c) The profile refusal, word for word.
-            let noProfile = await session.request(method: "POST", path: KimiWebTurn.promptsPath(sid),
-                                                  body: ["content": [["type": "text", "text": "x"]],
-                                                         "disabled_tools": KimiToolPolicy.fallbackNames])
+            // (c) The binding the other kimi needs is refused, word for word:
+            // an older kimi binds nothing at creation, and a newer one
+            // refuses a prompt naming a profile — the body an older kimi
+            // takes.
+            let otherBody: [String: Any] = kimiBinding == .atCreation
+                ? KimiWebTurn.promptBody(text: "x", model: "fake/fake-model",
+                                         disabledTools: KimiToolPolicy.fallbackNames, binding: .onFirstPrompt)
+                : ["content": [["type": "text", "text": "x"]], "disabled_tools": KimiToolPolicy.fallbackNames]
+            let otherAnswer = await firstServer.request(method: "POST", path: KimiWebTurn.promptsPath(sid),
+                                                    body: otherBody)
             let refusal: String = {
-                switch noProfile {
+                switch otherAnswer {
                 case .success(let data): return KimiWebTurn.refusal(from: data) ?? "(no refusal)"
                 case .failure(let error): return error.localizedDescription
                 }
             }()
-            check("disabled_tools WITHOUT profile/model is refused: \"Cannot set session disabled tools: agent profile is not bound\"",
-                  refusal.contains("Cannot set session disabled tools: agent profile is not bound"), refusal)
+            if kimiBinding == .atCreation {
+                check("a prompt naming a profile is refused: \"choose the agent profile with agent_config.profile when creating the session\"",
+                      refusal.contains("choose the agent profile with agent_config.profile when creating the session"),
+                      refusal)
+            } else {
+                check("disabled_tools WITHOUT profile/model is refused: \"Cannot set session disabled tools: agent profile is not bound\"",
+                      refusal.contains("Cannot set session disabled tools: agent profile is not bound"), refusal)
+            }
 
             // (b) The first prompt, tool-less.
             server.clear()
@@ -971,16 +1255,26 @@ if let kimi = binary("kimi"), let server = FakeServer() {
             let serverList = KimiToolPolicy.namesToDisable(
                 sessionSnapshot: nil,
                 storeSnapshot: KimiToolPolicy.newestNames(inStore: home.appendingPathComponent("sessions")))
+            guard let session = await serverForFirstPrompt(firstServer, kimi: kimi, home: home, cwd: cwd, sessionId: sid,
+                                                           disabled: serverList, binding: kimiBinding) else {
+                check("the session closed, its policy file written, and opened again by a fresh server", false)
+                return
+            }
             let prompted = await KimiWebTurn.prompt(session, sessionId: sid, text: "Reply with the single word OK.",
-                                                    model: "fake/fake-model", disabledTools: serverList)
+                                                    model: "fake/fake-model", disabledTools: serverList,
+                                                    binding: kimiBinding)
             guard case .success(let promptId) = prompted else {
-                check("POST /prompts with profile+model+disabled_tools accepted", false, String(describing: prompted))
+                check("POST /prompts accepted, the session bound and its tools named where this kimi takes them",
+                      false, String(describing: prompted))
                 await session.shutdown(); return
             }
-            check("POST /prompts with profile+model+disabled_tools accepted", true, promptId)
+            check("POST /prompts accepted, the session bound and its tools named where this kimi takes them",
+                  true, promptId)
             let idle = await KimiWebTurn.waitIdle(session, sessionId: sid) { false }
-            check("the session reports idle after the turn", idle)
+            check("the session reports idle after the turn, and says the turn did not fail",
+                  idle != nil && idle?.lastTurnReason != "failed", String(describing: idle))
             let promptBody = server.body(server.newest())
+            let dir = kimiSessionDir(home: home, id: sid)
             check("the server-path prompt sent only the kept web lookup (FetchURL)",
                   toolNames(kimiBody: promptBody) == ["FetchURL"]
                   && (promptBody["messages"] as? [Any])?.isEmpty == false, toolNames(kimiBody: promptBody).joined(separator: ","))
@@ -992,7 +1286,8 @@ if let kimi = binary("kimi"), let server = FakeServer() {
                   && history.contains { if case .assistantText(let t) = $0.kind { return t == "OK" }; return false },
                   "\(history.count) items")
             let policy = dir.map { KimiToolPolicy.disabledFile(sessionDir: $0) }
-            check("the SERVER wrote the policy file for that prompt",
+            check(kimiBinding == .atCreation ? "the policy file written before the server opened the session is in place"
+                                             : "the SERVER wrote the policy file for that prompt",
                   policy.map { fm.fileExists(atPath: $0.path) } ?? false)
             check("…in the measured shape (decode succeeds)",
                   policy.flatMap { try? Data(contentsOf: $0) }.flatMap(KimiToolPolicy.decode) != nil)
@@ -1002,16 +1297,24 @@ if let kimi = binary("kimi"), let server = FakeServer() {
             // read back through the REAL reader: the user's words, with
             // the image named, and nothing kimi added around it.
             server.clear()
-            if case .success(let imageSid) = await KimiWebTurn.createSession(session, cwd: cwd) {
+            var imageServer: KimiWebServerCall.Session? = session
+            if case .success(let imageSid) = await KimiWebTurn.createSession(session, cwd: cwd, model: "fake/fake-model",
+                                                                               binding: kimiBinding) {
+                imageServer = await serverForFirstPrompt(session, kimi: kimi, home: home, cwd: cwd, sessionId: imageSid,
+                                                         disabled: serverList, binding: kimiBinding)
                 let words = "What is in this picture?"
+                guard let session = imageServer else {
+                    check("kimi image turn: the session opened again by a fresh server", false)
+                    return
+                }
                 let sent = await KimiWebTurn.prompt(
                     session, sessionId: imageSid,
                     text: AttachmentInline.imageMarker(name: "pic.png") + "\n\n" + words,
-                    model: "fake/fake-model", disabledTools: serverList,
+                    model: "fake/fake-model", disabledTools: serverList, binding: kimiBinding,
                     images: [AgentImage(name: "pic.png", base64: onePixelPNG, mediaType: "image/png")])
                 let finished: Bool
                 if case .success = sent {
-                    finished = await KimiWebTurn.waitIdle(session, sessionId: imageSid) { false }
+                    finished = await KimiWebTurn.waitIdle(session, sessionId: imageSid) { false } != nil
                 } else {
                     finished = false
                 }
@@ -1031,7 +1334,7 @@ if let kimi = binary("kimi"), let server = FakeServer() {
             } else {
                 check("kimi image turn: a second server session was created", false)
             }
-            await session.shutdown()
+            await (imageServer ?? session).shutdown()
             // The file OUTLIVES the server; the restore removes it.
             check("the policy file survives the server's shutdown",
                   policy.map { fm.fileExists(atPath: $0.path) } ?? false)
@@ -1048,8 +1351,24 @@ if let kimi = binary("kimi"), let server = FakeServer() {
     }
     _ = semaphore.wait(timeout: .now() + 240)
 
-    // Stop on the server path: the action route is mounted but refuses
-    // on 2.0.1; POST /shutdown certainly ends a running turn.
+    // Stop on the server path: the prompt action route — ONE colon; kimi
+    // splits the action off the last one, so a doubled colon names the
+    // prompt `<id>:` and is "not found" — aborts a running prompt, and
+    // POST /shutdown then ends the server.
+    check("the prompt action route is spelled with one colon (`…/prompts/{id}:abort`)",
+          KimiWebTurn.abortPath(session: "s", prompt: "p") == "/api/v1/sessions/s/prompts/p:abort",
+          KimiWebTurn.abortPath(session: "s", prompt: "p"))
+    // A turn kimi ends as failed answers idle like any other: how it ended
+    // is a second question, put to the server's answer and the record.
+    check("a session answer's last turn reason, read off kimi's envelope",
+          KimiWebTurn.lastTurnReason(sessionAnswer: Data(#"{"code":0,"msg":"success","data":{"id":"s","busy":false,"main_turn_active":false,"last_turn_reason":"failed"}}"#.utf8)) == "failed"
+            && KimiWebTurn.lastTurnReason(sessionAnswer: Data(#"{"code":0,"msg":"success","data":{"id":"s","busy":false}}"#.utf8)) == nil)
+    let recordedFailure = AgentSessionHistoryItem(kind: .error(message: "Connection error."))
+    check("a failed turn's row is the record's words; the server saying \"failed\" with no such row ends it on the sentence that says so; anything else is no failure",
+          KimiWebTurn.failure(in: [recordedFailure], lastTurnReason: "failed", wordless: "W") == "Connection error."
+            && KimiWebTurn.failure(in: [], lastTurnReason: "failed", wordless: "W") == "W"
+            && KimiWebTurn.failure(in: [], lastTurnReason: "completed", wordless: "W") == nil
+            && KimiWebTurn.failure(in: [], lastTurnReason: nil, wordless: "W") == nil)
     if let slow = FakeServer(chatDelay: 8) {
         let slowHome = kimiHome(port: slow.port)
         let slowCwd = slowHome.appendingPathComponent("cwd", isDirectory: true)
@@ -1060,10 +1379,13 @@ if let kimi = binary("kimi"), let server = FakeServer() {
         Task {
             defer { done.signal() }
             guard case .started(let session) = await KimiWebServerCall.Session.start(binary: kimi, scratchDirectory: slowCwd),
-                  case .success(let sid) = await KimiWebTurn.createSession(session, cwd: slowCwd),
+                  case .success(let sid) = await KimiWebTurn.createSession(session, cwd: slowCwd,
+                                                                           model: "fake/fake-model",
+                                                                           binding: kimiBinding),
                   case .success(let pid) = await KimiWebTurn.prompt(session, sessionId: sid, text: "slow",
                                                                      model: "fake/fake-model",
-                                                                     disabledTools: KimiToolPolicy.fallbackNames)
+                                                                     disabledTools: KimiToolPolicy.fallbackNames,
+                                                                     binding: kimiBinding)
             else { check("slow server-path prompt started", false); return }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             let abortAnswer = await session.request(method: "POST",
@@ -1071,9 +1393,14 @@ if let kimi = binary("kimi"), let server = FakeServer() {
                                                     ceiling: KimiWebTurn.abortCeiling)
             switch abortAnswer {
             case .success(let data):
-                note("prompt action route answered: " + (KimiWebTurn.refusal(from: data) ?? "ok"))
+                let answered = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                let aborted = ((answered?["data"] as? [String: Any])?["aborted"] as? Bool) == true
+                check("the prompt action route aborts the running prompt (kimi answers `aborted: true`)",
+                      KimiWebTurn.refusal(from: data) == nil && aborted,
+                      String(decoding: data.prefix(200), as: UTF8.self))
             case .failure(let error):
-                note("prompt action route answered: " + error.localizedDescription)
+                check("the prompt action route aborts the running prompt (kimi answers `aborted: true`)",
+                      false, error.localizedDescription)
             }
             let started = Date()
             await session.shutdown()
@@ -1086,15 +1413,79 @@ if let kimi = binary("kimi"), let server = FakeServer() {
         }
         // A probe that never finishes must be a NAMED failure: a bare
         // timed-out wait used to move on in silence, and the two checks
-        // above simply did not exist in that run's count (seen once —
-        // `shutdown` did not return within the wait, against a
-        // `finish` whose every step is bounded at ~10 s in total).
+        // above simply did not exist in that run's count. Seen: `shutdown`
+        // did not return, its child long gone — Foundation's
+        // `waitUntilExit()`, called from a thread that did not launch the
+        // child, slept for good (`AgentCLIProbe.awaitExit` waits instead;
+        // `Verification/CLIUpdates` 2b).
         let abortWait = Date()
         let abortFinished = done.wait(timeout: .now() + 120) == .success
         check("slow server-path abort probe finished (shutdown returned) within 120 s", abortFinished,
               String(format: "%.0f s", Date().timeIntervalSince(abortWait)))
         slow.stop()
         try? fm.removeItem(at: slowHome)
+    }
+
+    // No internet on the server path: kimi retries a request it gets no
+    // connection for, then ends the turn as failed — and its server
+    // answers idle all the same. Why is in the record, and so is each
+    // retry while the turn waits. A provider at a port nothing listens
+    // on, three attempts rather than kimi's ten.
+    do {
+        let deadHome = kimiHome(port: closedPort())
+        let deadCwd = deadHome.appendingPathComponent("cwd", isDirectory: true)
+        try? fm.createDirectory(at: deadCwd, withIntermediateDirectories: true)
+        setenv("KIMI_CODE_HOME", deadHome.path, 1)
+        AgentRunner.extraEnvironment["KIMI_CODE_HOME"] = deadHome.path
+        AgentRunner.extraEnvironment["KIMI_LOOP_MAX_ATTEMPTS_PER_STEP"] = "3"
+        let done = DispatchSemaphore(value: 0)
+        Task {
+            defer { done.signal() }
+            guard case .started(let session) = await KimiWebServerCall.Session.start(binary: kimi, scratchDirectory: deadCwd),
+                  case .success(let sid) = await KimiWebTurn.createSession(session, cwd: deadCwd,
+                                                                           model: "fake/fake-model",
+                                                                           binding: kimiBinding),
+                  case .success = await KimiWebTurn.prompt(session, sessionId: sid, text: "are you there?",
+                                                            model: "fake/fake-model",
+                                                            disabledTools: KimiToolPolicy.fallbackNames,
+                                                            binding: kimiBinding)
+            else { check("no internet, server path: the prompt went", false); return }
+            let idle = await KimiWebTurn.waitIdle(session, sessionId: sid) { false }
+            await session.shutdown()
+            check("no internet, server path: the session answers idle all the same, and says the turn failed",
+                  idle?.lastTurnReason == "failed", String(describing: idle))
+            let dir = kimiSessionDir(home: deadHome, id: sid)
+            let wire = dir?.appendingPathComponent("agents/main/wire.jsonl")
+            let wordless = "Kimi Code reported an error but gave no detail."
+            let items = wire.map {
+                KimiSessionScanner.readHistory(of: $0, maxTurns: 1, includeThinking: true,
+                                               wordlessFailure: wordless)
+            } ?? []
+            check("…the turn ends on kimi's words, read as the runner reads them",
+                  KimiWebTurn.failure(in: items, lastTurnReason: idle?.lastTurnReason, wordless: wordless)
+                    == "Connection error.",
+                  "\(items.map(\.kind))")
+            // The record as the runner reads it while the turn waits.
+            var tail = KimiSessionScanner.RecordTail()
+            var retry = KimiSessionScanner.RetryWatch()
+            var notices: [String] = []
+            if let wire {
+                for line in tail.lines(adding: KimiSessionScanner.RecordTail.read(wire, from: 0)) {
+                    retry.feed(line: line)
+                    if let notice = retry.notice, notices.last != notice { notices.append(notice) }
+                }
+            }
+            check("…with kimi's retry line while it waited, off the same record, gone with the turn",
+                  notices == ["Retrying (2/3) · APIConnectionError · Connection error.",
+                              "Retrying (3/3) · APIConnectionError · Connection error."]
+                    && retry.notice == nil,
+                  "\(notices)")
+            if let dir { try? KimiToolPolicy.restore(.absent, at: KimiToolPolicy.disabledFile(sessionDir: dir)) }
+        }
+        let deadFinished = done.wait(timeout: .now() + 120) == .success
+        check("no-internet server-path probe finished within 120 s", deadFinished)
+        AgentRunner.extraEnvironment.removeValue(forKey: "KIMI_LOOP_MAX_ATTEMPTS_PER_STEP")
+        try? fm.removeItem(at: deadHome)
     }
     // (g) Where kimi has a search provider it offers `WebSearch` too,
     // and a Chat only turn keeps it. A `[services.moonshot_search]`
@@ -1154,10 +1545,6 @@ check("an unbalanced tag names nothing, exactly as it strips nothing",
 check("names come back unescaped, in order",
       AttachmentInline.names(in: AttachmentInline.block(name: "a&b \"c\".txt", text: "z", truncated: true)
                                   + AttachmentInline.block(name: "d.md", text: "y", truncated: false)) == ["a&b \"c\".txt", "d.md"])
-check("filesLine is the chat page's comma-joined shape",
-      AttachmentInline.filesLine(in: AttachmentInline.block(name: "a.txt", text: "1", truncated: false)
-                                     + AttachmentInline.block(name: "b.txt", text: "2", truncated: false)) == "a.txt, b.txt"
-      && AttachmentInline.filesLine(in: "plain") == nil)
 check("the per-message cap is 200,000 characters", AttachmentInline.perMessageCharCap == 200_000)
 
 func userRows(_ items: [AgentSessionHistoryItem]) -> [(String, [String])] {
@@ -1207,11 +1594,80 @@ check("kimi reader: the block is stripped, the words and the unbalanced text sta
       kimiRows.map(\.0).joined(separator: " | "))
 check("kimi reader: the paperclip names ride the row", kimiRows.contains { $0.1 == ["notes.md"] })
 
+// Outside Chat only a file rides as its PATH, the marker after the words
+// (`AttachmentInline.appendingReferences`), and a message may be the
+// files alone. The same three records, the message swapped for each.
+func variant(of fixture: URL, _ label: String, replacing old: String, with new: String) -> URL {
+    func swap(_ value: Any) -> Any {
+        if let s = value as? String { return s.replacingOccurrences(of: old, with: new) }
+        if let a = value as? [Any] { return a.map(swap) }
+        if let d = value as? [String: Any] { return d.mapValues(swap) }
+        return value
+    }
+    let out = fm.temporaryDirectory.appendingPathComponent("sipai-chatonly-\(label)-\(UUID().uuidString.prefix(6))-"
+                                                           + fixture.lastPathComponent)
+    let rewritten = lines(of: fixture).map { line -> String in
+        guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)),
+              let data = try? JSONSerialization.data(withJSONObject: swap(obj)) else { return line }
+        return String(decoding: data, as: UTF8.self)
+    }
+    try? (rewritten.joined(separator: "\n") + "\n").write(to: out, atomically: true, encoding: .utf8)
+    return out
+}
+let pathRef = AttachmentInline.FileReference(name: "notes.md", path: "/tmp/example-project/notes.md", isFolder: false)
+let referenced = AttachmentInline.appendingReferences([pathRef], to: "What does this say?")
+let filesAlone = AttachmentInline.appendingReferences([pathRef], to: "")
+for (label, text, words) in [("path", referenced, "What does this say?"), ("alone", filesAlone, "")] {
+    let readers: [(String, (URL) -> [AgentSessionHistoryItem], URL)] = [
+        ("claude", { AgentSessionScanner.readHistory(of: $0) }, claudeFixture),
+        ("codex", { CodexSessionScanner.readHistory(of: $0) }, codexFixture),
+        ("kimi", { KimiSessionScanner.readHistory(of: $0) }, kimiFixture),
+    ]
+    for (agent, read, fixture) in readers {
+        let file = variant(of: fixture, label, replacing: composed, with: text)
+        let rows = userRows(read(file))
+        check(words.isEmpty
+                ? "\(agent) reader: a message of attached files alone keeps its row, the files on the paperclip line"
+                : "\(agent) reader: a path marker after the words is stripped, the file on the paperclip line",
+              rows.contains { $0.0 == words && $0.1 == ["notes.md"] },
+              rows.map { "\($0.0) \($0.1)" }.joined(separator: " | "))
+        if words.isEmpty {
+            // The sidebar dates a session by its newest user message; a
+            // message of files alone is one.
+            let dated: Date?
+            switch agent {
+            case "claude": dated = AgentSessionScanner.lastTurnStartDate(of: file)
+            case "codex": dated = CodexSessionScanner.lastUserMessageDate(of: file)
+            default: dated = KimiSessionScanner.lastUserMessageDate(of: file)
+            }
+            check("\(agent): a message of attached files alone dates the session", dated != nil)
+        }
+        try? fm.removeItem(at: file)
+    }
+    // A claude turn another process runs is drawn live by the tailer,
+    // through the stream parser: the same row as on reopen.
+    let claudeVariant = variant(of: claudeFixture, "\(label)-tail", replacing: composed, with: text)
+    let userLine = lines(of: claudeVariant).first { object($0)["type"] as? String == "user" } ?? ""
+    let live = AgentEventParser.parse(line: userLine, fallbackCwd: fm.temporaryDirectory,
+                                      includeUserMessages: true)
+        .compactMap { event -> (String, [String])? in
+            if case .userMessage(let t) = event.kind { return (t, event.attachedFiles) }
+            return nil
+        }
+    check(words.isEmpty
+            ? "claude tailer: a message of attached files alone keeps its live row, the files named"
+            : "claude tailer: the live row of a path marker is the words, the file named",
+          live.count == 1 && live[0].0 == words && live[0].1 == ["notes.md"],
+          live.map { "\($0.0) \($0.1)" }.joined(separator: " | "))
+    try? fm.removeItem(at: claudeVariant)
+}
+
 // ====================================================================
 print("6. SOURCE READS — the views, the runner, the persistence, the heal")
 
 let composer = source("SipAI/Views/Chat/AgentComposer.swift")
 let view = source("SipAI/Views/Chat/AgentSessionView.swift")
+let attachmentModel = source("SipAI/Models/ChatAttachment.swift")
 let runner = source("SipAI/Models/AgentRunner.swift")
 let config = source("SipAI/Models/ConfigManager.swift")
 let panel = source("SipAI/Views/Chat/ScheduledTaskPanel.swift")
@@ -1221,11 +1677,14 @@ let chatView = source("SipAI/Views/Chat/ChatView.swift")
 let settings = source("SipAI/Views/Settings/SettingsView.swift")
 let catalog = source("SipAI/Resources/Localizable.xcstrings")
 
-check("composer: the Chat only row sits FIRST among the overrides, after Default (claude/codex)",
-      composer.contains("return [defaultRow] + overrides + CodexCapabilities.modePresets")
-      && composer.contains("return [defaultRow] + overrides + caps.permissionModes"))
-check("composer: kimi's chip is a two-row picker (Auto-approve · Chat only)",
-      composer.contains("return [autoRow] + overrides"))
+check("menus: the Chat only row sits FIRST after Default, on every agent — the composer and the task card list the same rows",
+      composer.contains("return [defaultRow] + chatOnly + asking + CodexCapabilities.modePresets")
+      && composer.contains("return [defaultRow] + chatOnly + claudeModes.map")
+      && composer.contains("return [defaultRow] + chatOnly\n                + asking.filter")
+      && composer.contains("AgentMenus.modeRows(agentKey: agentKey, agentName: agentName,")
+      && panel.contains("AgentMenus.modeRows(\n            agentKey: taskAgentKey"))
+check("menus: a kimi with no front end of its own reads Never Ask, with Chat only beside it where offered",
+      composer.contains("return [AgentMenuRow(value: nil, title: neverAsk.title, subtitle: neverAsk.subtitle)]\n                    + chatOnly"))
 check("composer: the pick goes through the one writer (ChatOnlyMode.select)",
       composer.contains("ChatOnlyMode.select(value, into: &options)"))
 check("composer: the pool hovers name the agent through the label, one per agent",
@@ -1233,10 +1692,13 @@ check("composer: the pool hovers name the agent through the label, one per agent
       && composer.contains("Uses your \\(agentName) plan"))
 check("composer: the kimi draft note is appended on a draft alone",
       composer.contains("if isKimi && folderEditable"))
-check("composer: the + attaches under Chat only, inserts paths otherwise",
-      composer.contains("if chatOnlyActive, let onStageFiles {") && composer.contains("Attached files are sent with your message"))
-check("composer: the text field forwards drops under Chat only alone",
-      composer.contains("onDropFiles: chatOnlyActive ? onStageFiles : nil"))
+// A file attaches in every mode (Verification/AgentFileChips); what Chat
+// only adds is that its content travels, so its picker says so.
+check("composer: under Chat only the + picks files alone, sent with the message",
+      composer.contains("onStageFiles(panel.urls)") && composer.contains("panel.canChooseDirectories = !chatOnlyActive")
+      && composer.contains("Attached files are sent with your message"))
+check("composer: the text field forwards drops",
+      composer.contains("onDropFiles: onStageFiles,"))
 check("GrowingTextField: both closures are re-pointed in updateNSView (the Coordinator rule)",
       composer.range(of: "func updateNSView(_ nsView: NSScrollView, context: Context) {\n        // The coordinator is made ONCE").map { r in
           composer[r.upperBound...].prefix(1400).contains("applyDropHandlers(to: tv)")
@@ -1245,18 +1707,21 @@ check("GrowingTextField: both closures are re-pointed in updateNSView (the Coord
 check("composer: the row is gated (ChatOnlyGate) and the chip reads the gated state",
       composer.contains("private var chatOnlyOffered: Bool { ChatOnlyGate.offered(agentKey: agentKey) }")
       && composer.contains("private var chatOnlyActive: Bool { options.chatOnly && chatOnlyOffered }"))
-check("composer: the schedule mode never reads chatOnly (a task is an agent task)",
-      panel.contains("Chat only") && !panel.contains("chatOnly") && composer.contains("Chat only never reaches a task"))
+check("schedule: a task carries the composer's Chat only as such, and the card offers the row — a run does what its task says",
+      composer.contains("chatOnly: chatOnlyActive,\n            nonStop: scheduleNonStop,")
+      && panel.contains("ChatOnlyMode.select(value.isEmpty ? nil : value, into: &options)")
+      && panel.contains("draft.chatOnly = options.chatOnly")
+      && !composer.contains("Chat only never reaches a task"))
 check("view: the placeholder swaps under Chat only", view.contains("Chat with \\(sessionAgentName)…"))
 check("view: a send composes the blocks and clears the staged files",
-      view.contains("let text = attaching.isEmpty ? typed : outgoingText(for: typed)")
+      view.contains("outgoingText(for: typed, chatOnly: sending.chatOnly)")
       && view.contains("stagedAttachments = []"))
 check("view: every send goes through the gated options", !view.contains("options: launchOptions)"))
 check("view: staged files stash with the draft on every change, never on disappear",
       view.contains(".onChange(of: stagedAttachments) { _, _ in stashComposerAttachments() }")
       && !view.contains("onDisappear { stashComposerAttachments"))
-check("view: the per-message cap is enforced at attach time",
-      view.contains("inlined + text.count <= AttachmentInline.perMessageCharCap"))
+check("the per-message cap is enforced at attach time",
+      attachmentModel.contains("inlined + text.count <= AttachmentInline.perMessageCharCap"))
 check("view: the paperclip line rides both the history row and the live row",
       view.contains("attachedFiles: item.attachedFiles") && view.contains("attachedFiles: event.attachedFiles"))
 check("view: a kimi session is healed on open", view.contains("agents.healKimiToolPolicies(sessionId: id)"))
@@ -1266,8 +1731,13 @@ check("runner: codex's bornPlain is `resuming`, nothing else",
       runner.contains("options: options, bornPlain: resuming,"))
 check("runner: the persona file is ensured before a codex Chat only spawn",
       runner.contains("try ChatOnlyPersona.ensureFile(at: SipaiPaths.chatOnlyInstructionsFile)"))
+// The route is the driver pick's (`AgentTurnDriver.pick`): Chat only on a
+// session with no id yet is the kimi-web driver.
 check("runner: a kimi draft's Chat only turn routes to the server path",
-      runner.contains("if isKimi, options.chatOnly, sessionId?.isEmpty ?? true {"))
+      runner.contains("if driver == .kimiWeb {")
+        && runner.contains("isNewSession: sessionId?.isEmpty ?? true,")
+        && source("SipAI/Models/AgentLaunchOptions.swift")
+            .contains("if options.chatOnly { return isNewSession ? .kimiWeb : .kimiPrint }"))
 check("runner: a resumed kimi Chat only turn writes the policy file before the spawn and restores at finalize",
       runner.contains("guard await prepareKimiToolPolicy(sessionId: id) else {")
       && runner.contains("restoreKimiToolPolicyIfPending()"))
@@ -1279,15 +1749,40 @@ check("runner: the server-born id rides the existing discovery closure + awaitSe
       runner.contains("adoptDiscoveredSession(id: sid, fileURL: nil)") && runner.contains("awaitSessionFile(id: sid)"))
 check("runner: Stop on the server path aborts then shuts down",
       runner.contains("await KimiWebTurn.abort(session, sessionId: sid, promptId: promptId)"))
+// On a kimi that binds at creation the session is bound when made, and kimi applies its
+// policy file when it opens the session, not a prompt's own list to that
+// prompt's turn: the runner closes the session once made, writes the file
+// as a resumed Chat only turn does, and opens it with a fresh server.
+let webTurn = runner.range(of: "private func runKimiWebTurn(")
+    .map { String(runner[$0.lowerBound...].prefix(12_000)) } ?? ""
+let webTurnSteps = ["KimiWebTurn.Binding.of(kimiVersion: AgentCLIUpdateMonitor.shared.installed[\"kimi\"]?.text)",
+                    "KimiWebTurn.createSession(session, cwd: cwd, model: model, binding: binding)",
+                    "if binding == .atCreation {", "await session.shutdown()",
+                    "guard await prepareKimiToolPolicy(sessionId: sid) else {",
+                    "KimiWebServerCall.Session.start(binary: binary, scratchDirectory: cwd)", "session = started",
+                    "} else {", "onKimiToolPolicyJournal?(sid, .absent)",
+                    "KimiWebTurn.prompt(session, sessionId: sid,", "binding: binding, images: images)"]
+var webTurnRest = Substring(webTurn)
+let webTurnInOrder = webTurnSteps.allSatisfy { step in
+    guard let r = webTurnRest.range(of: step) else { return false }
+    webTurnRest = webTurnRest[r.upperBound...]
+    return true
+}
+check("runner: on a kimi that binds at creation, the new session is closed, its policy file written, "
+      + "and a fresh server opens it for the prompt", webTurnInOrder)
 // The display text is born through the readers' own cleaner for a
 // scheduled run's marker (`strippedTaskMarker` strips the attachment
 // blocks FIRST, then the `<scheduled-task>` tag): the live row must
 // match its record, and a raw marker in the bubble never did.
+// A leading line of skill mentions is stripped with them for codex
+// alone, whose reader strips it on reopen; claude's and kimi's readers
+// keep a first line shaped like one, so their live row does too.
 check("runner: the send strips the blocks AND the scheduled marker for the bubble, and keeps the wire text",
-      runner.contains("let display = CodexSessionScanner.strippedTaskMarker(trimmed)")
+      runner.contains("var display = CodexSessionScanner.strippedTaskMarker(\n            trimmed, mentionLine: agentKey == SkillAgent.codex)")
       && runner.contains("inFlightUserText = display")
       && CodexSessionScanner.strippedTaskMarker("<scheduled-task name=\"t\"></scheduled-task>\nhello "
-                                                + AttachmentInline.block(name: "a.txt", text: "x", truncated: false)) == "hello")
+                                                + AttachmentInline.block(name: "a.txt", text: "x", truncated: false),
+                                                mentionLine: false) == "hello")
 check("config: chat_only in both prefs maps, read and written",
       config.components(separatedBy: "prefs[\"chat_only\"] == \"1\"").count == 3
       && config.components(separatedBy: "prefs[\"chat_only\"] = \"1\"").count == 3)
@@ -1307,7 +1802,7 @@ for key in ["Chat only", "%@ can look things up on the web but can't read or cha
             "Uses your %@ plan", "Uses your %@ limits", "Uses your %@ membership",
             "The first message of a new session arrives all at once; later ones stream.",
             "Attached files are sent with your message", "Chat with %@…", "Attach file",
-            "What is Chat only?", "%@ approves its own tool calls on a headless run"] {
+            "What is Chat only?", "Never interrupts you; everything runs and is decided automatically"] {
     let escaped = key.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
     let present = catalog.range(of: "\"\(escaped)\" : {").map { r in
         catalog[r.upperBound...].prefix(600).contains("\"zh-Hans\"")
@@ -1486,10 +1981,12 @@ check("settled: kimi's version read is its verdict, even an unparseable one",
 // again (the Enter key and the button both reach `handleSend`).
 check("the composer holds a Chat only pick the gate has not read, and says so",
       composer.contains("options.chatOnly && !ChatOnlyGate.settled(agentKey: agentKey)")
-      && composer.contains("&& !sending && !externalBusy && !chatOnlyPending")
+      && composer.contains("&& !externalBusy && !chatOnlyPending && askingHold == nil")
       && composer.contains("Checking whether \\(agentName) offers Chat only."))
-check("…and the host's send refuses it too, before anything is sent",
-      view.contains("if launchOptions.chatOnly, !ChatOnlyGate.settled(agentKey: sessionAgentKey) { return }"))
+check("…and the host's sends refuse it too, before anything is sent — the composer's, and a branch's first message",
+      view.contains("if launchOptions.chatOnly, !ChatOnlyGate.settled(agentKey: sessionAgentKey) { return true }")
+        && view.contains("if sendIsHeld { return }")
+        && view.contains("guard !text.isEmpty, !branching, !sendIsHeld,"))
 
 // The installed CLIs, read the way the app reads them.
 if let claude = binary("claude_code") {
@@ -1645,6 +2142,8 @@ func kinds(_ items: [AgentSessionHistoryItem]) -> [String] {
         case .toolResult: return "result"
         case .interrupted: return "interrupted"
         case .compaction: return "compaction"
+        case .error: return "error"
+        case .shellOutput: return "shell"
         }
     }
 }
@@ -1693,6 +2192,32 @@ check("argv: never on an agent turn, accepted or not",
 check("argv: never unless the probe accepted it",
       !ChatOnlyArgv.claude(options: chat, snapshotFlagListed: true,
                            thinkingDisplayAccepted: false).contains("--thinking-display"))
+// The one agent turn that asks: a user whose own `showThinkingSummaries`
+// is on. Claude's headless run ignores that setting, so SipAI does what
+// claude's terminal does with it — behind the same probe.
+check("argv: an agent turn asks for summaries where the user's setting does, behind the probe",
+      ChatOnlyArgv.claude(options: plain, snapshotFlagListed: true, thinkingDisplayAccepted: true,
+                          thinkingSummariesAsked: true).contains("--thinking-display")
+      && !ChatOnlyArgv.claude(options: plain, snapshotFlagListed: true, thinkingDisplayAccepted: false,
+                              thinkingSummariesAsked: true).contains("--thinking-display"))
+check("argv: …and that list stays closed too",
+      ChatOnlyArgv.variadicFlagsAreClosed(ChatOnlyArgv.claude(
+          options: plain, snapshotFlagListed: true, thinkingDisplayAccepted: true,
+          thinkingSummariesAsked: true)))
+do {
+    let on = Data(#"{"showThinkingSummaries": true}"#.utf8)
+    let off = Data(#"{"showThinkingSummaries": false}"#.utf8)
+    let other = Data(#"{"model": "opus"}"#.utf8)
+    let notJSON = Data("{".utf8)
+    check("settings: showThinkingSummaries is read in claude's order, a later file winning",
+          ChatOnlyArgv.claudeAsksThinkingSummaries([on])
+          && !ChatOnlyArgv.claudeAsksThinkingSummaries([on, off])
+          && ChatOnlyArgv.claudeAsksThinkingSummaries([off, on]))
+    check("settings: a file without the key, or not JSON, changes nothing; none at all is off",
+          ChatOnlyArgv.claudeAsksThinkingSummaries([on, other, notJSON])
+          && !ChatOnlyArgv.claudeAsksThinkingSummaries([other])
+          && !ChatOnlyArgv.claudeAsksThinkingSummaries([]))
+}
 
 // (c) The live parsers: no thought unless asked — which is every agent
 // turn — and never an empty one.
@@ -1957,8 +2482,45 @@ if let claude = binary("claude_code"), let server = FakeServer(think: true) {
     _ = run(claude, ["-p", "Again?", "--output-format", "stream-json", "--verbose"]
             + ChatOnlyArgv.claude(options: chat, snapshotFlagListed: true, thinkingDisplayAccepted: false),
             cwd: cwd, environment: e)
-    check("claude: without the flag nothing asks for readable thinking — the probe's verdict is what adds it",
-          (messagesBody()["thinking"] as? [String: Any])?["display"] == nil,
+    // Claude's own display when nothing is asked is claude's to choose —
+    // none on older builds, `updates` on newer ones — and is left alone.
+    check("claude: without the flag the request is left on claude's own thinking display — summarized is asked for by the probe's verdict alone",
+          (messagesBody()["thinking"] as? [String: Any])?["display"] as? String != "summarized",
+          String(describing: messagesBody()["thinking"]))
+    // An agent turn, as SipAI sends one: claude's own display (what the
+    // Help answer calls short progress notes), and then the setting that
+    // headless claude does not apply and SipAI applies for it.
+    server.clear()
+    _ = run(claude, ["-p", "Hello?", "--output-format", "stream-json", "--verbose"]
+            + ChatOnlyArgv.claude(options: plain, snapshotFlagListed: true, thinkingDisplayAccepted: true),
+            cwd: cwd, environment: e)
+    let agentDisplay = (messagesBody()["thinking"] as? [String: Any])?["display"] as? String
+    check("claude: an agent turn is left on claude's own display — never summarized unasked",
+          agentDisplay != "summarized", String(describing: messagesBody()["thinking"]))
+    if agentDisplay != "updates" {
+        note("claude's headless thinking display is \(agentDisplay ?? "absent"), not `updates` — the Help answer on Compact view (short progress notes by default) may need new words")
+    }
+    let settingsFile = cfg.appendingPathComponent("settings.json")
+    try? Data(#"{"showThinkingSummaries": true}"#.utf8).write(to: settingsFile)
+    server.clear()
+    _ = run(claude, ["-p", "Hello?", "--output-format", "stream-json", "--verbose"]
+            + ChatOnlyArgv.claude(options: plain, snapshotFlagListed: true, thinkingDisplayAccepted: true),
+            cwd: cwd, environment: e)
+    let settingAlone = (messagesBody()["thinking"] as? [String: Any])?["display"] as? String
+    if settingAlone == "summarized" {
+        note("headless claude now applies showThinkingSummaries itself — SipAI's flag for it is no longer needed")
+    } else {
+        check("claude: with showThinkingSummaries on and no flag, headless claude asks for no readable display (the setting is not applied)",
+              settingAlone == nil, String(describing: messagesBody()["thinking"]))
+    }
+    server.clear()
+    let asks = ChatOnlyArgv.claudeAsksThinkingSummaries([(try? Data(contentsOf: settingsFile)) ?? Data()])
+    _ = run(claude, ["-p", "Hello?", "--output-format", "stream-json", "--verbose"]
+            + ChatOnlyArgv.claude(options: plain, snapshotFlagListed: true, thinkingDisplayAccepted: true,
+                                  thinkingSummariesAsked: asks),
+            cwd: cwd, environment: e)
+    check("claude: with the setting on, the agent turn SipAI sends asks for summarized",
+          asks && (messagesBody()["thinking"] as? [String: Any])?["display"] as? String == "summarized",
           String(describing: messagesBody()["thinking"]))
     server.stop()
     try? fm.removeItem(at: home)
@@ -2051,6 +2613,39 @@ print("9. LIVE — one real Chat only turn, one Default turn and one web lookup 
 
 /// A current question, so the lookup is the model's own call to make.
 let liveWebQuestion = "What is the latest stable release of Python? Look it up on the web and cite the page."
+/// The page the kimi lookup is asked to open, and the spellings a fetch
+/// of it may carry.
+let kimiLookupPage = "https://www.python.org/downloads/"
+let kimiLookupPageSpellings = [kimiLookupPage, String(kimiLookupPage.dropLast())]
+
+// What the live kimi check judges, pinned token-free over stdout in the
+// parser's documented shape: the asked page back (a string result), a
+// guessed page's 404 (text blocks), another tool's failure ignored.
+let kimiLookupStdout = [
+    #"{"role":"assistant","content":"","tool_calls":[{"type":"function","id":"tc_1","function":{"name":"FetchURL","arguments":"{\"url\":\"https://www.python.org/downloads/\"}"}},{"type":"function","id":"tc_2","function":{"name":"FetchURL","arguments":"{\"url\":\"https://www.python.org/downloads/release/python-3160/\"}"}}]}"#,
+    #"{"role":"tool","tool_call_id":"tc_1","content":"Python 3.15.1 is the newest"}"#,
+    #"{"role":"tool","tool_call_id":"tc_2","content":[{"type":"text","text":"Failed to fetch URL. Status: 404"}]}"#,
+    #"{"role":"assistant","content":"","tool_calls":[{"type":"function","id":"tc_3","function":{"name":"Shell","arguments":"{}"}}]}"#,
+    #"{"role":"tool","tool_call_id":"tc_3","content":"Failed to fetch"}"#,
+    #"{"role":"assistant","content":"Python 3.15.1"}"#,
+].joined(separator: "\n")
+let kimiLookupFetches = kimiFetches(kimiLookupStdout)
+check("kimiFetches pairs each FetchURL call with its result — a string, or text blocks — and ignores other tools",
+      kimiLookupFetches.map { "\($0.url) \($0.failed)" }
+        == ["https://www.python.org/downloads/ false", "https://www.python.org/downloads/release/python-3160/ true"],
+      kimiLookupFetches.map { "\($0.url) \($0.failed)" }.joined(separator: "; "))
+check("kimi lookup verdict: the asked page back and a guessed page's 404 pass",
+      kimiLookupOK(fetches: kimiLookupFetches, asked: kimiLookupPageSpellings, refused: false, fetched: true))
+check("kimi lookup verdict: the asked page failing fails",
+      !kimiLookupOK(fetches: [(kimiLookupPage, true)], asked: kimiLookupPageSpellings, refused: false, fetched: true))
+check("kimi lookup verdict: a refusal fails",
+      !kimiLookupOK(fetches: kimiLookupFetches, asked: kimiLookupPageSpellings, refused: true, fetched: true))
+check("kimi lookup verdict: every fetch failing fails, however the model spelled the page",
+      !kimiLookupOK(fetches: [("https://python.org/downloads/", true)], asked: kimiLookupPageSpellings, refused: false, fetched: true))
+check("kimi lookup verdict: a search with no page fetched passes",
+      kimiLookupOK(fetches: [], asked: kimiLookupPageSpellings, refused: false, fetched: true))
+check("kimi lookup verdict: no lookup at all fails",
+      !kimiLookupOK(fetches: [], asked: kimiLookupPageSpellings, refused: false, fetched: false))
 
 if !liveTurns {
     skip("real turns", "set SIPAI_CHATONLY_LIVE=1 (spends tokens on each installed CLI)")
@@ -2145,14 +2740,20 @@ if !liveTurns {
             let second = run(kimi, ["--prompt", "And again, one word.", "--output-format", "stream-json", "--session", sid], cwd: scratch, timeout: 300)
             // The web lookup, under the same policy file: a page fetch
             // (a kimi with a search provider may search first).
-            let web = run(kimi, ["--prompt", "Open https://www.python.org/downloads/ and tell me the newest Python version listed there.",
+            let web = run(kimi, ["--prompt", "Open \(kimiLookupPage) and tell me the newest Python version listed there.",
                                  "--output-format", "stream-json", "--session", sid], cwd: scratch, timeout: 300)
             try? KimiToolPolicy.restore(.absent, at: file)
             check("kimi live: the Chat only (policy file) turn ran (exit 0)", second.status == 0, String(second.out.prefix(200)))
             let fetched = web.out.contains("\"FetchURL\"") || web.out.contains("\"WebSearch\"")
-            let failed = web.out.contains("Failed to fetch") || web.out.contains("Refusing to fetch")
-            check("kimi live: a web lookup runs in Chat only, and the fetch succeeds", web.status == 0 && fetched && !failed,
-                  String(web.out.prefix(300)))
+            let fetches = kimiFetches(web.out)
+            let refused = web.out.contains("Refusing to fetch")
+            check("kimi live: a web lookup runs in Chat only, and the page asked for comes back",
+                  web.status == 0 && kimiLookupOK(fetches: fetches, asked: kimiLookupPageSpellings, refused: refused, fetched: fetched),
+                  fetches.map { "\($0.url) \($0.failed ? "failed" : "ok")" }.joined(separator: "; ")
+                    + " — " + String(web.out.prefix(200)))
+            for f in fetches where f.failed && !kimiLookupPageSpellings.contains(f.url) {
+                note("kimi live: a page the model chose itself did not load (\(f.url))")
+            }
             note("kimi live: probe session \(sid) is rooted in a temp folder (scratch to SipAI); delete it by hand if wanted")
         }
     }
@@ -2174,8 +2775,12 @@ func activityRows(_ events: [StreamEvent]) -> [ChatOnlyActivity.Row] {
         case .toolUse(let id, let name, let input):
             return .toolUse(name: name, title: name, input: input, resultText: results[id])
         case .toolResult: return .toolResult
-        case .assistantText, .error, .interrupted, .compaction, .userMessage: return .boundary
-        case .systemInit, .result: return .invisible
+        case .assistantText(let text): return .words(text)
+        case .error(let message), .interrupted(let message): return .outcome(message)
+        case .compaction: return .notice("")
+        case .userMessage, .shellOutput: return .answerStart
+        case .systemInit: return .turnBoundary
+        case .result: return .invisible
         }
     }
 }
@@ -2248,8 +2853,18 @@ if !liveThoughts {
         let events = lines.flatMap { CodexEventParser.parse(line: $0, fallbackCwd: scratch, includeThinking: true).events }
         let reasoningItems = lines.filter { $0.contains("\"type\":\"reasoning\"") }.count
         check("codex live: the Chat only lookup ran (exit 0)", web.status == 0, String(web.out.prefix(200)))
-        check("codex live: the shipped argv brings reasoning summaries back READABLE",
-              !thoughts(events).isEmpty, "\(reasoningItems) reasoning item(s), \(thoughts(events).count) readable")
+        // A model that did not reason left nothing to summarise: what
+        // the argv asks for is pinned token-free above, and a turn whose
+        // reasoning tokens are 0 says nothing about it.
+        let reasoningTokens = codexReasoningTokens(web.out)
+        if reasoningTokens == 0 {
+            note("codex live: the model spent no reasoning tokens on this turn, so there is no summary to read")
+        } else {
+            check("codex live: the shipped argv brings reasoning summaries back READABLE",
+                  !thoughts(events).isEmpty,
+                  "\(reasoningItems) reasoning item(s), \(thoughts(events).count) readable, "
+                    + (reasoningTokens.map { "\($0) reasoning tokens" } ?? "no reasoning_output_tokens reported"))
+        }
         let codexRows = activityRows(events)
         let codexSteps = ChatOnlyActivity.plan(codexRows, turnRunning: false).groups.flatMap(\.steps)
         check("codex live: every lookup in the line names what it looked up (code mode's result supplies it)",

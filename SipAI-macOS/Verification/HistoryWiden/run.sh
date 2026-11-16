@@ -11,7 +11,7 @@
 #    them: the fixtures are sized off `historyByteBudget` itself.
 #
 #  * Structural — the view wiring in `AgentSessionView.swift` that no
-#    harness can instantiate: the widen applies `trimmedForInFlight`,
+#    harness can instantiate: the widen lands through `adoptHistory`,
 #    never writes `AgentHistoryCache`, the button offers past the
 #    loaded rows (`historyHasMore`), the ladder exists, and the
 #    ceiling states its truncation instead of going silent.
@@ -27,5 +27,7 @@ trap 'rm -rf "$out"' EXIT
 swiftc -O -o "$out/historywiden" \
   "$here/Stubs.swift" "$here/main.swift" \
   "$src/SipAI/Models/AttachmentInline.swift" \
+  "$src/SipAI/Models/SkillModel.swift" \
+  "$src/SipAI/Models/ShellCommands.swift" \
   "$src/SipAI/Models/AgentSession.swift"
 "$out/historywiden" "$src/SipAI/Views/Chat/AgentSessionView.swift"

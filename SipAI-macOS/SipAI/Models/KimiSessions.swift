@@ -31,9 +31,10 @@
 //     kimi's own and SipAI's (`KimiSessionFork`) both write `title`
 //     into `state.json`. `state.json` also carries `cwd`, which is what
 //     keeps kimi sessions out of `$HOME`.
-//   * The wire's `runtime.set_binding` names the workspace bucket the
-//     session lives under, and kimi refuses a session whose binding and
-//     bucket disagree. A branch therefore stays in its source's bucket.
+//   * A session is found only in the bucket its working folder hashes
+//     to, and a kimi that writes `runtime.set_binding` also refuses a
+//     session whose record names another bucket. A branch therefore stays
+//     in its source's bucket.
 //
 // Store layout:
 //
@@ -325,8 +326,9 @@ enum KimiSessionScanner {
     /// The working directory a whole bucket belongs to. Evidence order
     /// is state.json, then kimi's index, then a decode of the bucket
     /// name — cwd first, decode last, because the encoding is lossy and
-    /// can only ever be a guess (CLAUDE.md → "Agent-session project
-    /// paths"). Nil when nothing on disk answers.
+    /// can only ever be a guess: a folder whose name holds a space, a
+    /// dot or a dash decodes to a path that may not exist. Nil when
+    /// nothing on disk answers.
     private static func bucketCwd(bucket: URL,
                                   states: [URL?],
                                   indexed: [URL?]) -> URL? {
@@ -620,6 +622,19 @@ enum KimiSessionScanner {
         /// user row keeps into the wire (`AgentSessionHistoryItem
         /// .recordUuid`). Nil on the agent's half, which is loop events.
         let id: String?
+        /// A user-role record KIMI wrote: the notification it sends itself
+        /// when a background task ends (`isTaskNotice`).
+        var isTaskNotice = false
+        /// The skill a message loaded, drawn under its words
+        /// (`skillActivation`).
+        var loadedSkills: [String] = []
+        /// A `!` command kimi's terminal ran, or its output
+        /// (`KimiShellCommand`).
+        var shellRow: ShellCommandRow? = nil
+        var isShellOutput: Bool {
+            if case .output? = shellRow { return true }
+            return false
+        }
     }
 
     /// Records that are not conversation and must never be replayed.
@@ -681,8 +696,16 @@ enum KimiSessionScanner {
         guard let role = body["role"] as? String, !role.isEmpty else {
             return nil
         }
-        let text = KimiEventParser.contentText(body["content"])
-        if role == "user", isInjectedContext(text) { return nil }
+        var text = KimiEventParser.contentText(body["content"])
+        let shellRow = role == "user"
+            ? KimiShellCommand.row(origin: body["origin"] as? [String: Any], text: text) : nil
+        if role == "user", shellRow == nil, isInjectedContext(text) { return nil }
+        var loadedSkills: [String] = []
+        if role == "user", let activation = skillActivation(body) {
+            guard !activation.text.isEmpty else { return nil }
+            text = activation.text
+            loadedSkills = activation.skills
+        }
         var calls: [(id: String, name: String, input: [String: Any])] = []
         if let raw = body["tool_calls"] as? [Any] {
             calls = KimiEventParser.toolCalls(from: raw)
@@ -706,7 +729,80 @@ enum KimiSessionScanner {
             isError: (body["is_error"] as? Bool)
                 ?? (KimiEventParser.present(body, "error") != nil),
             timestamp: timestamp,
-            id: messageId)
+            id: messageId,
+            isTaskNotice: role == "user" && isTaskNotice(body),
+            loadedSkills: loadedSkills,
+            shellRow: shellRow)
+    }
+
+    /// Whether a `context.apply_compaction` record says every message
+    /// the user sent before it is still in the conversation, WHOLE.
+    ///
+    /// Kimi's summary keeps the user's own messages verbatim — a skill
+    /// they started is one, holding the skill's whole text (origin
+    /// `skill_activation`, trigger `user-slash`) — within a budget of its
+    /// own: 20,000 tokens of them (read in its bundle). Past that it
+    /// keeps the oldest 2,000 tokens and the newest 18,000, cutting the
+    /// message at each edge and dropping what lies between, and the
+    /// record then counts the head it kept (`keptHeadUserMessageCount`,
+    /// written only then). A record with no `keptUserMessageCount` is the
+    /// older shape, which kept nothing from before its cut. A skill the
+    /// MODEL loaded itself is dropped either way.
+    ///
+    /// So a skill loaded with the first message survives a summary whole
+    /// in a short conversation — in the NEXT process too, through `kimi
+    /// acp` and through the headless run — and comes back without its end
+    /// once the user's messages pass the budget. Anything this cannot read
+    /// as "kept whole" is not: sent again, a skill is at worst there
+    /// twice; left, it is gone with the chip saying it is loaded.
+    static func compactionKeepsUserMessages(_ record: [String: Any]) -> Bool {
+        guard record["keptUserMessageCount"] is NSNumber,
+              (record["legacyTail"] as? Bool) != true,
+              !(record["keptHeadUserMessageCount"] is NSNumber) else { return false }
+        return true
+    }
+
+    /// A message kimi sent ITSELF, as the user, when a background task
+    /// ended — the turn it then runs on its own:
+    ///
+    ///   {"role":"user","origin":{"kind":"task","taskId":"bash-…",…},
+    ///    "content":[{"type":"text","text":"<notification id=\"task:…\"
+    ///    …>\nTitle: Background process completed\n…</notification>"}]}
+    ///
+    /// Kimi marks whose words a message is in `origin.kind`; `task` is the
+    /// one this reader has seen that is neither the user's nor a reminder
+    /// (`isInjectedContext`). Such a row is drawn under a system label,
+    /// never the user's name, and is not the user opening a turn: it does
+    /// not name the session, re-time its sidebar row, or offer itself as a
+    /// place to branch from — the rule the claude reader keeps for its own
+    /// task notifications (`AgentSessionScanner.isHarnessNotice`).
+    private static func isTaskNotice(_ message: [String: Any]) -> Bool {
+        ((message["origin"] as? [String: Any])?["kind"] as? String) == "task"
+    }
+
+    /// A skill kimi loaded, recorded as a user-role message holding the
+    /// skill's whole text (`origin.kind: "skill_activation"`): what the
+    /// row reads as, and the skill it names. Nil for any other message.
+    ///
+    /// * `trigger: "user-slash"` with words after the command — a message
+    ///   that carries a skill: the composer's chip sends a chosen skill
+    ///   this way (`KimiAcp.promptText`), and the user can type it. The
+    ///   message IS their turn (its id is the turn's `promptId`), and it
+    ///   reads as their words with the skill named under them — the
+    ///   claude and codex rows' shape, and the live row's
+    ///   (`KimiAcp.typedSkill`). Never as the skill's text.
+    /// * `user-slash` with nothing after it — drawn as typed.
+    /// * anything else (the model's own Skill call, `model-tool`) — ""
+    ///   for "no row": the call is already drawn as a tool row, and the
+    ///   text is the skill, not anything anybody said.
+    private static func skillActivation(_ message: [String: Any]) -> (text: String, skills: [String])? {
+        guard let origin = message["origin"] as? [String: Any],
+              (origin["kind"] as? String) == "skill_activation" else { return nil }
+        guard (origin["trigger"] as? String) == "user-slash",
+              let name = origin["skillName"] as? String, !name.isEmpty else { return ("", []) }
+        let args = ((origin["skillArgs"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return args.isEmpty ? ("/skill:" + name, []) : (args, [name])
     }
 
     /// How full the context window is on the newest API call, for the
@@ -738,15 +834,14 @@ enum KimiSessionScanner {
     }
 
     /// The footprint PLUS the model that produced it. The record's
-    /// `model` string IS the config alias (measured:
-    /// `"model":"moonshot-ai/kimi-k3"` against
-    /// `[models."moonshot-ai/kimi-k3"]` in the same install's
+    /// `model` string IS the config alias (`"model":"moonshot-ai/kimi-k3"`
+    /// against `[models."moonshot-ai/kimi-k3"]` in the same install's
     /// config.toml), which is what lets the occupancy tooltip divide by
-    /// that entry's `max_context_size` instead of a constant — kimi
-    /// windows on this machine run from 262,144 to 1,048,576 where the
-    /// constant says 200,000. The join itself lives at the caller
-    /// (`KimiCatalog.maxContextSize(forModel:)`): this scan runs off
-    /// the main actor and the catalog is MainActor state.
+    /// that entry's `max_context_size` instead of a constant — a kimi
+    /// model's window can be several times any one constant. The join
+    /// itself lives at the caller (`KimiCatalog.maxContextSize(forModel:)`):
+    /// this scan runs off the main actor and the catalog is MainActor
+    /// state.
     static func lastContextUsage(of wire: URL) -> (tokens: Int, model: String?) {
         // Escalating bounded tail, same shape as `lastUserMessageDate`:
         // the newest usage record sits near the end, and only a file
@@ -860,15 +955,13 @@ enum KimiSessionScanner {
             guard let id = event["toolCallId"] as? String, !id.isEmpty
             else { return nil }
             let result = event["result"] as? [String: Any]
-            // `output` is what a successful Write reports. The other
-            // spellings are defensive fallbacks — a tool whose result
-            // we cannot read renders as an empty row, never as a
-            // missing one, because the row is what pairs with the call.
-            let output = (result?["output"] as? String)
-                ?? KimiEventParser.contentText(result?["content"])
-            let failed = (result?["isError"] as? Bool)
-                ?? (result?["is_error"] as? Bool)
-                ?? (KimiEventParser.present(result ?? [:], "error") != nil)
+            // `output` is what a tool reports — text, or content blocks
+            // for an image read, whose text is drawn and never its data
+            // (`toolResultText`). A tool whose result we cannot read
+            // renders as an empty row, never as a missing one, because
+            // the row is what pairs with the call.
+            let output = KimiEventParser.toolResultText(result)
+            let failed = KimiEventParser.toolResultFailed(result)
             return WireMessage(role: "tool", text: output, toolCalls: [],
                                toolCallId: id, isError: failed,
                                timestamp: stamp, id: nil)
@@ -895,8 +988,16 @@ enum KimiSessionScanner {
                     .data(using: .utf8),
                   let obj = (try? JSONSerialization.jsonObject(with: data))
                     as? [String: Any],
-                  let msg = message(from: obj), msg.role == "user"
+                  let msg = message(from: obj), msg.role == "user",
+                  !msg.isTaskNotice
             else { continue }
+            // A session kimi's terminal opened with a `!` command is named
+            // as its row reads (`!ls`), never by what the command printed.
+            switch msg.shellRow {
+            case .command(let command)?: return ShellCommandInput.display(command)
+            case .output?: continue
+            case nil: break
+            }
             let text = msg.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { continue }
             return text
@@ -910,8 +1011,10 @@ enum KimiSessionScanner {
     /// Returns nil when the wire records carry no timestamp we
     /// recognise, and nil is the honest answer: `activityAt` then falls
     /// back to the file's mtime. That fallback is worse than a real
-    /// stamp (see CLAUDE.md → "Sidebar rows are timed by the last USER
-    /// message"), but inventing one would be worse still.
+    /// stamp — any record appended after the last message moves it (the
+    /// binding kimi records each time the session is opened, one handed
+    /// back after an ACP turn), dating the row by that — but inventing
+    /// one would be worse still.
     static func lastUserMessageDate(of wire: URL) -> Date? {
         // Escalating window, same as both other scanners: one
         // tool-heavy turn can push the turn's opening record well past
@@ -942,6 +1045,10 @@ enum KimiSessionScanner {
                   let obj = (try? JSONSerialization.jsonObject(with: data))
                     as? [String: Any],
                   let msg = message(from: obj), msg.role == "user",
+                  // A task's notification landing hours later is not the
+                  // user sending anything, nor is what a `!` command printed
+                  // (its command is).
+                  !msg.isTaskNotice, !msg.isShellOutput,
                   !msg.text.trimmingCharacters(in: .whitespacesAndNewlines)
                       .isEmpty,
                   let stamp = msg.timestamp
@@ -996,6 +1103,23 @@ enum KimiSessionScanner {
         (obj["type"] as? String) == "turn.ended"
     }
 
+    /// Why kimi ended a turn as FAILED — `turn.ended reason: failed`,
+    /// whose `error.message` says it ("Connection error." when the model
+    /// could not be reached): kimi's words trimmed, "" when it gave none
+    /// (its `error` is optional), nil for every other record. Kimi's own
+    /// front ends answer such a turn as a clean end — an ACP prompt says
+    /// `end_turn`, the server's session goes idle — so this record is the
+    /// only place the reason is kept.
+    ///
+    /// Never the `agent.turn.ended` event kimi writes beside it: that
+    /// one's `errorMessage` is the string "[object Object]".
+    static func failedTurnReason(_ obj: [String: Any]) -> String? {
+        guard turnEnded(obj), (obj["reason"] as? String) == "failed" else { return nil }
+        let error = obj["error"] as? [String: Any]
+        return ((error?["message"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// The newest turn the wire's tail records (see `RecordedTurn`),
     /// through the markers above: open after a `turn.prompt` with no
     /// `turn.ended` (or `prompt.completed`) behind it — including the
@@ -1043,15 +1167,272 @@ enum KimiSessionScanner {
         return latest
     }
 
+    // MARK: - Retries
+
+    /// Kimi's own line for a model request it is retrying — its terminal's
+    /// `formatStepRetryLabel` and `formatStepRetryDetail`: "Retrying (3/10)
+    /// · APIConnectionError · Connection error.", with the HTTP status
+    /// before the message where there is one. The countdown kimi adds is
+    /// left off: this line is not a clock.
+    ///
+    /// Kimi writes a retry in two places, and this reads both: the
+    /// session's record (`turn.step.retrying`, camelCase keys) and a
+    /// headless run's stdout (`{"role":"meta","type":"turn.step.retrying"}`
+    /// with the same keys in snake_case). Nil for every other record.
+    static func retryNotice(_ obj: [String: Any]) -> String? {
+        guard (obj["type"] as? String) == "turn.step.retrying" else { return nil }
+        func field(_ camel: String, _ snake: String) -> Any? { obj[camel] ?? obj[snake] }
+        guard let next = (field("nextAttempt", "next_attempt") as? NSNumber)?.intValue,
+              let max = (field("maxAttempts", "max_attempts") as? NSNumber)?.intValue
+        else { return nil }
+        var parts = ["Retrying (\(next)/\(max))"]
+        if let name = field("errorName", "error_name") as? String, !name.isEmpty {
+            parts.append(name)
+        }
+        let message = ((field("errorMessage", "error_message") as? String) ?? "")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespaces)
+        let status = (field("statusCode", "status_code") as? NSNumber).map { String($0.intValue) } ?? ""
+        var detail = [status, message].filter { !$0.isEmpty }.joined(separator: " · ")
+        if detail.count > 160 { detail = String(detail.prefix(159)) + "…" }
+        if !detail.isEmpty { parts.append(detail) }
+        return parts.joined(separator: " · ")
+    }
+
+    /// The retry line a turn shows while kimi retries (`retryNotice`),
+    /// fed the session's record a line at a time: set by each retry, gone
+    /// once a step lands, the turn ends or a new one opens — the state of
+    /// the connection, not a log of it.
+    ///
+    /// Kept up through the attempt that follows a retry, as kimi's own
+    /// terminal keeps it: the attempt opens with a `step.begin` and, when
+    /// it fails again, closes with a `step.end` whose `finishReason` is
+    /// "error" — neither is a step landing. Cleared on them, the line
+    /// would show only between attempts and blink out for each one.
+    struct RetryWatch {
+        private(set) var notice: String?
+
+        init() {}
+
+        mutating func feed(record obj: [String: Any]) {
+            if let line = KimiSessionScanner.retryNotice(obj) {
+                notice = line
+                return
+            }
+            if KimiSessionScanner.turnPromptId(obj) != nil || KimiSessionScanner.turnEnded(obj) {
+                notice = nil
+                return
+            }
+            let type = obj["type"] as? String ?? ""
+            guard type.hasPrefix("context.append") || type == "context.apply_compaction" else { return }
+            if let event = obj["event"] as? [String: Any] {
+                switch event["type"] as? String {
+                case "step.begin":
+                    return
+                case "step.end" where (event["finishReason"] as? String) == "error":
+                    return
+                default:
+                    break
+                }
+            }
+            notice = nil
+        }
+
+        mutating func feed(line: String) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else { return }
+            feed(record: obj)
+        }
+    }
+
+    /// The background tasks a session's record shows while a turn runs,
+    /// fed one record at a time — the one rule for both of kimi's routes:
+    /// the ACP driver (`KimiAcpWireFollow`), and a headless turn's runner,
+    /// which reads the record beside kimi's stdout because stdout says
+    /// nothing of a task ending or of the notification kimi then sends
+    /// itself.
+    ///
+    /// Kimi runs a detached task (`task.started`, `info.detached`) while
+    /// its turn goes on and after the turn ends. When the task ends
+    /// (`task.terminated`) kimi opens a turn of its own on its notification
+    /// (`turn.prompt`, `origin.kind: "task"`) — a moment after the task's
+    /// end, or once the turn it is in has ended — and reports on it. So what
+    /// a turn waits on is every task started and not over while no turn is
+    /// open (`awaited`): the answer has landed, and kimi says nothing more
+    /// until a task ends.
+    struct BackgroundTasks {
+        /// `turn.prompt` records read: the turn that was sent, then any kimi
+        /// starts on its own.
+        private(set) var promptsSeen = 0
+        private(set) var turnsEnded = 0
+        /// Detached tasks started since the reading began and not yet
+        /// over, in the order they started, with kimi's own deadline for
+        /// each (`startedAt` + `timeoutMs`).
+        private(set) var open: [(entry: BackgroundTaskEntry, deadline: Date)] = []
+        /// Tasks read to have ended whose own turn has not opened yet, with
+        /// when each was read.
+        private(set) var noticesOwed: [String: Date] = [:]
+        /// When the newest turn was read to have ended.
+        private(set) var lastTurnEndedAt: Date?
+
+        init() {}
+
+        var turnOpen: Bool { promptsSeen > turnsEnded }
+
+        /// The tasks the turn is waiting on, for the line naming them:
+        /// those still running while no turn is open.
+        var awaited: [BackgroundTaskEntry] { turnOpen ? [] : open.map(\.entry) }
+
+        /// Read one record, at `now`. Returns kimi's notification of a
+        /// task that ended — the notice it is drawn as (`KimiTaskNotice`)
+        /// and the record's own time — and nil for every other record.
+        mutating func feed(record obj: [String: Any], now: Date) -> (text: String, time: Date?)? {
+            switch obj["type"] as? String ?? "" {
+            case "turn.prompt":
+                promptsSeen += 1
+                // The turn a finished task was owed: kimi names the task on it.
+                if let origin = obj["origin"] as? [String: Any],
+                   (origin["kind"] as? String) == "task",
+                   let id = origin["taskId"] as? String {
+                    noticesOwed.removeValue(forKey: id)
+                }
+            case "turn.ended":
+                turnsEnded += 1
+                lastTurnEndedAt = now
+            case "task.started":
+                guard let info = obj["info"] as? [String: Any],
+                      (info["detached"] as? Bool) == true,
+                      let id = info["taskId"] as? String, !id.isEmpty,
+                      !open.contains(where: { $0.entry.id == id })
+                else { break }
+                let started = (info["startedAt"] as? NSNumber).map {
+                    Date(timeIntervalSince1970: $0.doubleValue / 1000)
+                } ?? now
+                let timeout = ((info["timeoutMs"] as? NSNumber)?.doubleValue ?? 600_000) / 1000
+                open.append((BackgroundTaskEntry(id: id, kind: info["kind"] as? String ?? "",
+                                                 description: info["description"] as? String ?? ""),
+                             started.addingTimeInterval(timeout)))
+            case "task.terminated":
+                guard let info = obj["info"] as? [String: Any],
+                      let id = info["taskId"] as? String,
+                      let at = open.firstIndex(where: { $0.entry.id == id })
+                else { break }
+                // Only a task this reading saw start is owed a turn here: one
+                // from before belongs to a process that has gone.
+                open.remove(at: at)
+                noticesOwed[id] = now
+            case "context.append_message":
+                guard let message = obj["message"] as? [String: Any],
+                      ((message["origin"] as? [String: Any])?["kind"] as? String) == "task"
+                else { break }
+                let raw = KimiEventParser.contentText(message["content"])
+                let time = (obj["time"] as? NSNumber).map {
+                    Date(timeIntervalSince1970: $0.doubleValue / 1000)
+                }
+                return (KimiTaskNotice.text(fromNotification: raw)
+                            ?? AgentSessionScanner.cleanUserText(raw), time)
+            default:
+                break
+            }
+            return nil
+        }
+    }
+
+    /// What a session's record has gained since the last read, as whole
+    /// lines — for a reader polling the file while kimi appends to it. A
+    /// read can end inside a line; its start waits for the rest.
+    struct RecordTail {
+        private(set) var offset: UInt64
+        private var leftover = Data()
+
+        init(offset: UInt64 = 0) {
+            self.offset = offset
+        }
+
+        /// The record's bytes from `offset` to its end — empty when the
+        /// file is not there yet. Blocking: call it off the main actor.
+        static func read(_ url: URL, from offset: UInt64) -> Data {
+            guard let handle = try? FileHandle(forReadingFrom: url) else { return Data() }
+            defer { try? handle.close() }
+            do {
+                try handle.seek(toOffset: offset)
+                return try handle.readToEnd() ?? Data()
+            } catch {
+                return Data()
+            }
+        }
+
+        /// Take `data`, read from `offset`, and hand back the lines it
+        /// completes.
+        mutating func lines(adding data: Data) -> [String] {
+            offset += UInt64(data.count)
+            leftover.append(data)
+            var lines: [String] = []
+            var cursor = leftover.startIndex
+            while let newline = leftover[cursor...].firstIndex(of: 0x0A) {
+                lines.append(String(decoding: leftover[cursor..<newline], as: UTF8.self))
+                cursor = newline + 1
+            }
+            leftover = Data(leftover[cursor...])
+            return lines
+        }
+    }
+
+    /// The lines a record has gained, for callers whose reads can overlap
+    /// — an ACP turn polls its record while a decision reads it again the
+    /// moment the prompt is answered. Each line is handed out once, and a
+    /// call returns only once the record is read through: what it held
+    /// when the call was made has been handed out, to this caller or to
+    /// one that overlapped it.
+    @MainActor
+    final class RecordReader {
+        private(set) var tail: RecordTail
+        private let read: (UInt64) async -> Data
+
+        /// `read` hands back the record's bytes from an offset to its end.
+        init(offset: UInt64, read: @escaping (UInt64) async -> Data) {
+            tail = RecordTail(offset: offset)
+            self.read = read
+        }
+
+        func newLines() async -> [String] {
+            while true {
+                let from = tail.offset
+                let data = await read(from)
+                // Another read took the bytes from the same offset first.
+                // This one may have found more than it did, so it reads
+                // again from where that one stopped: dropped, the decision
+                // after it judged a record not read through — a skill kimi
+                // did not know taken back twice, a turn kimi ran read as
+                // one it answered itself.
+                guard tail.offset == from else { continue }
+                return data.isEmpty ? [] : tail.lines(adding: data)
+            }
+        }
+    }
+
     /// The user message a `context.append_message` record carries —
     /// its id and its cleaned text — or nil for every other record,
-    /// including the bookkeeping kimi appends AS the user, which
-    /// `message(from:)` already refuses.
+    /// including what kimi appends AS the user: its reminders, which
+    /// `message(from:)` already refuses, and a background task's
+    /// notification, which is nobody's message to branch from.
     static func userMessage(_ obj: [String: Any]) -> (id: String?, text: String)? {
         guard (obj["type"] as? String) == "context.append_message",
-              let msg = message(from: obj), msg.role == "user"
+              let msg = message(from: obj), msg.role == "user", !msg.isTaskNotice
         else { return nil }
         return (msg.id, AgentSessionScanner.cleanUserText(msg.text))
+    }
+
+    /// The files the same user message names in its attachment markers —
+    /// what its row's paperclip line prints. Read off the record's own
+    /// text: the clean `userMessage` answers with has them stripped.
+    static func userMessageFiles(_ obj: [String: Any]) -> [String] {
+        guard (obj["type"] as? String) == "context.append_message",
+              let msg = message(from: obj), msg.role == "user", !msg.isTaskNotice
+        else { return [] }
+        return AttachmentInline.names(in: msg.text)
     }
 
     /// The text of a `think` part — the model's reasoning for one step,
@@ -1084,7 +1465,7 @@ enum KimiSessionScanner {
         case other
     }
 
-    /// Where a kimi Chat only turn's thoughts go among the rows its
+    /// Where a kimi headless turn's thoughts go among the rows its
     /// stdout produced — kimi prints none of them, and its wire records
     /// each one before the step it led to.
     ///
@@ -1205,6 +1586,87 @@ enum KimiSessionScanner {
         return msg.role == "assistant"
     }
 
+    // MARK: - Undo
+
+    /// Kimi's own fold of an undo over the conversation, for the readers
+    /// that draw it or cut in it.
+    ///
+    /// Kimi never removes a wire record. `/undo` in its terminal (and its
+    /// local server's `:undo`) appends `context.undo {count}` — beside the
+    /// branch records newer kimis write with it, `agent.switched` and
+    /// `context.undone`, which say the same thing — and replays the
+    /// session without the last `count` turns. A reader that draws every
+    /// record draws turns kimi no longer has. The fold is kimi's: walking
+    /// back from the end, the count-th "undo anchor" (a message the user
+    /// sent — not a reminder kimi injected, not a task's notice, not a
+    /// message steered into a running turn) and everything after it go.
+    /// Kimi refuses an undo across a summary (`context.apply_compaction`)
+    /// or a clear, so an anchor above one is never reached.
+    struct UndoFold {
+        enum Signal: Equatable {
+            case none, anchor, barrier
+            case undo(Int)
+        }
+
+        static func signal(of obj: [String: Any]) -> Signal {
+            switch obj["type"] as? String {
+            case "context.undo":
+                guard let count = (obj["count"] as? NSNumber)?.intValue, count > 0
+                else { return .none }
+                return .undo(count)
+            case "context.apply_compaction", "context.clear":
+                return .barrier
+            case "context.append_message":
+                guard let message = obj["message"] as? [String: Any],
+                      message["role"] as? String == "user" else { return .none }
+                guard let origin = message["origin"] as? [String: Any] else { return .anchor }
+                if (origin["inTurn"] as? Bool) == true { return .none }
+                switch origin["kind"] as? String {
+                case "user":
+                    return .anchor
+                case "skill_activation", "plugin_command":
+                    return (origin["trigger"] as? String) == "user-slash" ? .anchor : .none
+                default:
+                    return .none
+                }
+            default:
+                return .none
+            }
+        }
+
+        private var anchors: [Int] = []
+        private var barrier = 0
+
+        /// Feed one record's signal; `position` is where in the caller's
+        /// list the record's own entries begin. Answers where to cut the
+        /// list for an undo, or nil to cut nothing. `windowIsWhole` says
+        /// the caller read the whole file: an undo that reaches past the
+        /// anchors of a window that began mid-conversation took every
+        /// entry the window holds, while one that finds too few in a
+        /// whole file is one kimi itself would fold as nothing.
+        mutating func apply(_ signal: Signal, at position: Int, windowIsWhole: Bool) -> Int? {
+            switch signal {
+            case .none:
+                return nil
+            case .anchor:
+                anchors.append(position)
+                return nil
+            case .barrier:
+                barrier = anchors.count
+                return nil
+            case .undo(let count):
+                if count <= anchors.count - barrier {
+                    let cut = anchors[anchors.count - count]
+                    anchors.removeLast(count)
+                    return cut
+                }
+                guard barrier == 0, !windowIsWhole else { return nil }
+                anchors.removeAll()
+                return 0
+            }
+        }
+    }
+
     // MARK: - History
 
     /// One wire record at a time into history rows.
@@ -1216,25 +1678,45 @@ enum KimiSessionScanner {
     /// which is the only turn state the wire carries.
     struct WireDecoder {
         private(set) var currentPromptId: String? = nil
+        /// What the last line fed means to an undo (`UndoFold`), for a
+        /// caller that draws the conversation as kimi replays it.
+        private(set) var undoSignal: UndoFold.Signal = .none
         /// Keep `think` parts as `.thinking` rows (see `readHistory`).
         /// Off, a thought reads as nothing — see `loopEventMessage`.
         var includeThinking = false
+        /// What a turn kimi recorded as failed WITHOUT words is drawn
+        /// with — `AgentAskingMode.wordlessFailureMessage`, which names
+        /// the agent as Settings → Labels spells it, and so is the
+        /// caller's to make. Nil draws such a turn as nothing.
+        var wordlessFailure: String?
 
-        init(includeThinking: Bool = false) {
+        init(includeThinking: Bool = false, wordlessFailure: String? = nil) {
             self.includeThinking = includeThinking
+            self.wordlessFailure = wordlessFailure
         }
 
         mutating func items(forLine line: String) -> [AgentSessionHistoryItem] {
+            undoSignal = .none
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty,
                   let data = trimmed.data(using: .utf8),
                   let obj = (try? JSONSerialization.jsonObject(with: data))
                     as? [String: Any]
             else { return [] }
+            undoSignal = UndoFold.signal(of: obj)
 
             if let prompt = KimiSessionScanner.turnPromptId(obj) {
                 currentPromptId = prompt
                 return []
+            }
+
+            // A turn kimi ended as failed: why, in its words, as the
+            // turn's last row. Live and reopened alike — kimi's front
+            // ends answer such a turn as a clean end, so without this
+            // row the question stands with nothing under it.
+            if let reason = KimiSessionScanner.failedTurnReason(obj) {
+                guard let words = reason.isEmpty ? wordlessFailure : reason else { return [] }
+                return [AgentSessionHistoryItem(kind: .error(message: words))]
             }
 
             if includeThinking, let thought = KimiSessionScanner.thought(obj) {
@@ -1257,9 +1739,11 @@ enum KimiSessionScanner {
                     else { return nil }
                     return n
                 }
-                var out = [AgentSessionHistoryItem(
+                var row = AgentSessionHistoryItem(
                     kind: .compaction(preTokens: positive(obj["tokensBefore"]),
-                                      postTokens: positive(obj["tokensAfter"])))]
+                                      postTokens: positive(obj["tokensAfter"])))
+                row.compactionKeepsUserMessages = KimiSessionScanner.compactionKeepsUserMessages(obj)
+                var out = [row]
                 if let summary = (obj["summary"] as? String)?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                    !summary.isEmpty {
@@ -1275,12 +1759,29 @@ enum KimiSessionScanner {
 
             switch msg.role {
             case "user":
+                // A `!` command kimi's terminal ran: its row, and its
+                // output under it, as Claude's are drawn.
+                if let shell = msg.shellRow {
+                    switch shell {
+                    case .command(let command):
+                        var item = AgentSessionHistoryItem(
+                            kind: .userText(ShellCommandInput.display(command)),
+                            recordUuid: msg.id ?? currentPromptId)
+                        item.shellCommand = true
+                        return [item]
+                    case .output(let output):
+                        return [AgentSessionHistoryItem(kind: .shellOutput(output))]
+                    }
+                }
                 // Show the prompt, not the bookkeeping tag that filed
                 // it under its task — same as both other readers. The
                 // row's handle is the record's own message id, with
                 // the turn's prompt id as the fallback for a writer
-                // that omits one.
-                let body = AgentSessionScanner.cleanUserText(msg.text)
+                // that omits one. Kimi's notification of a finished
+                // background task reads in the words every feed draws
+                // it in (`KimiTaskNotice`).
+                let body = (msg.isTaskNotice ? KimiTaskNotice.text(fromNotification: msg.text) : nil)
+                    ?? AgentSessionScanner.cleanUserText(msg.text)
                 // Inlined attachments: the names come off the raw text,
                 // before the strip inside `cleanUserText`.
                 let attached = AttachmentInline.names(in: msg.text)
@@ -1289,6 +1790,12 @@ enum KimiSessionScanner {
                     kind: .userText(body),
                     recordUuid: msg.id ?? currentPromptId)
                 item.attachedFiles = attached
+                item.loadedSkills = msg.loadedSkills
+                // Kimi's own notification of a finished background task:
+                // in the user column, under a system label — and part of
+                // the agent's answer, not a message of the user's.
+                item.isSystemNotice = msg.isTaskNotice
+                item.belongsToAnswer = msg.isTaskNotice
                 return [item]
 
             case "assistant":
@@ -1321,12 +1828,16 @@ enum KimiSessionScanner {
     /// chronological order.
     ///
     /// `includeThinking` keeps each step's `think` part as a `.thinking`
-    /// row, for a session with Chat only turns in it (the caller then
-    /// applies `AgentSessionHistoryItem.keepingThoughts`) and for the
-    /// runner's own Chat only turn, whose thoughts reach it no other way.
+    /// row: every one while compact view is on, for a session with Chat
+    /// only turns in it (the caller then applies
+    /// `AgentSessionHistoryItem.keepingThoughts`), and for the runner's own
+    /// headless turn that draws them, whose thoughts reach it no other way.
+    /// `wordlessFailure` is what a failed turn kimi gave no words for is
+    /// drawn with (`WireDecoder.wordlessFailure`).
     static func readHistory(of wire: URL, maxTurns: Int = 50,
                             byteBudget: Int? = nil,
-                            includeThinking: Bool = false)
+                            includeThinking: Bool = false,
+                            wordlessFailure: String? = nil)
     -> [AgentSessionHistoryItem] {
         // Same contract as both other readers: bounded tail + lossy
         // decode, so a live file mid-write can lose at most one edge
@@ -1334,14 +1845,26 @@ enum KimiSessionScanner {
         // can't freeze the open. `byteBudget` widens the tail for
         // whole-conversation callers (search); it never removes the
         // bound.
-        guard let text = AgentSessionScanner.boundedTail(
-            of: wire, budget: byteBudget ?? (8 * 1024 * 1024))
+        let budget = byteBudget ?? (8 * 1024 * 1024)
+        guard let text = AgentSessionScanner.boundedTail(of: wire, budget: budget)
         else { return [] }
+        let size = ((try? FileManager.default.attributesOfItem(atPath: wire.path))?[.size]
+                    as? NSNumber)?.intValue ?? 0
 
-        var decoder = WireDecoder(includeThinking: includeThinking)
+        var decoder = WireDecoder(includeThinking: includeThinking,
+                                  wordlessFailure: wordlessFailure)
         var items: [AgentSessionHistoryItem] = []
+        var undo = UndoFold()
         text.enumerateLines { line, _ in
-            items.append(contentsOf: decoder.items(forLine: line))
+            let start = items.count
+            let produced = decoder.items(forLine: line)
+            // Turns an undo took leave the transcript as kimi replays the
+            // session without them (`UndoFold`).
+            if let cut = undo.apply(decoder.undoSignal, at: start,
+                                    windowIsWhole: size <= budget) {
+                items.removeSubrange(cut...)
+            }
+            items.append(contentsOf: produced)
         }
 
         // Same turn-based cap as the other two readers.
@@ -1352,5 +1875,313 @@ enum KimiSessionScanner {
         if userIndices.count <= maxTurns { return items }
         let startIdx = userIndices[userIndices.count - maxTurns]
         return Array(items[startIdx...])
+    }
+}
+
+// MARK: - A finished background task's notification
+
+/// The words kimi's notification of a finished background task is drawn
+/// with — one rule for every feed: the reopened record and the tailer
+/// (`WireDecoder`), an ACP turn's follower, and a headless turn's runner
+/// (`KimiSessionScanner.BackgroundTasks`), so a running session and a
+/// reopened one say the same.
+///
+/// Kimi writes the notification as a user-role message to itself:
+///
+///   <notification id="task:bash-…:completed" category="task" …>
+///   Title: Background process completed
+///   Severity: info
+///   Wall time: 15.012 seconds
+///   Sleep then write a file completed.
+///   <output-file path="…/tasks/bash-…/output.log" bytes="18">
+///   Read the output file to retrieve the result: …
+///   </output-file>
+///   </notification>
+///
+/// Drawn as its title and its first line of body, in kimi's words:
+/// "Background process completed · Sleep then write a file completed." The
+/// rest is for the model — the wall time, a path into kimi's own store, an
+/// agent's instructions for resuming itself — and with the tags stripped
+/// it read as a block of bookkeeping under a system label. The title
+/// spells the status as kimi's identifier (`timed_out`); it is drawn as
+/// words.
+enum KimiTaskNotice {
+    static func text(fromNotification raw: String) -> String? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.hasPrefix("<notification"), text.hasSuffix("</notification>") else { return nil }
+        var title: String?
+        var body: String?
+        for line in text.components(separatedBy: "\n").dropFirst() {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.isEmpty || t == "</notification>" { continue }
+            if title == nil, t.hasPrefix("Title: ") {
+                title = String(t.dropFirst("Title: ".count))
+                    .replacingOccurrences(of: "_", with: " ")
+                    .trimmingCharacters(in: .whitespaces)
+                continue
+            }
+            if t.hasPrefix("Severity: ") || t.hasPrefix("Wall time: ") { continue }
+            // A child block (the output, an answer) holds no sentence of
+            // its own: the body, where kimi wrote one, came before it.
+            if !(t.hasPrefix("<output-") || t.hasPrefix("<answer>")) { body = t }
+            break
+        }
+        let parts = [title, body].compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
+// MARK: - The runtime binding
+
+/// Which runtime runs a kimi session, as kimi records it — and the record
+/// that hands a session back after an ACP turn took it.
+///
+/// Kimi writes a binding record when a session is opened and replays the
+/// LAST one whenever the session is opened again: `environment.set_binding`,
+/// or `runtime.set_binding` in a kimi that predates it, which a kimi writing
+/// the newer record passes over. An ACP turn (`KimiAcpTurn`) binds its
+/// session to `acp:<session id>` and nothing kimi does afterwards — closing
+/// the session over ACP included — binds it back, so every later run of the
+/// session — SipAI's next headless turn, kimi's own terminal, a branch cut
+/// after that turn opened — would lack its file and command tools. Here
+/// beside the reader, because the ACP turn's end and the branch writer
+/// (`KimiSessionFork`) both need the one rule.
+enum KimiRuntimeBinding {
+    private static let environmentRecord = "environment.set_binding"
+    private static let runtimeRecord = "runtime.set_binding"
+
+    /// The line that hands the session back from an ACP turn's runtime,
+    /// or nil when there is nothing to hand back.
+    ///
+    /// The record handed back is the binding the session had before (the
+    /// newest one that is not an ACP runtime; kimi's sessions are born
+    /// `local`), in kimi's own key order, stamped now. It is spelled as the
+    /// wire's newest binding is, and looked for among records spelled the
+    /// same: that is the record the kimi running this session reads.
+    ///
+    /// - Parameters:
+    ///   - head: the start of the wire, where a session's first binding is.
+    ///   - tail: the end of the wire, holding the newest binding.
+    static func restoreLine(head: String, tail: String, now: Date) -> String? {
+        let recent = bindings(tail)
+        guard let newest = recent.last, let record = newest["type"] as? String else { return nil }
+        let idKey = record == environmentRecord ? "environmentId" : "runtimeId"
+        let isACP: ([String: Any]) -> Bool = { (($0[idKey] as? String) ?? "").hasPrefix("acp:") }
+        guard isACP(newest) else { return nil }
+        let isOwn: ([String: Any]) -> Bool = { ($0["type"] as? String) == record && !isACP($0) }
+        let previous = recent.last(where: isOwn) ?? bindings(head).last(where: isOwn)
+        let bound = (previous?[idKey] as? String) ?? "local"
+        guard let agent = (newest["agentId"] as? String) ?? (previous?["agentId"] as? String) else { return nil }
+        func quoted(_ s: String) -> String {
+            let data = (try? JSONSerialization.data(withJSONObject: [s], options: [.withoutEscapingSlashes])) ?? Data()
+            let array = String(decoding: data, as: UTF8.self)
+            return String(array.dropFirst().dropLast())
+        }
+        let millis = Int64((now.timeIntervalSince1970 * 1000).rounded())
+        let stamp = ",\"agentId\":\(quoted(agent)),\"time\":\(millis)}"
+        if record == environmentRecord {
+            // Kimi's own order: type, environmentId, cwd, agentId, time. A
+            // folder goes back with the binding it was recorded on. With no
+            // binding to go back to, `local` keeps the folder the ACP turn ran
+            // in, as kimi's own server does when it hands a session back.
+            let cwd = ((previous ?? newest)["cwd"] as? String).map { ",\"cwd\":\(quoted($0))" } ?? ""
+            return "{\"type\":\"\(record)\",\"environmentId\":\(quoted(bound))\(cwd)" + stamp
+        }
+        // Kimi's own order: type, workspaceId, runtimeId, agentId, time.
+        guard let workspace = (previous?["workspaceId"] as? String) ?? (newest["workspaceId"] as? String)
+        else { return nil }
+        return "{\"type\":\"\(record)\",\"workspaceId\":\(quoted(workspace)),\"runtimeId\":\(quoted(bound))" + stamp
+    }
+
+    /// The binding RECORDS in `text`, oldest first — parsed, never matched
+    /// by their name alone: the name also turns up inside other records (a
+    /// tool call that searched for it), and a window that holds only such
+    /// a mention holds no binding. Lines are picked out by a byte search:
+    /// this reads every agent's wire before every turn, up to tens of
+    /// megabytes, and `String.contains` on each line would hold the turn
+    /// up for seconds.
+    static func bindings(_ text: String) -> [[String: Any]] {
+        var out: [[String: Any]] = []
+        text.enumerateLines { found, _ in
+            var line = found
+            let named = line.withUTF8 { bytes in
+                memmem(bytes.baseAddress, bytes.count, environmentRecord, environmentRecord.utf8.count) != nil
+                    || memmem(bytes.baseAddress, bytes.count, runtimeRecord, runtimeRecord.utf8.count) != nil
+            }
+            guard named,
+                  let data = line.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  ((obj["type"] as? String) == environmentRecord && obj["environmentId"] is String)
+                    || ((obj["type"] as? String) == runtimeRecord && obj["runtimeId"] is String)
+            else { return }
+            out.append(obj)
+        }
+        return out
+    }
+
+    /// Hand the agent whose wire this is back to its own runtime, if an
+    /// ACP turn left it bound to one (`restoreLine`). One
+    /// `O_APPEND` write of one whole line — the shape that is safe beside
+    /// another writer — after a newline when the file was cut off
+    /// mid-record. True when the agent is left on a runtime of its own:
+    /// restored now, or never taken. A session's other agents have wires of
+    /// their own: `restore(sessionDir:)`.
+    @discardableResult
+    static func restore(wire: URL, now: Date = Date()) -> Bool {
+        let path = wire.path
+        guard FileManager.default.fileExists(atPath: path) else { return true }
+        let head = readHead(of: wire, bytes: 64 * 1024) ?? ""
+        // The ACP binding is written when the turn opens the session, so
+        // a long turn puts it far from the end: widen until a binding
+        // RECORD is in view. Its name alone is not one — stopping at a
+        // window that merely mentions it would find nothing to hand back,
+        // call the session free, and leave it on ACP's runtime.
+        var line: String? = nil
+        var sawBinding = false
+        let size = ((try? FileManager.default.attributesOfItem(atPath: path))?[.size]
+                    as? NSNumber)?.intValue ?? 0
+        for budget in [256 * 1024, 4 * 1024 * 1024, 32 * 1024 * 1024] {
+            guard let tail = AgentSessionScanner.boundedTail(of: wire, budget: budget) else { break }
+            if !bindings(tail).isEmpty {
+                sawBinding = true
+                line = restoreLine(head: head, tail: tail, now: now)
+                break
+            }
+            if size <= budget { break }
+        }
+        if !sawBinding {
+            line = restoreLine(head: head, tail: head, now: now)
+        }
+        guard let line else { return true }
+        let fd = Darwin.open(path, O_WRONLY | O_APPEND)
+        guard fd >= 0 else { return false }
+        defer { Darwin.close(fd) }
+        var out = line + "\n"
+        if !endsWithNewline(path: path) { out = "\n" + out }
+        let bytes = Array(out.utf8)
+        return bytes.withUnsafeBytes { raw -> Bool in
+            guard let base = raw.baseAddress else { return false }
+            return Darwin.write(fd, base, raw.count) == raw.count
+        }
+    }
+
+    private static func readHead(of url: URL, bytes: Int) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let data = (try? handle.read(upToCount: bytes)) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func endsWithNewline(path: String) -> Bool {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return true }
+        defer { try? handle.close() }
+        guard let end = try? handle.seekToEnd(), end > 0 else { return true }
+        try? handle.seek(toOffset: end - 1)
+        return (try? handle.read(upToCount: 1)) == Data([0x0A])
+    }
+}
+
+// MARK: - Session lock
+
+/// Kimi's own record of who has a session open:
+/// `<home>/locks/sessions/<session id>.lock`, held by every kimi that has
+/// the session open — its terminal, its desktop app, an editor, `kimi acp`
+/// — idle included, and removed when that kimi exits. Another headless kimi
+/// is refused while it is held (`session.occupied`: nothing runs, nothing is
+/// recorded), but a turn over kimi's front end is not: it runs and writes
+/// beside the holder. So a turn of SipAI's reads the lock first
+/// (`AgentRunner.runOnce`) and starts neither kind while another live
+/// process holds it.
+enum KimiSessionLock {
+    struct Holder: Equatable {
+        let pid: Int32
+        let hostname: String
+        /// When it took the session, in epoch milliseconds, as kimi writes it.
+        let startedAt: Double
+        /// The client holding it, in kimi's own words ("Kimi Code CLI").
+        let clientName: String?
+    }
+
+    static func file(sessionId: String, home: URL = KimiSessionScanner.home) -> URL {
+        home.appendingPathComponent("locks/sessions", isDirectory: true)
+            .appendingPathComponent(sessionId + ".lock")
+    }
+
+    /// The holder kimi recorded; nil with no lock, and for one kimi could
+    /// not read either (it takes such a lock over).
+    static func holder(sessionId: String, home: URL = KimiSessionScanner.home) -> Holder? {
+        guard let data = try? Data(contentsOf: file(sessionId: sessionId, home: home)),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let pid = (obj["pid"] as? NSNumber)?.int32Value, pid > 0
+        else { return nil }
+        let client = (obj["clientDisplayName"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return Holder(pid: pid, hostname: obj["hostname"] as? String ?? "",
+                      startedAt: (obj["startedAt"] as? NSNumber)?.doubleValue ?? 0,
+                      clientName: client?.isEmpty == false ? client : nil)
+    }
+
+    /// Kimi's own test of a holder: one recorded on another host is taken
+    /// as alive (nothing here can tell), one on this host is alive while its
+    /// process runs and was started since the Mac last booted. Judged any
+    /// other way, SipAI would start a turn kimi refuses, or hold one kimi
+    /// would let through.
+    static func isAlive(_ holder: Holder, hostname: String, bootTime: Date,
+                        processAlive: (Int32) -> Bool) -> Bool {
+        if !holder.hostname.isEmpty, holder.hostname != hostname { return true }
+        guard processAlive(holder.pid) else { return false }
+        return holder.startedAt >= bootTime.timeIntervalSince1970 * 1000
+    }
+
+    /// The holder of `sessionId` when another live process holds it — what
+    /// keeps a turn of SipAI's from starting.
+    static func heldElsewhere(sessionId: String,
+                              home: URL = KimiSessionScanner.home) -> Holder? {
+        guard let holder = holder(sessionId: sessionId, home: home), holder.pid != getpid(),
+              isAlive(holder, hostname: hostname(), bootTime: bootTime(), processAlive: processAlive)
+        else { return nil }
+        return holder
+    }
+
+    /// What a turn refused over the lock says.
+    static func occupiedMessage(_ holder: Holder, agentName: String) -> String {
+        if let client = holder.clientName {
+            return String(localized: "This session is open in \(client). Stop the session there or exit it, then send again.",
+                          comment: "Kimi Code: a turn not started because another kimi has the session open; placeholder is that kimi's own name for itself, e.g. Kimi Code CLI")
+        }
+        return String(localized: "This session is open in another \(agentName). Stop the session there or exit it, then send again.",
+                      comment: "Kimi Code: a turn not started because another kimi has the session open; placeholder is the agent's name")
+    }
+
+    /// The host name as kimi records it (`os.hostname()`: gethostname).
+    private static func hostname() -> String {
+        var buffer = [CChar](repeating: 0, count: 256)
+        guard gethostname(&buffer, buffer.count - 1) == 0 else { return "" }
+        return String(cString: buffer)
+    }
+
+    private static func bootTime() -> Date {
+        var mib: [Int32] = [CTL_KERN, KERN_BOOTTIME]
+        var boot = timeval()
+        var size = MemoryLayout<timeval>.stride
+        let rc = mib.withUnsafeMutableBufferPointer { mibPtr in
+            sysctl(mibPtr.baseAddress, UInt32(mibPtr.count), &boot, &size, nil, 0)
+        }
+        guard rc == 0 else { return .distantPast }
+        return Date(timeIntervalSince1970: Double(boot.tv_sec) + Double(boot.tv_usec) / 1_000_000)
+    }
+
+    /// Running, and not a zombie: kimi's own test (`kill -0`, then `ps`'s
+    /// state). A process whose state cannot be read is taken as running.
+    private static func processAlive(_ pid: Int32) -> Bool {
+        if kill(pid, 0) != 0, errno != EPERM { return false }
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        let rc = mib.withUnsafeMutableBufferPointer { mibPtr in
+            sysctl(mibPtr.baseAddress, UInt32(mibPtr.count), &info, &size, nil, 0)
+        }
+        guard rc == 0, size > 0 else { return true }
+        return Int32(info.kp_proc.p_stat) != SZOMB
     }
 }

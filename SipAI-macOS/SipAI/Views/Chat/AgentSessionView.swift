@@ -51,7 +51,7 @@ struct AgentSessionView: View {
     @State private var inputDraft: String = ""
     /// The identity whose text currently sits in `inputDraft` — the
     /// stash target on the NEXT switch. Same loaded-identity pattern
-    /// as ChatView's `loadedChatSlug` (see CLAUDE.md): by the time
+    /// as ChatView's `loadedChatSlug`: by the time
     /// onChange fires, `mode` already points at the INCOMING session,
     /// so stashing under it would file the outgoing text wrongly.
     ///
@@ -60,13 +60,30 @@ struct AgentSessionView: View {
     /// a chat or a note, so a view-owned dictionary lost every unsent
     /// prompt the moment the user looked at something else.
     @State private var loadedDraftKey: String? = nil
+    /// The schedule set up on a new session (the composer's calendar
+    /// control), owned here like `inputDraft` and kept with it on
+    /// `AppState` under the same key: held in the composer, it would be
+    /// gone after every detour while the text beside it came back. Only
+    /// a new session's key ever holds one.
+    @State private var scheduleDraft = ScheduleDraft()
+    /// The chips the new session on screen starts with, from its place's
+    /// memory (`newSessionStartingSetup`), under what was changed on it
+    /// there (`NewSessionChipEdits`). Worked out once, when the new session
+    /// opens, and kept with its id so no render reads another new
+    /// session's.
+    @State private var newSessionStart: NewSessionStart? = nil
+
+    private struct NewSessionStart {
+        let draftId: UUID
+        let options: AgentLaunchOptions
+    }
     /// Per-result expansion state. Shared by live and historical tool
     /// results — `eventId` / `item.id` serve the same role in both paths.
     @State private var expandedToolResults: Set<UUID> = []
-    /// Which Chat only activity lines are open, keyed by each line's first
-    /// member's row id. A set of its own: a line that opens with a tool
-    /// call would otherwise share its key with that call's chip, and
-    /// opening one would open the other.
+    /// Which activity lines are open (a Chat only turn's, or any turn's in
+    /// compact view), keyed by each line's first member's row id. A set of
+    /// its own: a line that opens with a tool call would otherwise share
+    /// its key with that call's chip, and opening one would open the other.
     @State private var expandedActivityLines: Set<UUID> = []
 
     /// The open session's turns that ran in Chat only, by the handle each
@@ -86,30 +103,35 @@ struct AgentSessionView: View {
     @State private var editingRowId: UUID? = nil
     @State private var editDraft: String = ""
     @State private var branching: Bool = false
+    /// Codex's review picker, opened by `/review` typed in the box. It
+    /// belongs to the transcript it was opened over, like an edit.
+    @State private var reviewPickerOpen = false
     /// Surfaced in the composer's existing alert slot — a branch that
     /// cannot be cut must say so, not fail quietly.
     @State private var branchError: String? = nil
+    /// The failure alert's title when it is not the branch's — Send in the
+    /// message editor fails as "Could not go back to this message".
+    @State private var branchErrorTitle: String? = nil
 
     /// Composer selections (permission mode / model / effort). Seeded
-    /// from config, persisted on every change, and attached to every
-    /// send. Survives the draft→existing transition because it lives
-    /// here rather than on the runner.
+    /// from config, saved when the user picks (`userPicks`) — never on a
+    /// seed — and attached to every send. Survives the draft→existing
+    /// transition because it lives here rather than on the runner.
     @State private var launchOptions: AgentLaunchOptions = AgentLaunchOptions()
-    /// Files staged for the next message in Chat only (the chat page's
-    /// `ChatAttachment`), owned here like `inputDraft` and stashed with
-    /// it on `AppState` — the router tears this view down on every
-    /// detour, and a staged file must survive one the way a half-typed
-    /// message does.
-    @State private var stagedAttachments: [ChatAttachment] = []
+    /// Files staged for the next message (`AgentAttachment`: a path the
+    /// agent reads itself, or in Chat only the file loaded the chat
+    /// page's way), owned here like `inputDraft` and stashed with it on
+    /// `AppState` — the router tears this view down on every detour, and
+    /// a staged file must survive one the way a half-typed message does.
+    @State private var stagedAttachments: [AgentAttachment] = []
+    /// Whether `attachmentNotice` was made under Chat only. A note is
+    /// shown only in the mode it was made under: Chat only's rules (no
+    /// folders, the text ceiling, a file cut short) are no other mode's,
+    /// and the note comes back when the chip does.
+    @State private var attachmentNoticeIsChatOnly = false
     /// A refusal or a truncation note from the last attach, shown above
     /// the composer until dismissed or the next attach.
     @State private var attachmentNotice: String? = nil
-    /// True while `launchOptions` is being set programmatically (seeded
-    /// from a session's own recorded values or the global prefs).
-    /// Consumed by the `onChange` persist — only USER edits may update
-    /// the sticky global launch prefs, or merely opening a session
-    /// would clobber them.
-    @State private var seedingOptions: Bool = false
 
     /// How full the context window was, parsed from the session's own
     /// store when an existing session opens. Live events take
@@ -145,6 +167,12 @@ struct AgentSessionView: View {
     /// reset exactly like `liveContextTokens`.
     @State private var liveContextWindow: Int = 0
 
+    /// The speed codex saved for this session's thread (`CodexKeptSpeed`):
+    /// read from the rollout when the session opens and after a turn
+    /// another process ran, and the runner's after each of ours. The
+    /// composer greys its speed switches on it.
+    @State private var codexSavedSpeed: CodexKeptSpeed.Saved = .unknown
+
     /// Live mirror of the model behind `liveContextTokens` — same
     /// pairing rule as `seededContextModel`, and guarded on its OWN
     /// mirror like every other live feed here.
@@ -172,6 +200,12 @@ struct AgentSessionView: View {
     @State private var seededTurnDuration: Double = 0
     @State private var liveTurnDuration: Double? = nil
 
+    /// Mirror of the runner's `$userWait` — the time the running turn
+    /// has spent waiting on the user's cards, which the clock leaves
+    /// out. Mirrored rather than read off the runner, because this view
+    /// does not observe it; same delivery as the two above.
+    @State private var livePause = TurnPause()
+
     /// Mirror of the runner's `$resolvedModel`, held for the same
     /// reason as the two above: the feed replays on every render, and
     /// the handler has to be able to tell a REPLAY from a new
@@ -180,6 +214,8 @@ struct AgentSessionView: View {
     /// Mirror of the runner's `fastModeReport`, guarded like the other
     /// three live feeds.
     @State private var liveFastModeReport = ClaudeFastModeReport()
+    /// Mirror of the runner's `codexSpeedReport`, guarded the same way.
+    @State private var liveCodexSpeedReport = CodexSpeedReport()
     /// The speed the transcript's newest main-loop call ran at — the
     /// fast switch's outcome before a turn of ours has said anything,
     /// read with the context seed and cached with it.
@@ -224,6 +260,12 @@ struct AgentSessionView: View {
     /// KB, and judged on that alone a long inherited prefix bounded by
     /// the read would pass for the whole conversation.
     @State private var inheritedHistoryBytes: UInt64 = 0
+    /// Whether that read reached the file's start, where the reader says
+    /// (claude's: its window counts conversation, skipping the request
+    /// records most of a long transcript is made of, so the file's size
+    /// can be far past the budget with nothing left unread). nil: judged
+    /// by size.
+    @State private var historyReadReachedStart: Bool? = nil
     /// Whether the 50-turn cap applied to that read. Only the initial
     /// open caps turns; every widen reads `maxTurns: .max`, so a
     /// partiality verdict after one is about bytes alone.
@@ -344,28 +386,39 @@ struct AgentSessionView: View {
     /// Stable identity of the transcript currently on screen — the key
     /// the composer-draft stash files this view's text under.
     ///
-    /// Every unsent draft shares ONE slot, deliberately.
-    /// `ClaudeSessionDraft.init` mints a fresh UUID on every "+ New
-    /// session", and leaving the draft nils `pendingClaudeSessionDraft`
-    /// outright — so a per-draft key would file text typed into a new
-    /// session under an identity nothing could ever ask for again.
-    /// There is only ever one pending draft (it's a single optional on
-    /// AppState), exactly as there is only ever one unsent new chat,
-    /// and `chatDraftKey` gives that a single stable slot for the same
-    /// reason. Two drafts in a row inherit the same unsent text, which
-    /// is the point.
+    /// A new session's key is the PLACE it was started from
+    /// (`NewSessionPlace`), never the draft's own id:
+    /// `ClaudeSessionDraft.init` mints a fresh UUID on every +, and
+    /// leaving the draft nils `pendingClaudeSessionDraft` outright, so a
+    /// per-draft key would file text typed into a new session under an
+    /// identity nothing could ever ask for again. The same + asks for the
+    /// same place, as a chat group's new chat asks for that group's slot
+    /// (`chatDraftKey`).
     private var transcriptKey: String? {
         switch mode {
-        case .draft: return "draft:new"
+        case .draft(let d): return d.place.draftKey(agentKey: d.agentKey)
         case .existing(let id, _, _, _): return id
         case .empty: return nil
         }
     }
 
+    /// Which new session is on screen and under which key — what tells a
+    /// rename of its custom group (same draft, new key) from a switch to
+    /// another new session (`adoptRenamedPlace`).
+    private struct DraftPlaceIdentity: Equatable {
+        let id: UUID
+        let key: String
+    }
+
+    private var draftPlaceIdentity: DraftPlaceIdentity? {
+        guard case .draft(let d) = mode else { return nil }
+        return DraftPlaceIdentity(id: d.id, key: d.place.draftKey(agentKey: d.agentKey))
+    }
+
     /// Stash the outgoing session's unsent text, restore the incoming
-    /// session's. Both switch onChanges call this; when one logical
-    /// switch fires both, the second call sees old == new and is a
-    /// no-op.
+    /// session's — and with the text, the schedule a new session had set
+    /// up. Both switch onChanges call this; when one logical switch fires
+    /// both, the second call sees old == new and is a no-op.
     private func stashAndRestoreComposerDraft() {
         if migrationFlipInFlight {
             // Draft → session re-key of the SAME conversation. The two
@@ -381,26 +434,31 @@ struct AgentSessionView: View {
                                       for: AppState.agentDraftKey(old))
             appState.setComposerAttachments(stagedAttachments,
                                             for: AppState.agentDraftKey(old))
+            appState.setComposerSchedule(scheduleDraft,
+                                         for: AppState.agentDraftKey(old))
         }
         if loadedDraftKey != newKey {
             inputDraft = appState.composerDraft(
                 for: AppState.agentDraftKey(newKey))
             stagedAttachments = appState.composerAttachments(
                 for: AppState.agentDraftKey(newKey))
+            scheduleDraft = appState.composerSchedule(
+                for: AppState.agentDraftKey(newKey))
             attachmentNotice = nil
             loadedDraftKey = newKey
+            takeUnsentAnswersIntoBox()
         }
     }
 
     /// The conversation didn't change, its KEY did (draft → discovered
     /// session id). Adopt the new key and carry the text over.
     ///
-    /// The carry is load-bearing now that writes happen per keystroke:
+    /// The carry is load-bearing because writes happen per keystroke:
     /// this path leaves `inputDraft` untouched on purpose, so no
     /// `onChange` fires, so nothing would ever file the text under the
     /// new key — anything typed in the window between the first send
-    /// and session-id discovery would sit under `draft:new` forever and
-    /// read as lost the next time the session was opened.
+    /// and session-id discovery would sit under the new session's place
+    /// for good and read as lost the next time the session was opened.
     private func rekeyComposerDraft() {
         let old = loadedDraftKey
         loadedDraftKey = transcriptKey
@@ -410,6 +468,10 @@ struct AgentSessionView: View {
             appState.setComposerDraft("", for: AppState.agentDraftKey(old))
             appState.setComposerAttachments([], for: AppState.agentDraftKey(old))
         }
+        // The session it became cannot be scheduled: whatever schedule
+        // the page holds stays behind (a message sent from the composer
+        // has used its new session's up already, in `handleSend`).
+        scheduleDraft = ScheduleDraft()
     }
 
     /// Adopt the store's text for whatever is on screen. Called on
@@ -424,6 +486,22 @@ struct AgentSessionView: View {
             for: AppState.agentDraftKey(transcriptKey))
         stagedAttachments = appState.composerAttachments(
             for: AppState.agentDraftKey(transcriptKey))
+        scheduleDraft = appState.composerSchedule(
+            for: AppState.agentDraftKey(transcriptKey))
+        takeUnsentAnswersIntoBox()
+    }
+
+    /// What the user had started on a question the agent asked without
+    /// stopping, handed back when its card went (`AgentRunner.unsentAnswers`)
+    /// — into this session's box (`UnsentAnswers.boxText`). Taken only while
+    /// the box holds the text of the session whose runner kept it: an
+    /// answer from a session not on screen waits on its runner until its
+    /// page shows it, and lands in no other session's box.
+    private func takeUnsentAnswersIntoBox() {
+        guard let runner = currentRunner, loadedDraftKey != nil,
+              loadedDraftKey == transcriptKey,
+              let answers = runner.takeUnsentAnswers() else { return }
+        inputDraft = UnsentAnswers.boxText(answers, over: inputDraft)
     }
 
     /// Write the live text through to the store. Called on every
@@ -449,6 +527,13 @@ struct AgentSessionView: View {
         guard let key = loadedDraftKey else { return }
         appState.setComposerAttachments(stagedAttachments,
                                         for: AppState.agentDraftKey(key))
+    }
+
+    /// A new session's schedule, written through on every change — the
+    /// same rule as the text, for the same reason.
+    private func stashComposerSchedule() {
+        guard let key = loadedDraftKey else { return }
+        appState.setComposerSchedule(scheduleDraft, for: AppState.agentDraftKey(key))
     }
 
     // MARK: - Read-only tier
@@ -544,13 +629,13 @@ struct AgentSessionView: View {
             }
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .alert(String(localized: "Could not create the branch",
-                      comment: "Title of the alert shown when forking a session fails"),
+        .alert(branchErrorTitle ?? String(localized: "Could not create the branch",
+                                          comment: "Title of the alert shown when forking a session fails"),
                isPresented: Binding(
                    get: { branchError != nil },
-                   set: { if !$0 { branchError = nil } }
+                   set: { if !$0 { branchError = nil; branchErrorTitle = nil } }
                )) {
-            Button(role: .cancel) { branchError = nil } label: {
+            Button(role: .cancel) { branchError = nil; branchErrorTitle = nil } label: {
                 Text("OK", comment: "Dismiss the branch-failure alert")
             }
         } message: {
@@ -581,8 +666,17 @@ struct AgentSessionView: View {
         // Every keystroke goes straight to the store. No `.onDisappear`
         // stash: see `stashComposerDraft` for why relying on teardown
         // both lost drafts and erased them.
+        .onChange(of: scheduleDraft) { _, _ in stashComposerSchedule() }
+        .onChange(of: launchOptions) { _, new in keepSentOptions(new) }
+        .onChange(of: draftPlaceIdentity) { old, new in adoptRenamedPlace(from: old, to: new) }
         .onChange(of: inputDraft) { _, _ in stashComposerDraft() }
         .onChange(of: stagedAttachments) { _, _ in stashComposerAttachments() }
+        // Files staged as paths must travel inside a Chat only message,
+        // so they are read the moment they are waiting for one — while
+        // the user is still writing, not at send.
+        .onChange(of: stagedPathsAwaitChatOnly) { _, waiting in
+            if waiting { loadStagedFilesForChatOnly() }
+        }
         .onChange(of: appState.openAgentSessionId) { _, _ in
             // A real switch STASHES the composer text under the session
             // it was typed for and restores whatever the incoming
@@ -593,10 +687,11 @@ struct AgentSessionView: View {
             if migrationFlipInFlight {
                 migrationFlipInFlight = false
                 rekeyComposerDraft()
+                reload(migratedFromDraft: true)
             } else {
                 stashAndRestoreComposerDraft()
+                reload()
             }
-            reload()
             seedLaunchOptions()
         }
         .onChange(of: appState.pendingClaudeSessionDraft?.id) { _, _ in
@@ -619,6 +714,7 @@ struct AgentSessionView: View {
             // not something to depend on, and the answer is the same
             // either way.
             if case .draft = mode {
+                refreshNewSessionStart()
                 seededContextTokens = 0
                 seededContextModel = nil
                 seededCallSpeed = nil
@@ -626,23 +722,17 @@ struct AgentSessionView: View {
                 liveContextModel = ""
                 seededTurnDuration = 0
                 liveTurnDuration = nil
+                livePause = TurnPause()
             }
             seedLaunchOptions()
         }
-        .onChange(of: launchOptions) { _, new in
-            // Programmatic seeds mirror what a session already recorded;
-            // only user edits become the sticky prefs for future drafts
-            // — and, for an open session, the per-session picks that
-            // survive switching away and back.
-            if seedingOptions { seedingOptions = false; return }
-            // Per AGENT. The two CLIs share this picker but not its
-            // vocabulary — "bypassPermissions" is meaningless to codex
-            // and "workspace-write" to claude — so one sticky slot
-            // would hand each agent the other's last choice.
-            config.setAgentLaunchOptions(new, for: sessionAgentKey)
-            if case .existing(let id, _, _, _) = mode {
-                config.setAgentSessionLaunchOptions(new, for: id)
-            }
+        .onChange(of: currentRunner?.status.isRunning ?? false) { _, _ in
+            // The Non-stop switch shows the RUNNING turn's own setting
+            // (`applySeededOptions`), and a turn that ends takes it away
+            // again: a scheduled run is Non-stop when its task says so, and
+            // the session it leaves behind asks as the user's own pick
+            // says.
+            restoreNonStopPick()
         }
         .onChange(of: currentRunner?.sessionId) { _, newSessionId in
             // When a draft's runner discovers a session_id, flip AppState
@@ -660,13 +750,21 @@ struct AgentSessionView: View {
             guard url != nil else { return }
             handleSessionIdDiscovered(currentRunner?.sessionId)
         }
-        .onReceive(contextUsagePublisher) { (usage: (Int, Int)) in
-            adoptContextUsage(usage.0, usage.1)
+        .onReceive(contextUsagePublisher) { (usage: (Int, Int, CodexKeptSpeed.Saved)) in
+            adoptContextUsage(usage.0, usage.1, usage.2)
         }
         .onReceive(turnDurationPublisher) { value in
             // Equality-guarded like the token feed, same reason.
             guard let value, value > 0, value != liveTurnDuration else { return }
             liveTurnDuration = value
+        }
+        .onReceive(userWaitPublisher) { value in
+            guard value != livePause else { return }
+            livePause = value
+        }
+        .onReceive(unsentAnswersPublisher) { answers in
+            guard answers != nil else { return }
+            takeUnsentAnswersIntoBox()
         }
         .onReceive(externalTurnPublisher) { (inProgress: Bool) in
             handleExternalTurnFlip(inProgress)
@@ -689,6 +787,10 @@ struct AgentSessionView: View {
         }
         .onReceive(fastModePublisher) { (report: ClaudeFastModeReport) in
             adoptFastModeReport(report)
+        }
+        .onReceive(codexSpeedPublisher) { (report: CodexSpeedReport) in
+            guard report != liveCodexSpeedReport else { return }
+            liveCodexSpeedReport = report
         }
         .onReceive(observedWindowsPublisher) { (windows: [String: Int]) in
             adoptObservedWindows(windows)
@@ -773,9 +875,8 @@ struct AgentSessionView: View {
         // this only keeps the hover's "last ran as" current.
         guard (launchOptions.model ?? "") == resolved.alias,
               launchOptions.modelFullId != resolved.fullId else { return }
-        // A mirror of recorded state, not a user edit: arm the
-        // seeding flag so onChange skips persisting it as a pref.
-        seedingOptions = true
+        // A mirror of recorded state, not a pick: written to the state
+        // alone, which saves nothing (only `userPicks` saves).
         launchOptions.modelFullId = resolved.fullId
     }
 
@@ -784,15 +885,17 @@ struct AgentSessionView: View {
     /// AgentRunner) — live during the turn, from its first API call —
     /// so it can never race the status flip; the replay-on-subscribe
     /// also heals any emission a re-render gap might have missed.
-    private var contextUsagePublisher: AnyPublisher<(Int, Int), Never> {
+    private var contextUsagePublisher: AnyPublisher<(Int, Int, CodexKeptSpeed.Saved), Never> {
         guard let runner = currentRunner else {
             return Empty().eraseToAnyPublisher()
         }
         // The window rides the same delivery as the tokens it divides;
         // combineLatest re-emits on either and replays both on
-        // (re)subscription, exactly like the single feed did.
+        // (re)subscription, exactly like the single feed did. Codex's
+        // saved speed is read from the same rollout at the same moments,
+        // and rides with them.
         return runner.$lastContextTokens
-            .combineLatest(runner.$lastContextWindow)
+            .combineLatest(runner.$lastContextWindow, runner.$codexSavedSpeed)
             .eraseToAnyPublisher()
     }
 
@@ -800,7 +903,8 @@ struct AgentSessionView: View {
     /// `.onReceive` closures: the body's modifier chain sits at the
     /// type-checker's complexity limit, and a closure of any size in
     /// it is inference work multiplied by the whole chain.
-    private func adoptContextUsage(_ tokens: Int, _ window: Int) {
+    private func adoptContextUsage(_ tokens: Int, _ window: Int,
+                                   _ saved: CodexKeptSpeed.Saved) {
         // Equality guards: @Published replays its current value to
         // every (re)subscription, and onReceive resubscribes per
         // render — without them that replay would loop. Each value is
@@ -810,6 +914,9 @@ struct AgentSessionView: View {
         }
         if window > 0, window != liveContextWindow {
             liveContextWindow = window
+        }
+        if saved != .unknown, saved != codexSavedSpeed {
+            codexSavedSpeed = saved
         }
     }
 
@@ -837,6 +944,10 @@ struct AgentSessionView: View {
             let info = CodexSessionScanner.lastContextInfo(of: url)
             if info.tokens > 0 { liveContextTokens = info.tokens }
             if info.window > 0 { liveContextWindow = info.window }
+            // The other process may have set the thread's speed.
+            if case let saved = Self.codexSavedSpeed(of: url), saved != .unknown {
+                codexSavedSpeed = saved
+            }
         } else if sessionAgentKey == "kimi" {
             // Kimi's own reader, joined to its config window — the
             // claude scanner answers 0 on a kimi wire, which would
@@ -851,7 +962,7 @@ struct AgentSessionView: View {
                     liveContextWindow = w
                 }
             }
-        } else {
+        } else if sessionAgentKey == "claude_code" {
             let usage = AgentSessionScanner.lastContextTokens(of: url)
             if usage.tokens > 0 { liveContextTokens = usage.tokens }
             if let model = usage.model, !model.isEmpty {
@@ -873,8 +984,10 @@ struct AgentSessionView: View {
                 took = CodexSessionScanner.latestTurn(of: url)?.seconds ?? 0
             case "kimi":
                 took = KimiSessionScanner.latestTurn(of: url)?.seconds ?? 0
-            default:
+            case "claude_code":
                 took = AgentSessionScanner.lastTurnDurationSeconds(of: url)
+            default:
+                took = 0
             }
             guard took > 0 else { return }
             await MainActor.run {
@@ -908,6 +1021,24 @@ struct AgentSessionView: View {
             return Empty().eraseToAnyPublisher()
         }
         return runner.$lastTurnDuration.eraseToAnyPublisher()
+    }
+
+    /// The running turn's waits on the user's cards — see
+    /// `contextUsagePublisher` for the delivery contract it mirrors.
+    private var userWaitPublisher: AnyPublisher<TurnPause, Never> {
+        guard let runner = currentRunner else {
+            return Empty().eraseToAnyPublisher()
+        }
+        return runner.$userWait.eraseToAnyPublisher()
+    }
+
+    /// An answer handed back when its card went (`AgentRunner.unsentAnswers`).
+    /// The replay on every resubscribe is harmless: taking it empties it.
+    private var unsentAnswersPublisher: AnyPublisher<String?, Never> {
+        guard let runner = currentRunner else {
+            return Empty().eraseToAnyPublisher()
+        }
+        return runner.$unsentAnswers.eraseToAnyPublisher()
     }
 
     /// External-writer signal; dropFirst skips the replay so the file
@@ -954,6 +1085,13 @@ struct AgentSessionView: View {
             return Empty().eraseToAnyPublisher()
         }
         return runner.$fastModeReport.eraseToAnyPublisher()
+    }
+
+    private var codexSpeedPublisher: AnyPublisher<CodexSpeedReport, Never> {
+        guard let runner = currentRunner else {
+            return Empty().eraseToAnyPublisher()
+        }
+        return runner.$codexSpeedReport.eraseToAnyPublisher()
     }
 
     private var observedWindowsPublisher: AnyPublisher<[String: Int], Never> {
@@ -1093,7 +1231,9 @@ struct AgentSessionView: View {
     /// here re-renders per second.
     private var turnStartedAt: Date? {
         if case .running(let startedAt) = currentRunner?.status {
-            return startedAt
+            // Moved later by every wait on one of the turn's cards that
+            // has ended, so the clock counts the turn's working time.
+            return startedAt.addingTimeInterval(livePause.total)
         }
         // A turn some OTHER process is running ticks from the
         // transcript's own stamp (mirrored into @State because this
@@ -1103,6 +1243,14 @@ struct AgentSessionView: View {
             return externalTurnStart
         }
         return nil
+    }
+
+    /// When the running turn began waiting on the user — a question, a
+    /// plan or a permission card — or nil. The clock holds still from
+    /// here.
+    private var turnPausedAt: Date? {
+        guard currentRunner?.status.isRunning == true else { return nil }
+        return livePause.since
     }
 
     /// Folder shown in the composer. Draft cwd until the first send;
@@ -1151,36 +1299,75 @@ struct AgentSessionView: View {
             externalStoppable: externalStoppable,
             placeholder: inputPlaceholder,
             sessionIdTokens: agents.knownSessionIds,
-            options: $launchOptions,
+            options: userPicks,
             fastModeReport: fastModeReport,
+            codexSpeedReport: liveCodexSpeedReport,
             claudeAccount: sessionAgentKey == "claude_code"
                 ? UsageMonitor.shared.accounts["claude_code"] : nil,
+            codexSessionSpeed: isDraftBeforeFirstSend ? nil : codexSavedSpeed,
             attachments: stagedAttachments,
             onStageFiles: stageAttachments,
             onRemoveAttachment: removeAttachment,
-            attachmentNotice: attachmentNotice,
+            attachmentNotice: attachmentNoticeIsChatOnly == chatOnlyInForce ? attachmentNotice : nil,
             onDismissAttachmentNotice: { attachmentNotice = nil },
             folder: composerFolder,
             folderEditable: isDraftBeforeFirstSend,
             onFolderChange: { url in
                 appState.pendingClaudeSessionDraft?.cwd = url
+                // The draft's picks are read where its session will run.
+                if showsSkillChip, !skillPicks.isEmpty {
+                    SkillCatalog.shared.ensurePicksReadable(skillPicks, agent: sessionAgentKey, folder: url)
+                }
             },
             customGroup: draftCustomGroup,
             scheduleAvailable: isScheduleAvailable,
+            scheduleDraft: $scheduleDraft,
             scheduledRunInfo: scheduledRunInfo,
             onGenerateNote: { generateSessionNote(extraPrompt: $0) },
             noteGenerating: noteGenerating,
             canGenerateNote: canGenerateSessionNote,
             find: find,
             canFind: hasSearchableTranscript,
+            skillPicks: showsSkillChip ? skillPicks : nil,
+            onSkillPicksChange: { setSkillPicks($0) },
+            skillHeld: {
+                SkillPreload.held(picks: skillPicks, evidence: skillEvidence())
+            },
+            onOpenSkillSettings: { appState.openSettings(.skills) },
             contextTokens: displayContextTokens,
             contextWindowTokens: resolvedContextWindow,
             turnStartedAt: turnStartedAt,
+            turnPausedAt: turnPausedAt,
             lastTurnDuration: displayTurnDuration,
             onSend: handleSend,
             onStop: handleStop,
-            onScheduleCreated: { name in
+            held: currentRunner?.held,
+            onSteerHeld: { currentRunner?.steerHeld($0) },
+            onSendHeld: { id in
+                guard !branching, !sendIsHeld, let runner = currentRunner,
+                      !runner.externalInProgress else { return }
+                // A message the user sends: the session is alive again, so a
+                // load-time "Interrupted" marker the reopened page derived
+                // for the stopped turn must not sit between it and this one.
+                if runner.sendHeldNow(id) { dropInterruptedMarker() }
+            },
+            onCancelHeld: { takeBackHeld($0) },
+            reviewPickerFolder: reviewPickerOpen ? composerFolder : nil,
+            onReviewChosen: { target, label in
+                // Left open where nothing could start, so the choice is
+                // not lost with the click.
+                if startCodexCommand(.review(target), label: label, clearsBox: false) {
+                    reviewPickerOpen = false
+                }
+            },
+            onReviewCancelled: { reviewPickerOpen = false },
+            onScheduleCreated: { [unsent = unsentNewSession] name in
                 agents.noteScheduledTaskCreated(named: name)
+                // The task took the staged files into its prompt, as the
+                // send would have taken them into the message.
+                stagedAttachments = []
+                attachmentNotice = nil
+                if let unsent { useUpNewSessionSkills(unsent) }
             }
         )
         .padding(.horizontal, 60)
@@ -1269,6 +1456,7 @@ struct AgentSessionView: View {
             expandedToolResults: $expandedToolResults,
             expandedActivityLines: $expandedActivityLines,
             chatOnlyTurns: chatOnlyTurnHandles,
+            compact: config.display.agentCompactView,
             draftCwd: draftCwdForEmptyState,
             draftCustomGroup: draftCustomGroup,
             emptySessionCommands: emptySessionCommands,
@@ -1278,14 +1466,25 @@ struct AgentSessionView: View {
             canBranch: canBranch,
             editingRowId: $editingRowId,
             editDraft: $editDraft,
-            branching: branching,
-            onBeginEdit: beginMessageEdit,
+            // The editor's button also waits while the chips hold a send
+            // (`sendIsHeld`): a branch is made to be sent into, with those
+            // chips, and the line above the composer says why it waits.
+            branching: branching || sendIsHeld,
+            onBeginEdit: { rowId, text, loadedSkills in
+                beginMessageEdit(rowId: rowId, text: text, loadedSkills: loadedSkills)
+            },
             onCreateBranch: { recordUuid, original, edited, skip in
                 createSessionBranch(recordUuid: recordUuid, originalText: original,
                                     newText: edited, skippingNewer: skip)
             },
+            onSendInPlace: { rowId, recordUuid, original, edited, skip in
+                editSessionInPlace(rowId: rowId, recordUuid: recordUuid, originalText: original,
+                                   newText: edited, skippingNewer: skip)
+            },
+            rewindSupport: rewindSupport,
             onCancelEdit: cancelMessageEdit,
-            onPlanApproved: leavePlanMode(to:)
+            onModeAdopted: adoptSessionMode(_:),
+            onImplementPlan: implementProposedPlan
         )
         // New structural identity per session: session switches
         // otherwise reuse the view (same type, same position), so
@@ -1298,6 +1497,17 @@ struct AgentSessionView: View {
         // never outsizes the session's own name.
         .environment(\.sipFontScale, SipFont.contentScale(fontScale))
         .environment(\.sipCodeFileTitle, codeFileTitle)
+        // A reply's relative file links are read from the session's own
+        // folder; `searchableRows` counts the same drawing.
+        .environment(\.sipFileLinkBase, runner.cwd.path)
+        // Compact view switched with this session open: the read on the
+        // page kept the thoughts the old setting draws. Read it again, in
+        // place — the history cache refuses an entry read the other way.
+        .onChange(of: config.display.agentCompactView) { _, _ in
+            if case .existing(_, let url, _, _) = mode {
+                startHistoryLoad(url: url, viaSpinner: false)
+            }
+        }
     }
 
     /// What a code block's Save names the file after: the session's name
@@ -1331,8 +1541,10 @@ struct AgentSessionView: View {
     /// Is what is loaded the whole conversation?
     ///
     /// Two things mean "there is more": the 50-turn cap bit (initial
-    /// opens only — every widen reads `maxTurns: .max`), or the file
-    /// is bigger than the budget the loaded rows were read with.
+    /// opens only — every widen reads `maxTurns: .max`), or the read
+    /// stopped short of the file's start — the walk's own word for a
+    /// claude read (`historyReadReachedStart`), the file's size against
+    /// the budget the rows were read with for codex and kimi.
     /// Evaluated at discrete moments — a load landing, a widen
     /// landing, the find bar opening — never per render: it stats the
     /// file, and a body that touches the filesystem runs on every
@@ -1368,7 +1580,8 @@ struct AgentSessionView: View {
         // judged on the own file alone, a long inherited prefix bounded
         // by the read would pass for the whole conversation.
         let budget = UInt64(historyLoadedBudget)
-        historyPartial = capBit || ownSize > budget || inheritedHistoryBytes > budget
+        let ownUnread = historyReadReachedStart.map { !$0 } ?? (ownSize > budget)
+        historyPartial = capBit || ownUnread || inheritedHistoryBytes > budget
         let fileSize = ownSize + inheritedHistoryBytes
         // The one state "Show earlier" cannot help: ladder exhausted,
         // file still bigger than the widest read. Say so, with the
@@ -1417,11 +1630,10 @@ struct AgentSessionView: View {
     /// "Show earlier" reveals the next 200 rows above the top exactly
     /// as an ordinary reveal does.
     ///
-    /// `trimmedForInFlight` applies exactly as it does on an ordinary
-    /// load: the re-read includes a turn the live buffer is already
-    /// rendering, and keeping both shows the user's message and the
-    /// turn's partial records twice. (The search widen shipped without
-    /// it — same bug, reachable by widening mid-turn.)
+    /// It lands through `adoptHistory` like an ordinary load: the re-read
+    /// holds every turn the live buffer has drawn since the session was
+    /// opened — the running one included — and keeping both draws those
+    /// turns twice.
     private func widenHistory(toBudget budget: Int) {
         guard case .existing(_, let url, _, _) = mode, !wideningHistory,
               budget > historyLoadedBudget else { return }
@@ -1429,11 +1641,15 @@ struct AgentSessionView: View {
         let agentKey = sessionAgentKey
         // The same thoughts rule as an ordinary load (`startHistoryLoad`).
         let chatOnlyTurns = chatOnlyTurnHandles
-        let withThoughts = !chatOnlyTurns.isEmpty
+        let allThoughts = config.display.agentCompactView
+        let withThoughts = allThoughts || !chatOnlyTurns.isEmpty
+        let wordlessFailure = AgentAskingMode.wordlessFailureMessage(agentName: sessionAgentName)
+        let turnAtRead = currentRunner?.status.runningSince
         Task {
-            let items = await Task.detached(priority: .userInitiated) {
-                () -> [AgentSessionHistoryItem] in
+            let (items, reachedStart) = await Task.detached(priority: .userInitiated) {
+                () -> ([AgentSessionHistoryItem], Bool?) in
                 let read: [AgentSessionHistoryItem]
+                var reached: Bool? = nil
                 switch agentKey {
                 case "codex":
                     read = CodexSessionScanner.readHistory(
@@ -1442,13 +1658,18 @@ struct AgentSessionView: View {
                 case "kimi":
                     read = KimiSessionScanner.readHistory(
                         of: url, maxTurns: .max, byteBudget: budget,
-                        includeThinking: withThoughts)
-                default:
-                    read = AgentSessionScanner.readHistory(
+                        includeThinking: withThoughts, wordlessFailure: wordlessFailure)
+                case "claude_code":
+                    let reading = AgentSessionScanner.readHistoryReaching(
                         of: url, maxTurns: .max, byteBudget: budget,
                         includeThinking: withThoughts)
+                    read = reading.items
+                    reached = reading.reachedStart
+                default:
+                    // No reader for this agent's transcript: no rows.
+                    read = []
                 }
-                return Self.keepingChatOnlyThoughts(read, in: chatOnlyTurns)
+                return (Self.keepingThoughts(read, all: allThoughts, in: chatOnlyTurns), reached)
             }.value
             // The user may have switched sessions mid-read.
             guard case .existing(_, let current, _, _) = mode, current == url else {
@@ -1456,12 +1677,20 @@ struct AgentSessionView: View {
                 return
             }
             wideningHistory = false
+            // The same rule as an ordinary load: a turn that ended during
+            // the read may be cut short in it.
+            if TranscriptSeam.readIsStale(turnStartAtRead: turnAtRead,
+                                          turnStartNow: currentRunner?.status.runningSince) {
+                widenHistory(toBudget: budget)
+                return
+            }
             // A failed read keeps what is on screen; partiality stays
             // true, so the button remains and a later click retries.
             guard !items.isEmpty else { return }
-            historicalItems = trimmedForInFlight(items)
+            adoptHistory(items, fromFile: true)
             historyLoadedBudget = budget
             historyTurnCapApplies = false
+            historyReadReachedStart = reachedStart
             updateHistoryScope(items: items,
                                fileSize: Self.fileStat(url)?.size ?? 0)
         }
@@ -1486,8 +1715,8 @@ struct AgentSessionView: View {
 
     /// Conversation-shaped view of the session: user prompts and
     /// assistant narration from the loaded history plus this run's live
-    /// events (the two never overlap — history is read once at open,
-    /// live events only accumulate afterwards). Tool calls/outputs are
+    /// events (the two never overlap: every read leaves the live buffer
+    /// only what it does not hold — `adoptHistory`). Tool calls/outputs are
     /// deliberately omitted; the narration already describes what was
     /// done, which is what a summary note needs.
     private func sessionTranscriptMessages() -> [ChatMessage] {
@@ -1539,7 +1768,7 @@ struct AgentSessionView: View {
         guard let modelId = config.noteGeneratingModel
                 ?? appState.activeModel ?? config.defaultModel else {
             noteError = String(
-                localized: "No chat model configured. Add one in Settings → Chat models.",
+                localized: "No chat model configured. Add one in Settings → Chat Settings.",
                 comment: "Session-note error when no model exists")
             return
         }
@@ -1613,19 +1842,190 @@ struct AgentSessionView: View {
         launchOptions.chatOnly && ChatOnlyGate.offered(agentKey: sessionAgentKey)
     }
 
-    /// Whether an image can be attached to this session. Images ride
-    /// Chat only, through each agent's own image channel (claude
-    /// stream-json, codex `-i`, kimi's server) — every agent but a
-    /// RESUMED kimi turn, which is `--prompt --session` and has no image
-    /// input. So a kimi session that already exists refuses an image up
-    /// front, where the refusal is a choice rather than a send that
-    /// silently sent the words alone.
-    private var imagesAcceptedHere: Bool {
-        guard ChatOnlyGate.offered(agentKey: sessionAgentKey) else { return false }
-        if sessionAgentKey == "kimi", !ChatOnlyImages.kimiResumeAcceptsImages {
-            if case .existing = mode { return false }
+    /// Why an image cannot go in this session's Chat only message, or nil
+    /// where it can. A Chat only image rides each agent's own image
+    /// channel (claude stream-json, codex `-i`, kimi's server) — every
+    /// agent but a RESUMED kimi turn, which is `--prompt --session` and
+    /// has no image input. So a kimi session that already exists refuses
+    /// an image up front, where the refusal is a choice rather than a
+    /// send that silently sent the words alone. Outside Chat only an
+    /// image is a path like any other file, and the agent opens it.
+    private func chatOnlyImageRefusal(_ name: String) -> String? {
+        guard sessionAgentKey == "kimi", !ChatOnlyImages.kimiResumeAcceptsImages,
+              case .existing = mode else { return nil }
+        return String(localized: "\(name) — an image can only be attached to a NEW \(sessionAgentName) chat. Start one, or attach a text file or a PDF.",
+                      comment: "Image refused on a resumed kimi session; placeholders are the file name and the agent label")
+    }
+
+    // MARK: - Skills
+
+    /// The robot chip, on every agent. Kimi's headless turn cannot load
+    /// a skill by name, so a Kimi turn that loads one runs through
+    /// kimi's own front end, whatever the mode (`AgentTurnDriver.pick`)
+    /// — one skill per message (`SkillAgent.oneSkillPerMessage`).
+    private var showsSkillChip: Bool {
+        SkillAgent.all.contains(sessionAgentKey)
+    }
+
+    /// The skills chosen on this session's chip — a draft's until its
+    /// first send, the session's own after. A draft whose own picks are
+    /// untouched shows what was set at its place
+    /// (`AppState.newSessionSkillPicks`: the draft itself is dropped the
+    /// moment anything else opens), else the agent's pinned skills. Never
+    /// what another session chose: skills load into the conversation, and
+    /// a new session started with another's would load them unasked.
+    private var skillPicks: [String] {
+        switch mode {
+        case .draft(let d):
+            return d.skillPicks
+                ?? appState.newSessionSkillPicks(for: newSessionStoreKey(d))
+                ?? config.agentSkillPreloads(for: d.agentKey)
+        case .existing(let id, _, _, _): return config.agentSessionSkillPicks(for: id) ?? []
+        case .empty: return []
         }
-        return true
+    }
+
+    private func setSkillPicks(_ picks: [String]) {
+        switch mode {
+        case .draft(let d):
+            appState.pendingClaudeSessionDraft?.skillPicks = picks
+            // Kept for the next new session started from the same + until
+            // the first message goes — after that they are this session's,
+            // filed with it when its session id arrives.
+            if isDraftBeforeFirstSend {
+                appState.setNewSessionSkillPicks(picks, for: newSessionStoreKey(d))
+            } else if let draft = appState.pendingClaudeSessionDraft {
+                agents.noteSentDraft(draft)
+            }
+        case .existing(let id, _, _, _): config.setAgentSessionSkillPicks(picks, for: id)
+        case .empty: return
+        }
+        SkillCatalog.shared.ensurePicksReadable(picks, agent: sessionAgentKey, folder: composerFolder)
+    }
+
+    /// The unsent new session on screen — its id, and where what was set
+    /// up on it waits — or nil. Read when the composer's closures are
+    /// made: a task made from it lands after its file is written, when
+    /// the page may show another conversation.
+    private var unsentNewSession: (id: UUID, key: String)? {
+        guard case .draft(let d) = mode, isDraftBeforeFirstSend else { return nil }
+        return (d.id, newSessionStoreKey(d))
+    }
+
+    /// A task made from an unsent new session took the skills its runs
+    /// load, as it took the message and the schedule: they are the task's
+    /// now. Left ticked, they would be on the next new session from the
+    /// same +, as if carried over from the task. Its chips stay, as they
+    /// would for any new session started there.
+    private func useUpNewSessionSkills(_ unsent: (id: UUID, key: String)) {
+        appState.setNewSessionSkillPicks(nil, for: unsent.key)
+        if appState.pendingClaudeSessionDraft?.id == unsent.id {
+            appState.pendingClaudeSessionDraft?.skillPicks = nil
+        }
+    }
+
+    private static func skillMark(_ item: AgentSessionHistoryItem) -> SkillTranscriptMark? {
+        switch item.kind {
+        case .userText(let text) where !item.isSystemNotice:
+            return .user(text: text, loadedSkills: item.loadedSkills)
+        case .toolUse(_, let name, let input):
+            return .tool(name: name, input: input)
+        case .compaction:
+            return .compaction(keepsUserLoads: item.compactionKeepsUserMessages)
+        default:
+            return nil
+        }
+    }
+
+    private static func skillMark(_ event: StreamEvent) -> SkillTranscriptMark? {
+        switch event.kind {
+        case .userMessage(let text) where !event.isSystemNotice:
+            return .user(text: text, loadedSkills: event.loadedSkills)
+        case .toolUse(_, let name, let input):
+            return .tool(name: name, input: input)
+        case .compaction:
+            return .compaction(keepsUserLoads: event.compactionKeepsUserMessages)
+        case .assistantText, .thinking, .toolResult, .result:
+            // The agent answered: what was sent before this reached it.
+            return .answered
+        default:
+            return nil
+        }
+    }
+
+    /// The live buffer's marks. A live row is drawn when Send is pressed,
+    /// so only a message the agent answered counts — or the one whose
+    /// turn is running now (`SkillEvidenceReader.delivered`).
+    private func liveSkillMarks(_ events: [StreamEvent]) -> [SkillTranscriptMark] {
+        SkillEvidenceReader.delivered(events.compactMap(Self.skillMark),
+                                      turnInFlight: currentRunner?.status.isRunning ?? false)
+    }
+
+    /// What the conversation shows about its skills: the loaded
+    /// history, then what this launch's turns added. Read at the moment
+    /// it is needed, never per render.
+    private func skillEvidence() -> [SkillEvidence] {
+        var marks = historicalItems.compactMap(Self.skillMark)
+        marks += liveSkillMarks(currentRunner?.events ?? [])
+        return SkillEvidenceReader.evidence(marks, agent: sessionAgentKey)
+    }
+
+    /// The same, for a branch cut at the row whose handle is `cut` — or,
+    /// for a live row, at the first live message reading `originalText`.
+    private func skillEvidence(above cut: String, originalText: String) -> [SkillEvidence] {
+        var marks: [SkillTranscriptMark] = []
+        for item in historicalItems {
+            if case .userText = item.kind, item.recordUuid == cut {
+                return SkillEvidenceReader.evidence(marks, agent: sessionAgentKey)
+            }
+            if let mark = Self.skillMark(item) { marks.append(mark) }
+        }
+        let wanted = originalText.trimmingCharacters(in: .whitespacesAndNewlines)
+        var above: [StreamEvent] = []
+        for event in currentRunner?.events ?? [] {
+            if case .userMessage(let text) = event.kind, !event.isSystemNotice,
+               text.trimmingCharacters(in: .whitespacesAndNewlines) == wanted { break }
+            above.append(event)
+        }
+        marks += liveSkillMarks(above)
+        return SkillEvidenceReader.evidence(marks, agent: sessionAgentKey)
+    }
+
+    /// The chosen skills one send loads: those the conversation does not
+    /// hold, loadable here — none in Chat only, and none with a claude
+    /// or kimi message that opens on a command of its own (the chosen
+    /// ones wait for the next message).
+    /// A command, by the one rule that tells one from a pasted path
+    /// (`AgentSlashCommands.leadingCommand`): `/Users/me/notes.md` is
+    /// the user's own words, and its message loads what is chosen.
+    private func skillTriggers(for text: String, options: AgentLaunchOptions,
+                               evidence: [SkillEvidence]) -> [SkillTrigger] {
+        guard showsSkillChip, !options.chatOnly else { return [] }
+        let picks = skillPicks
+        guard !picks.isEmpty else { return [] }
+        // A message that opens on a command of its own: claude takes one
+        // leading command, kimi's front end one leading `/skill:` — the
+        // chosen ones wait for the next message.
+        if sessionAgentKey == SkillAgent.claude || sessionAgentKey == SkillAgent.kimi,
+           AgentSlashCommands.leadingCommand(in: text) != nil { return [] }
+        // A claude known to be older than the one the batch was measured
+        // on is sent none — also before the folder's skills are read,
+        // when no list is there yet to carry the reason.
+        if sessionAgentKey == SkillAgent.claude, SkillCatalog.claudeBatchRefusal() != nil { return [] }
+        // Kimi loads a skill only through its own front end: until the
+        // installed kimi is known to have one, a pick waits.
+        let frontEnd = AskingModeGate.frontEnd(agentKey: sessionAgentKey)
+        if sessionAgentKey == SkillAgent.kimi, frontEnd != .offered { return [] }
+        let catalog = SkillCatalog.shared
+        let choices = catalog.snapshot(folder: composerFolder) == nil
+            ? nil : catalog.choices(
+                agent: sessionAgentKey, folder: composerFolder,
+                codexSend: AskingModeGate.subfolderSkillSend(
+                    agentKey: sessionAgentKey, mode: options.permissionMode,
+                    chatOnly: options.chatOnly))
+        return SkillPickReport.triggers(picks: picks, choices: choices, evidence: evidence,
+                                        sendsUnread: sessionAgentKey == SkillAgent.claude,
+                                        onePerMessage: SkillAgent.oneSkillPerMessage(sessionAgentKey))
     }
 
     /// What a send actually runs with: the chips, with a Chat only pick
@@ -1647,70 +2047,57 @@ struct AgentSessionView: View {
         return options
     }
 
-    // MARK: - Attachments (Chat only)
+    // MARK: - Attachments
 
-    /// Stage files for the next message — the chat page's rule, restated
-    /// here for the agent composer: every file is read, decoded and
-    /// measured at ATTACH time, and the one ceiling the agent side adds
-    /// (`AttachmentInline.perMessageCharCap`, the whole message's
-    /// inlined characters) is enforced here too, because the composed
-    /// prompt travels as one argv element. Shared by the + and a drop,
-    /// so both refuse the same things in the same words.
+    /// Stage files for the next message. The + and a drop both come here,
+    /// so both refuse the same things in the same words
+    /// (`AgentAttachment.staging`): outside Chat only a file is a path the
+    /// agent reads itself; in Chat only it is read, decoded and measured
+    /// now, by the chat page's rules.
     private func stageAttachments(_ urls: [URL]) {
-        var refused: [String] = []
-        var staged = false
-        var inlined = stagedAttachments.reduce(0) { $0 + ($1.text?.count ?? 0) }
-        for url in urls where url.isFileURL {
-            guard stagedAttachments.count < AttachmentLimits.maxPerMessage else {
-                refused.append(AttachmentError.tooMany.localizedDescription)
-                break
-            }
-            // The same file dropped twice is one attachment.
-            guard !stagedAttachments.contains(where: { $0.url == url }) else { continue }
-            do {
-                let attachment = try ChatAttachment.load(url)
-                // An image travels the agent's own image channel (claude
-                // stream-json, codex `-i`, kimi's server), so it is
-                // staged whole — except where there is no channel (a
-                // resumed kimi turn), where it is refused up front rather
-                // than dropped silently at send.
-                if case .image = attachment.kind {
-                    guard imagesAcceptedHere else {
-                        refused.append(sessionAgentKey == "kimi"
-                            ? String(localized: "\(attachment.name) — an image can only be attached to a NEW \(sessionAgentName) chat. Start one, or attach a text file or a PDF.",
-                                     comment: "Image refused on a resumed kimi session; placeholders are the file name and the agent label")
-                            : String(localized: "\(attachment.name) — images can only be attached in Chat only mode.",
-                                     comment: "Image refused because Chat only is not available; placeholder is the file name"))
-                        continue
-                    }
-                    stagedAttachments.append(attachment)
-                    staged = true
-                    continue
-                }
-                // Text and PDF text ride the message body.
-                guard let text = attachment.text, !text.isEmpty else {
-                    refused.append(AttachmentError.noText(name: attachment.name).localizedDescription)
-                    continue
-                }
-                guard inlined + text.count <= AttachmentInline.perMessageCharCap else {
-                    refused.append(String(
-                        localized: "\(attachment.name) would put this message over \(AttachmentInline.perMessageCharCap / 1000)k characters of attached text.",
-                        comment: "Attachment refused on an agent session: the per-message inlined-text cap; placeholders are the file name and the cap in thousands"))
-                    continue
-                }
-                inlined += text.count
-                stagedAttachments.append(attachment)
-                staged = true
-            } catch {
-                refused.append(error.localizedDescription)
-            }
-        }
+        let before = stagedAttachments.count
+        let result = AgentAttachment.staging(urls, onto: stagedAttachments,
+                                             chatOnly: chatOnlyInForce,
+                                             imageRefusal: chatOnlyImageRefusal)
+        stagedAttachments = result.staged
+        attachmentNotice = attachNotice(refused: result.refused,
+                                        staged: result.staged.count > before)
+        attachmentNoticeIsChatOnly = chatOnlyInForce
+    }
+
+    /// Files staged as paths while Chat only is in force, for the session
+    /// they were staged in. Whatever makes it true — the chip moved to
+    /// Chat only, the Chat only gate read at last, a session opened with
+    /// its files waiting — they are read at once. Before the composer has
+    /// taken the incoming session's files (`loadedDraftKey`), the staged
+    /// files are still the outgoing session's, and are not this mode's.
+    private var stagedPathsAwaitChatOnly: Bool {
+        chatOnlyInForce && transcriptKey != nil && loadedDraftKey == transcriptKey
+            && stagedAttachments.contains { $0.loaded == nil }
+    }
+
+    /// Chat only is in force: each file staged as a path is read now, and
+    /// one that cannot travel in a Chat only message comes off with its
+    /// reason. Answers whether every staged file could stay.
+    @discardableResult
+    private func loadStagedFilesForChatOnly() -> Bool {
+        guard stagedAttachments.contains(where: { $0.loaded == nil }) else { return true }
+        let result = AgentAttachment.loadingForChatOnly(stagedAttachments,
+                                                        imageRefusal: chatOnlyImageRefusal)
+        stagedAttachments = result.staged
+        attachmentNotice = attachNotice(refused: result.refused, staged: true)
+        attachmentNoticeIsChatOnly = true
+        return result.refused.isEmpty
+    }
+
+    /// The note above the composer: what was turned away, and — the chips
+    /// being the receipt for the rest — the one thing a chip cannot show,
+    /// that a file was cut short.
+    private func attachNotice(refused: [String], staged: Bool) -> String? {
         var notes: [String] = []
         if !refused.isEmpty { notes.append(refused.joined(separator: "\n")) }
-        // The chips are the receipt; the note is spent on what a chip
-        // cannot show — that a file was cut short.
         if staged {
-            let cut = stagedAttachments.filter { $0.textTruncated }
+            let cut = stagedAttachments.compactMap(\.loaded).filter { $0.textTruncated }
             if !cut.isEmpty {
                 let byCap = Dictionary(grouping: cut) { a in
                     if case .pdf = a.kind { return AttachmentLimits.pdfTextCharLimit }
@@ -1723,18 +2110,25 @@ struct AgentSessionView: View {
                 }.joined(separator: "\n"))
             }
         }
-        attachmentNotice = notes.isEmpty ? nil : notes.joined(separator: "\n")
+        return notes.isEmpty ? nil : notes.joined(separator: "\n")
     }
 
     private func removeAttachment(_ id: UUID) {
         stagedAttachments.removeAll { $0.id == id }
     }
 
-    /// The message as the agent receives it: the user's text plus one
-    /// inlined block per attachment — exactly as the chat page composes
-    /// it. The transcript strips the blocks back out (`AttachmentInline`).
-    private func outgoingText(for text: String) -> String {
-        let blocks = stagedAttachments.compactMap { a -> String? in
+    /// The message as the agent receives it. Outside Chat only: the user's
+    /// words, then one path marker per file — the agent reads the files
+    /// itself. In Chat only: one inlined block per file ahead of the
+    /// words, exactly as the chat page composes it. Either way the
+    /// transcript strips the markers back out and names the files on the
+    /// paperclip line (`AttachmentInline`).
+    private func outgoingText(for text: String, chatOnly: Bool) -> String {
+        guard chatOnly else {
+            return AttachmentInline.appendingReferences(stagedAttachments.map(\.reference),
+                                                        to: text)
+        }
+        let blocks = stagedAttachments.compactMap(\.loaded).compactMap { a -> String? in
             if case .image = a.kind {
                 // An image's bytes go a side channel; only its NAME
                 // rides the text, so the bubble and a reopened
@@ -1750,61 +2144,306 @@ struct AgentSessionView: View {
     }
 
     /// The staged images, resolved to the payload the runner's image
-    /// channels need. Only `.image` attachments; text rides the body.
+    /// channels need — a Chat only send's alone. Text rides the body.
     private func outgoingImages() -> [AgentImage] {
-        stagedAttachments.compactMap { a in
+        stagedAttachments.compactMap(\.loaded).compactMap { a in
             guard case .image(let mediaType) = a.kind, let b64 = a.base64 else { return nil }
             return AgentImage(name: a.name, base64: b64, mediaType: mediaType)
         }
     }
 
+    /// Whether a send from this session must wait on the chips as they
+    /// stand: a saved Chat only pick whose gate has not been read — unread,
+    /// the gate answers false, and `sendOptions` would clear the pick and
+    /// run an agent turn — or an asking pick the installed CLI cannot run
+    /// yet, or at all (`AskingModeGate`): held, never sent as a mode that
+    /// does not ask.
+    ///
+    /// EVERY send this view makes asks it, not the composer's alone: a
+    /// branch's first message and "Implement this plan" run with the same
+    /// chips, and one that skipped it would run the turn the composer is
+    /// refusing to.
+    private var sendIsHeld: Bool {
+        if launchOptions.chatOnly, !ChatOnlyGate.settled(agentKey: sessionAgentKey) { return true }
+        return AskingModeGate.hold(agentKey: sessionAgentKey, mode: launchOptions.permissionMode,
+                                   chatOnly: launchOptions.chatOnly) != nil
+    }
+
     private func handleSend() {
-        // The composer holds this send already (`chatOnlyPending`); this
-        // is the backstop. Unread, the gate answers false, and
-        // `sendOptions` would clear the pick and run an agent turn.
-        if launchOptions.chatOnly, !ChatOnlyGate.settled(agentKey: sessionAgentKey) { return }
+        // While the message editor's Send or Create Branch is under way the
+        // session is not this message's: Send may be taking it back to an
+        // earlier message, and a turn started under it would race the cut.
+        if branching { return }
+        // The composer holds this send already (`chatOnlyPending`, its
+        // asking hold); this is the backstop.
+        if sendIsHeld { return }
+        // Codex's own `/compact` and `/review`, typed alone: run as its
+        // terminal runs them, never sent to the model as words.
+        // A `!` command: run as the agent's terminal runs one, or held
+        // above the box while a turn of ours runs (`ShellCommands`). One
+        // the installed tool cannot run yet waits, as the composer says.
+        if let command = typedShellCommand {
+            switch command.verdict {
+            case .runs:
+                startShellCommand(command.line)
+                return
+            case .pending, .needsNewer:
+                return
+            case .noRoute:
+                break
+            }
+        }
+        if let command = typedCodexCommand {
+            switch command {
+            case .compact:
+                startCodexCommand(.compact,
+                                  label: inputDraft.trimmingCharacters(in: .whitespacesAndNewlines),
+                                  clearsBox: true)
+            case .review:
+                // The picker takes the command's place, as in codex's
+                // terminal: closed with ×, the box is empty.
+                inputDraft = ""
+                stashComposerDraft()
+                reviewPickerOpen = true
+            }
+            return
+        }
         let typed = inputDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Attachments ride Chat only alone: in every other row the + and
-        // a drop insert paths, and a file staged earlier is sent inline
-        // whatever the row at send time — the two never collide.
-        let sending = sendOptions
-        let attaching = sending.chatOnly ? stagedAttachments : []
+        var sending = sendOptions
+        // A file staged as a path cannot travel in a Chat only message,
+        // and the chip can come to rest on Chat only without this view
+        // seeing it turn (a saved pick whose gate was read meanwhile). So
+        // the files are read here too; one that cannot go comes off with
+        // its reason, and the message waits for the user to read it.
+        if sending.chatOnly, !loadStagedFilesForChatOnly() { return }
+        let attaching = stagedAttachments
         guard !typed.isEmpty || !attaching.isEmpty, agentIsListed else { return }
-        let text = attaching.isEmpty ? typed : outgoingText(for: typed)
+        let text = attaching.isEmpty ? typed
+            : outgoingText(for: typed, chatOnly: sending.chatOnly)
         let images = sending.chatOnly ? outgoingImages() : []
+        sending.skillTriggers = skillTriggers(for: typed, options: sending,
+                                              evidence: skillEvidence())
 
         // Draft: the runner is created here, on first send, so it
-        // captures the folder the composer shows right now.
+        // captures the folder the composer shows right now — and the
+        // skills its chip goes out with, the agent's defaults when the
+        // user chose none, which `migrateRunner` files under the id.
         let runner: AgentRunner?
         switch mode {
-        case .draft(let d):
+        case .draft(var d):
+            if d.skillPicks == nil {
+                d.skillPicks = skillPicks
+                appState.pendingClaudeSessionDraft?.skillPicks = d.skillPicks
+            }
             runner = agents.runner(forDraft: d)
         case .existing, .empty:
             runner = currentRunner
         }
         guard let runner = runner else { return }
 
+        // A turn of ours runs: the message waits above the box until it
+        // is steered into the turn, or the turn ends (`HeldMessage`).
+        if runner.status.isRunning {
+            if runner.hold(text: text, options: sending, images: images,
+                           boxText: typed, boxFiles: attaching.map(\.url)) {
+                clearSentComposer(clearsAttachments: !attaching.isEmpty)
+                recordSentOptions()
+            }
+            return
+        }
         if runner.send(text: text, options: sending, images: images) {
             // The session is demonstrably alive again — a stale
             // load-time marker must not sit between the old turn and
             // this new one.
             dropInterruptedMarker()
-            inputDraft = ""
-            if !attaching.isEmpty {
-                stagedAttachments = []
-                attachmentNotice = nil
+            clearSentComposer(clearsAttachments: !attaching.isEmpty)
+            useUpNewSession()
+            recordSentOptions()
+        }
+    }
+
+    /// The box after a message went — sent, or held above the box. The
+    /// stashed copy goes too, or switching away and back would resurrect
+    /// the just-sent text into the composer.
+    private func clearSentComposer(clearsAttachments: Bool) {
+        inputDraft = ""
+        if clearsAttachments {
+            stagedAttachments = []
+            attachmentNotice = nil
+        }
+        stashComposerDraft()
+        stashComposerAttachments()
+    }
+
+    /// × on a message held above the box: it goes nowhere, and what the
+    /// box held when it was sent comes back to be changed — its words ahead
+    /// of anything typed since, its files staged again as the + stages them
+    /// (one staged since is not doubled; one gone since is refused, with
+    /// the reason above the box).
+    private func takeBackHeld(_ id: UUID) {
+        guard let runner = currentRunner, let message = runner.takeBackHeld(id) else { return }
+        inputDraft = message.boxText(over: inputDraft)
+        if !message.boxFiles.isEmpty { stageAttachments(message.boxFiles) }
+        stashComposerDraft()
+        stashComposerAttachments()
+    }
+
+    /// A new session's first message uses up what was set up for it beside
+    /// the text: its skills went with it and are the session's now, and a
+    /// schedule left unarmed has nothing left to schedule. The next new
+    /// session starts afresh.
+    private func useUpNewSession() {
+        guard case .draft(let d) = mode else { return }
+        // Its chips go on with it (`sentOptions`), as its skills do — and
+        // to the manager, which files them under the session id when it
+        // arrives, whichever page is on screen by then.
+        appState.pendingClaudeSessionDraft?.sentOptions = launchOptions
+        if let sent = appState.pendingClaudeSessionDraft { agents.noteSentDraft(sent) }
+        appState.setNewSessionSkillPicks(nil, for: newSessionStoreKey(d))
+        appState.setNewSessionChipEdits(nil, for: newSessionStoreKey(d))
+        scheduleDraft = ScheduleDraft()
+        stashComposerSchedule()
+    }
+
+    /// Record what this session runs with. Persisting what each send used
+    /// means the transcript guess in `seedLaunchOptions` is only ever
+    /// needed for a session this app has never driven.
+    private func recordSentOptions() {
+        if case .existing(let id, _, _, _) = mode {
+            config.setAgentSessionLaunchOptions(launchOptions, for: id)
+        }
+    }
+
+    /// The `!` command the box holds, and what Send does with it — the rule
+    /// the composer's hint follows (`ShellCommandRoute`). A message with
+    /// files staged is a message.
+    private var typedShellCommand: (line: String, verdict: ShellCommandVerdict)? {
+        guard stagedAttachments.isEmpty,
+              let line = ShellCommandInput.command(in: inputDraft),
+              let verdict = ShellCommandRoute.verdict(agentKey: sessionAgentKey) else { return nil }
+        return (line, verdict)
+    }
+
+    /// Run a `!` command now, or hold it above the box while a turn of ours
+    /// runs — it never goes into a turn. Nothing runs under another
+    /// process's turn on the session.
+    private func startShellCommand(_ command: String) {
+        guard agentIsListed, !branching, !sendIsHeld else { return }
+        let runner: AgentRunner?
+        switch mode {
+        case .draft(var d):
+            if d.skillPicks == nil {
+                d.skillPicks = skillPicks
+                appState.pendingClaudeSessionDraft?.skillPicks = d.skillPicks
             }
-            // Drop any stashed copy too, or switching away and back
-            // would resurrect the just-sent text into the composer.
-            stashComposerDraft()
-            stashComposerAttachments()
-            // Record what this session actually ran with. Persisting
-            // what each send used means the transcript guess in
-            // `seedLaunchOptions` is only ever needed for a session
-            // this app has never driven.
-            if case .existing(let id, _, _, _) = mode {
-                config.setAgentSessionLaunchOptions(launchOptions, for: id)
+            runner = agents.runner(forDraft: d)
+        case .existing, .empty:
+            runner = currentRunner
+        }
+        guard let runner else { return }
+        let options = sendOptions
+        if runner.status.isRunning {
+            if runner.hold(text: ShellCommandInput.display(command), options: options,
+                           shellCommand: command) {
+                clearSentComposer(clearsAttachments: false)
+                recordSentOptions()
             }
+            return
+        }
+        guard !runner.externalInProgress,
+              runner.runShellCommand(command, options: options) else { return }
+        dropInterruptedMarker()
+        clearSentComposer(clearsAttachments: false)
+        useUpNewSession()
+        recordSentOptions()
+    }
+
+    /// Codex's own command the box holds, typed alone: `/compact` on a
+    /// session that has a conversation to summarise, `/review` outside Chat
+    /// only (a review reads the folder). Through codex's app-server, so
+    /// where the installed codex has one; the composer's hint follows the
+    /// same rule.
+    private var typedCodexCommand: CodexCommand? {
+        guard sessionAgentKey == "codex", stagedAttachments.isEmpty,
+              AskingModeGate.frontEnd(agentKey: sessionAgentKey) == .offered,
+              let command = CodexCommand.parse(inputDraft) else { return nil }
+        switch command {
+        case .compact: return isDraftBeforeFirstSend ? nil : .compact
+        case .review: return chatOnlyInForce ? nil : .review
+        }
+    }
+
+    /// Run one of codex's own commands now, or hold it above the box while
+    /// a turn runs, where it reads as `label` until it runs. False when it
+    /// went nowhere.
+    @discardableResult
+    private func startCodexCommand(_ command: CodexCommandTurn, label: String, clearsBox: Bool) -> Bool {
+        guard agentIsListed, !branching, !sendIsHeld else { return false }
+        let runner: AgentRunner?
+        switch mode {
+        case .draft(var d):
+            if d.skillPicks == nil {
+                d.skillPicks = skillPicks
+                appState.pendingClaudeSessionDraft?.skillPicks = d.skillPicks
+            }
+            runner = agents.runner(forDraft: d)
+        case .existing, .empty:
+            runner = currentRunner
+        }
+        guard let runner else { return false }
+        let options = sendOptions
+        if runner.status.isRunning {
+            // What × on the held command puts back in the box: the command
+            // as it was typed — a review is picked after typing `/review`.
+            let typed: String
+            if case .review = command { typed = "/review" } else { typed = label }
+            guard runner.hold(text: label, options: options,
+                              codexCommand: command, boxText: typed) else { return false }
+            if clearsBox { clearSentComposer(clearsAttachments: false) }
+            return true
+        }
+        guard !runner.externalInProgress,
+              runner.runCodexCommand(command, options: options) else { return false }
+        dropInterruptedMarker()
+        if clearsBox { clearSentComposer(clearsAttachments: false) }
+        useUpNewSession()
+        recordSentOptions()
+        return true
+    }
+
+    /// "Yes, implement in …" on a finished codex Plan turn: as codex's
+    /// terminal does it — the session leaves Plan for the mode the answer
+    /// names (Default, codex's own default setting; Workspace Write; Full
+    /// Access for a session that was in it), for this session alone, and
+    /// codex's own words for it are sent. What the user is typing in the
+    /// composer stays there.
+    ///
+    /// The card names the mode, so the chip goes to it from wherever it
+    /// has been moved since the plan — Chat only included. And it is
+    /// answered only by a message that WENT (`send` takes the card down):
+    /// while the turn cannot be sent — another process mid-turn on the
+    /// thread — the card stays up and the chip stays put, rather than a
+    /// click that takes the offer away and sends nothing.
+    private func implementProposedPlan(mode spelling: String) {
+        let target: String? = spelling == AgentAskingMode.adoptDefault ? nil : spelling
+        guard let runner = currentRunner, agentIsListed, !branching,
+              !runner.status.isRunning, !runner.externalInProgress,
+              AskingModeGate.hold(agentKey: sessionAgentKey, mode: target, chatOnly: false) == nil
+        else { return }
+        var next = launchOptions
+        // One writer for both fields — see `ChatOnlyMode.select`.
+        ChatOnlyMode.select(target, into: &next)
+        // For this session alone, as a card's mode switch is
+        // (`adoptSessionMode`) — never the agent's sticky pick.
+        applySeededOptions(next)
+        var sending = sendOptions
+        sending.skillTriggers = skillTriggers(for: CodexAppServer.implementPlanMessage,
+                                              options: sending, evidence: skillEvidence())
+        if runner.send(text: CodexAppServer.implementPlanMessage, options: sending) {
+            dropInterruptedMarker()
+        }
+        if case .existing(let id, _, _, _) = mode {
+            config.setAgentSessionLaunchOptions(launchOptions, for: id)
         }
     }
 
@@ -1827,19 +2466,44 @@ struct AgentSessionView: View {
     /// kimi cut would land above the live tail and codex refuses to
     /// fork through a turn that is still running.
     private var canBranch: Bool {
-        guard case .existing = mode, agentIsListed else { return false }
+        guard case .existing = mode, agentIsListed,
+              AgentSessionFork.hasWriter(agentKey: sessionAgentKey) else { return false }
         guard let runner = currentRunner else { return false }
         return !runner.status.isRunning && !runner.externalInProgress
     }
 
-    private func beginMessageEdit(rowId: UUID, text: String) {
-        editDraft = text
+    /// `loadedSkills`: the skills the row names under its words. A kimi
+    /// message the user opened on a skill command of their own
+    /// (`/skill:name words`) is drawn as its words with the skill under
+    /// them, as a message the chip loaded one with is — but that command
+    /// was part of what they SENT, and a branch re-sends only what the
+    /// chip holds. So the editor opens on the message as sent, unless the
+    /// skill is one the chip has: seeded with the words alone, editing
+    /// such a message quietly dropped its skill.
+    private func beginMessageEdit(rowId: UUID, text: String, loadedSkills: [String]) {
+        if sessionAgentKey == SkillAgent.kimi, loadedSkills.count == 1, let skill = loadedSkills.first,
+           !skillPicks.contains(where: { $0.lowercased() == skill.lowercased() }) {
+            editDraft = KimiAcp.promptText(text, skill: skill)
+        } else {
+            editDraft = text
+        }
         editingRowId = rowId
     }
 
     private func cancelMessageEdit() {
         editingRowId = nil
         editDraft = ""
+    }
+
+    /// The files the LIVE row being edited named. A live row has no
+    /// handle into the transcript and is found there by its words; a
+    /// message of attached files alone has none, and the files it named
+    /// are what find it (`resolveCutPoint(…attachedFiles:)`).
+    private var editedLiveRowFiles: [String] {
+        guard let id = editingRowId,
+              let event = currentRunner?.events.first(where: { $0.id == id })
+        else { return [] }
+        return event.attachedFiles
     }
 
     /// Fork the session at the edited message and send the new text into
@@ -1850,7 +2514,7 @@ struct AgentSessionView: View {
     /// message id). History rows carry it; LIVE rows (a message sent
     /// this run, still only in the runner's event buffer) don't, and
     /// are resolved by matching their text against the transcript —
-    /// the same identification `trimmedForInFlight` already makes.
+    /// the same identification `TranscriptSeam.cut` already makes.
     ///
     /// Three writers, ONE tail: whichever agent forked, the lineage,
     /// the name, the launch options, the runner (BEFORE routing, with
@@ -1861,13 +2525,19 @@ struct AgentSessionView: View {
                                      newText: String,
                                      skippingNewer: Int = 0) {
         let text = newText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !branching,
+        // Held with the composer's own send: a branch made while its first
+        // message cannot go would run that message in a mode the chips do
+        // not say (the editor's button is disabled meanwhile; this is the
+        // backstop).
+        guard !text.isEmpty, !branching, !sendIsHeld,
               case .existing(let sourceId, let url, let cwd, _) = mode
         else { return }
         let agentKey = sessionAgentKey
         // Read now, with the parent still on screen: by the time the
         // fork returns the user may be looking at something else.
         let customGroup = branchCustomGroup
+        // Read while the row is still the one being edited.
+        let attachedFiles = recordUuid == nil ? editedLiveRowFiles : []
 
         branching = true
         // Explicitly MainActor: everything after the detached fork
@@ -1880,18 +2550,23 @@ struct AgentSessionView: View {
                     forked = try await forkCodex(rollout: url, threadId: sourceId,
                                                  recordUuid: recordUuid,
                                                  originalText: originalText,
+                                                 attachedFiles: attachedFiles,
                                                  skippingNewer: skippingNewer)
                 case "kimi":
                     forked = try await forkKimi(wire: url, cwd: cwd,
                                                 recordUuid: recordUuid,
                                                 originalText: originalText,
+                                                attachedFiles: attachedFiles,
                                                 skippingNewer: skippingNewer,
                                                 title: AgentSessionFork.branchTitle(from: text))
-                default:
+                case "claude_code":
                     forked = try await forkClaude(source: url,
                                                   recordUuid: recordUuid,
                                                   originalText: originalText,
+                                                  attachedFiles: attachedFiles,
                                                   skippingNewer: skippingNewer)
+                default:
+                    throw AgentSessionFork.ForkError.agentNotSupported
                 }
 
                 branching = false
@@ -1910,6 +2585,10 @@ struct AgentSessionView: View {
                                              recordUuid: forked.cut,
                                              for: newId)
                 config.copyAgentChatOnlyTurns(from: sourceId, to: newId)
+                config.copyAgentSessionSkillPicks(from: sourceId, to: newId)
+                // What the branch's own history holds is what lies above
+                // the cut: read now, while the parent's rows are on screen.
+                let branchEvidence = skillEvidence(above: forked.cut, originalText: originalText)
                 config.setAgentSessionDisplayName(title, for: newId)
                 config.setAgentSessionLaunchOptions(launchOptions, for: newId)
                 // Runner BEFORE routing, with the cwd and the agent
@@ -1936,13 +2615,25 @@ struct AgentSessionView: View {
                     appState.setComposerDraft(text, for: AppState.agentDraftKey(newId))
                     return
                 }
+                // A hold that began while the branch was being made (the
+                // CLI changed under it): the branch opens with the message
+                // in its composer, where the line above it says why. Filed
+                // before the route moves, so the pane finds it on arrival.
+                let held = sendIsHeld
+                if held {
+                    appState.setComposerDraft(text, for: AppState.agentDraftKey(newId))
+                }
                 cancelMessageEdit()
                 // A branch is its own session, not another run of
                 // whatever scheduled task this transcript belonged to.
                 appState.openScheduledTaskName = nil
                 appState.openAgentSessionId = newId
                 appState.openAgentSessionPath = forked.fileURL
-                runner.send(text: text, options: sendOptions)
+                guard !held else { return }
+                var sending = sendOptions
+                sending.skillTriggers = skillTriggers(for: text, options: sending,
+                                                      evidence: branchEvidence)
+                runner.send(text: text, options: sending)
             } catch AgentSessionFork.ForkError.nothingToBranch {
                 // Editing the session's FIRST message. There is no
                 // shared history to carry, which makes the branch simply
@@ -1953,7 +2644,7 @@ struct AgentSessionView: View {
                 // text goes back to the source's composer rather than
                 // being lost with the click.
                 guard case .existing(let stillOpen, _, _, _) = mode,
-                      stillOpen == sourceId else {
+                      stillOpen == sourceId, !sendIsHeld else {
                     appState.setComposerDraft(text, for: AppState.agentDraftKey(sourceId))
                     return
                 }
@@ -1971,14 +2662,246 @@ struct AgentSessionView: View {
         }
     }
 
+    /// Whether the installed tool can take this session back to a message
+    /// — the Send in the message editor (`AgentSessionRewind.support`).
+    private var rewindSupport: AgentSessionRewind.Support {
+        AgentSessionRewind.support(
+            agentKey: sessionAgentKey,
+            claudeNamesFlag: ClaudeCapabilities.shared.namesResumeSessionAt,
+            codexVersion: AgentCLIUpdateMonitor.shared.installed["codex"]?.text,
+            kimiVersion: AgentCLIUpdateMonitor.shared.installed["kimi"]?.text)
+    }
+
+    /// Send in the message editor: the session goes back to the edited
+    /// message — the message and everything after it leave the
+    /// conversation — and the edit is sent there, in THIS session: its
+    /// name, its place in the sidebar and its id stay. Each agent's own
+    /// mechanism (`AgentSessionRewind`): claude takes the cut with the
+    /// send itself, codex and kimi make it first and the send continues
+    /// from it. The first message has nothing above it to go back to, and
+    /// starts a new session instead, as Create Branch does.
+    ///
+    /// Once codex or kimi has made the cut the edit is sent whatever the
+    /// user does next — the session is cut, and only the send completes
+    /// it. Rows are cut on screen only while this session is the one
+    /// shown; any later open reads the file, where the cut is the agent's.
+    private func editSessionInPlace(rowId: UUID, recordUuid: String?,
+                                    originalText: String, newText: String,
+                                    skippingNewer: Int) {
+        let text = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !branching, !sendIsHeld, canBranch,
+              rewindSupport == .offered,
+              case .existing(let sessionId, let url, let cwd, _) = mode,
+              let runner = currentRunner
+        else { return }
+        let agentKey = sessionAgentKey
+        let customGroup = branchCustomGroup
+        // What the conversation above the message holds, read while its
+        // rows are still on screen: a skill loaded only in the turns being
+        // replaced is not loaded any more.
+        let evidence = skillEvidence(above: recordUuid ?? "", originalText: originalText)
+        // The chips the edit goes with, read now, while this session is the
+        // one shown: the view outlives a switch to another session, and read
+        // after codex's or kimi's own call they would be that session's.
+        let chips: AgentLaunchOptions = {
+            var options = sendOptions
+            options.skillTriggers = skillTriggers(for: text, options: options, evidence: evidence)
+            return options
+        }()
+        // Read while the row is still the one being edited: a live message
+        // of attached files alone is found by the files it named.
+        let attachedFiles = recordUuid == nil ? editedLiveRowFiles : []
+
+        branching = true
+        Task { @MainActor in
+            do {
+                var resumeAt: String? = nil
+                switch agentKey {
+                case "codex":
+                    let file = try await revertCodex(rollout: url, threadId: sessionId,
+                                                     recordUuid: recordUuid, originalText: originalText,
+                                                     attachedFiles: attachedFiles,
+                                                     skippingNewer: skippingNewer)
+                    runner.adoptRewoundRollout(file)
+                    if appState.openAgentSessionId == sessionId {
+                        appState.openAgentSessionPath = file
+                    }
+                    // The sidebar's row still names the old file, and a
+                    // click on it would open the turns codex just took back.
+                    agents.reloadSessions()
+                case "kimi":
+                    try await undoKimi(wire: url, sessionId: sessionId, cwd: cwd,
+                                       recordUuid: recordUuid, originalText: originalText,
+                                       attachedFiles: attachedFiles,
+                                       skippingNewer: skippingNewer)
+                case "claude_code":
+                    resumeAt = try await claudeEntry(above: recordUuid, in: url,
+                                                     originalText: originalText,
+                                                     attachedFiles: attachedFiles,
+                                                     skippingNewer: skippingNewer)
+                default:
+                    throw AgentSessionFork.ForkError.agentNotSupported
+                }
+                branching = false
+                historyCache.forget(sessionId)
+                if case .existing(let shown, _, _, _) = mode, shown == sessionId {
+                    cutTranscript(at: rowId)
+                    cancelMessageEdit()
+                }
+                var sending = chips
+                sending.claudeResumeAt = resumeAt
+                runner.send(text: text, options: sending)
+            } catch AgentSessionFork.ForkError.nothingToBranch {
+                // The first message: nothing above it to go back to.
+                branching = false
+                guard case .existing(let shown, _, _, _) = mode, shown == sessionId, !sendIsHeld else {
+                    appState.setComposerDraft(text, for: AppState.agentDraftKey(sessionId))
+                    return
+                }
+                startBranchAsNewSession(cwd: cwd, text: text, customGroup: customGroup)
+            } catch AgentSessionFork.ForkError.agentUnavailable {
+                branching = false
+                branchErrorTitle = Self.inPlaceFailureTitle
+                branchError = String(
+                    localized: "\(sessionAgentName) did not answer, so nothing changed.",
+                    comment: "Edit-in-place error when the agent's own call got no reply; placeholder is the agent's label")
+            } catch {
+                branching = false
+                branchErrorTitle = Self.inPlaceFailureTitle
+                branchError = error.localizedDescription
+            }
+        }
+    }
+
+    private static var inPlaceFailureTitle: String {
+        String(localized: "Could not go back to this message",
+               comment: "Title of the alert shown when editing a message in place fails")
+    }
+
+    /// The page after Send: the edited row and every row below it go, so
+    /// the conversation ends above it until the edit's own row is drawn.
+    /// The live rows all lie below the history rows.
+    private func cutTranscript(at rowId: UUID) {
+        if let at = historicalItems.firstIndex(where: { $0.id == rowId }) {
+            historicalItems.removeSubrange(at...)
+            currentRunner?.discardEvents(from: nil)
+        } else {
+            currentRunner?.discardEvents(from: rowId)
+        }
+    }
+
+    /// Claude: the entry above the edited record, which the edit's turn
+    /// resumes at (`--resume-session-at`). Nothing is written until then.
+    private func claudeEntry(above recordUuid: String?, in url: URL,
+                             originalText: String, attachedFiles: [String],
+                             skippingNewer: Int) async throws -> String {
+        try await Task.detached(priority: .userInitiated) {
+            try AgentSessionRewind.claudeResumeEntry(recordUuid: recordUuid, in: url,
+                                                     originalText: originalText,
+                                                     attachedFiles: attachedFiles,
+                                                     skippingNewer: skippingNewer)
+        }.value
+    }
+
+    /// Codex: the thread reverted to before the edited message's turn, by
+    /// codex; answers the thread's new rollout.
+    private func revertCodex(rollout url: URL, threadId: String, recordUuid: String?,
+                             originalText: String, attachedFiles: [String],
+                             skippingNewer: Int) async throws -> URL {
+        guard let binary = AgentManager.binaryPath(for: "codex") else {
+            throw AgentSessionFork.ForkError.agentUnavailable
+        }
+        let cut = try await Task.detached(priority: .userInitiated) {
+            try AgentSessionRewind.codexRevertTurn(recordUuid: recordUuid, in: url,
+                                                   originalText: originalText,
+                                                   attachedFiles: attachedFiles,
+                                                   skippingNewer: skippingNewer)
+        }.value
+        switch await AgentSessionRewind.revertCodex(threadId: threadId, beforeTurnId: cut,
+                                                    binary: binary) {
+        case .reverted(let file): return file
+        case .refused(let words): throw AgentSessionRewind.RewindError.refused(words)
+        case .unsupported, .unavailable: throw AgentSessionFork.ForkError.agentUnavailable
+        }
+    }
+
+    /// Kimi: the turns from the edited message on undone by kimi's own
+    /// server (`:undo`, what its `/undo` calls).
+    private func undoKimi(wire url: URL, sessionId: String, cwd: URL, recordUuid: String?,
+                          originalText: String, attachedFiles: [String],
+                          skippingNewer: Int) async throws {
+        guard let binary = AgentManager.binaryPath(for: "kimi") else {
+            throw AgentSessionFork.ForkError.agentUnavailable
+        }
+        let target = try await Task.detached(priority: .userInitiated) {
+            try AgentSessionRewind.kimiUndoTarget(recordUuid: recordUuid, in: url, originalText: originalText,
+                                                  attachedFiles: attachedFiles, skippingNewer: skippingNewer)
+        }.value
+        guard let path = AgentSessionRewind.kimiUndoPath(sessionId: sessionId) else {
+            throw AgentSessionFork.ForkError.cutPointNotFound
+        }
+        let namesTurn = AgentSessionRewind.kimiUndoNamesTurn(
+            kimiVersion: AgentCLIUpdateMonitor.shared.installed["kimi"]?.text)
+        switch await KimiWebServerCall.Session.start(binary: binary, scratchDirectory: cwd) {
+        case .failed(let why):
+            throw AgentSessionRewind.RewindError.refused(why)
+        case .started(let server):
+            var body: [String: Any] = ["count": target.count]
+            if namesTurn {
+                // The turn the edited message opened, from kimi's own turn
+                // list, newest page first: its id is a hash of a counter
+                // only kimi's server holds.
+                var below: Int? = nil
+                var turnId: String? = nil
+                pages: for _ in 0..<50 {
+                    let list = AgentSessionRewind.kimiTurnsPath(sessionId: sessionId, beforeOrdinal: below)
+                    guard let list else { break }
+                    switch await server.request(method: "GET", path: list) {
+                    case .failure(let error):
+                        await server.shutdown()
+                        throw AgentSessionRewind.RewindError.refused(error.localizedDescription)
+                    case .success(let data):
+                        let page = AgentSessionRewind.kimiTurnsPage(from: data, messageId: target.messageId)
+                        guard let page else {
+                            await server.shutdown()
+                            throw AgentSessionRewind.RewindError.refused(AgentSessionRewind.kimiWords(in: data))
+                        }
+                        if let found = page.turnId {
+                            turnId = found
+                            break pages
+                        }
+                        guard page.hasMore, let oldest = page.oldestOrdinal else { break pages }
+                        below = oldest
+                    }
+                }
+                guard let turnId else {
+                    await server.shutdown()
+                    throw AgentSessionFork.ForkError.cutPointNotFound
+                }
+                body = ["turn_id": turnId]
+            }
+            let answer = await server.request(method: "POST", path: path, body: body)
+            await server.shutdown()
+            switch answer {
+            case .failure(let error):
+                throw AgentSessionRewind.RewindError.refused(error.localizedDescription)
+            case .success(let data):
+                if case .refused(let words) = AgentSessionRewind.kimiUndoOutcome(from: data) {
+                    throw AgentSessionRewind.RewindError.refused(words)
+                }
+            }
+        }
+    }
+
     /// Claude: a new transcript beside the original, holding the prefix.
     private func forkClaude(source url: URL, recordUuid: String?,
-                            originalText: String, skippingNewer: Int) async throws
+                            originalText: String, attachedFiles: [String],
+                            skippingNewer: Int) async throws
     -> (id: String, fileURL: URL, cut: String) {
         try await Task.detached(priority: .userInitiated) {
             guard let cut = recordUuid
                     ?? AgentSessionFork.resolveCutPoint(
-                        matchingUserText: originalText, in: url,
+                        matchingUserText: originalText, attachedFiles: attachedFiles, in: url,
                         skippingNewest: skippingNewer)
             else { throw AgentSessionFork.ForkError.cutPointNotFound }
             let result = try AgentSessionFork.fork(source: url,
@@ -1992,6 +2915,7 @@ struct AgentSessionView: View {
     /// through the turn before it.
     private func forkCodex(rollout url: URL, threadId: String,
                            recordUuid: String?, originalText: String,
+                           attachedFiles: [String],
                            skippingNewer: Int) async throws
     -> (id: String, fileURL: URL, cut: String) {
         guard let binary = AgentManager.binaryPath(for: "codex") else {
@@ -2001,28 +2925,31 @@ struct AgentSessionView: View {
             () -> String in
             guard let cut = recordUuid
                     ?? CodexSessionFork.resolveCutPoint(
-                        matchingUserText: originalText, in: url,
+                        matchingUserText: originalText, attachedFiles: attachedFiles, in: url,
                         skippingNewest: skippingNewer)
             else { throw AgentSessionFork.ForkError.cutPointNotFound }
             return cut
         }.value
-        let result = try await CodexSessionFork.fork(rollout: url,
-                                                     threadId: threadId,
-                                                     cutAtTurnId: cut,
-                                                     binary: binary)
+        // A branch keeps its parent's speed (`CodexKeptSpeed`), so its
+        // switches stay what the parent's say.
+        let result = try await CodexSessionFork.fork(
+            rollout: url, threadId: threadId, cutAtTurnId: cut, binary: binary,
+            keepsSpeed: CodexKeptSpeed.keeps(
+                codexVersion: AgentCLIUpdateMonitor.shared.installed["codex"]?.text))
         return (result.threadId, result.rolloutURL, cut)
     }
 
     /// Kimi: a new session directory beside the original, in the shape
     /// kimi's own fork writes, holding the wire prefix.
     private func forkKimi(wire url: URL, cwd: URL, recordUuid: String?,
-                          originalText: String, skippingNewer: Int,
+                          originalText: String, attachedFiles: [String],
+                          skippingNewer: Int,
                           title: String) async throws
     -> (id: String, fileURL: URL, cut: String) {
         try await Task.detached(priority: .userInitiated) {
             guard let cut = recordUuid
                     ?? KimiSessionFork.resolveCutPoint(
-                        matchingUserText: originalText, in: url,
+                        matchingUserText: originalText, attachedFiles: attachedFiles, in: url,
                         skippingNewest: skippingNewer)
             else { throw AgentSessionFork.ForkError.cutPointNotFound }
             let result = try KimiSessionFork.fork(sourceWire: url,
@@ -2044,12 +2971,35 @@ struct AgentSessionView: View {
         // conversation with a different tool, not a fresh start. The
         // parent's custom group rides the draft, and `migrateRunner`
         // files it when the id arrives — exactly as the group +'s does.
-        let draft = ClaudeSessionDraft(cwd: cwd, agentKey: sessionAgentKey,
+        var draft = ClaudeSessionDraft(cwd: cwd, agentKey: sessionAgentKey,
                                        customGroup: customGroup)
+        draft.place = .branch(draft.id)
+        // The parent's chosen skills, all of which load again: the new
+        // session holds nothing yet.
+        draft.skillPicks = skillPicks
+        // The chips its first message goes out with are the new session's
+        // own from now (`sentOptions`), as after any first send: the page
+        // the draft opens on seeds from them, and the switch to the
+        // session saves them. Without them the page seeds the agent's
+        // latest choices, and the switch saves those over the parent's.
+        draft.sentOptions = launchOptions
+        var sending = sendOptions
+        // A codex session keeps its saved speed (`CodexKeptSpeed`), which
+        // its chips show: the new session is born at that speed too, as a
+        // branch made at a later message is forked at it.
+        if sessionAgentKey == "codex",
+           CodexKeptSpeed.keeps(codexVersion: AgentCLIUpdateMonitor.shared.installed["codex"]?.text),
+           let tier = CodexKeptSpeed.forkTier(codexSavedSpeed) {
+            draft.sentOptions?.serviceTier = tier
+            sending.serviceTier = tier
+            sending.codexServiceTierOverride = tier
+        }
+        sending.skillTriggers = skillTriggers(for: text, options: sending, evidence: [])
         cancelMessageEdit()
         appState.openScheduledTaskName = nil
         appState.pendingClaudeSessionDraft = draft
-        agents.runner(forDraft: draft).send(text: text, options: sendOptions)
+        agents.runner(forDraft: draft).send(text: text, options: sending)
+        agents.noteSentDraft(draft)
     }
 
     /// Retract a load-time "Interrupted" marker once the session
@@ -2113,15 +3063,153 @@ struct AgentSessionView: View {
         )
     }
 
+    // MARK: - A new session's place
+
+    /// Where a new session's unsent text, files, schedule, chips and
+    /// skills are kept: its place's key (`transcriptKey`), as the store
+    /// spells it.
+    private func newSessionStoreKey(_ d: ClaudeSessionDraft) -> String {
+        AppState.agentDraftKey(d.place.draftKey(agentKey: d.agentKey))
+    }
+
+    /// Work out `newSessionStart` for the new session on screen, once —
+    /// first forgetting what waits for custom groups that are gone — and
+    /// read what its skills need before its first send: a page built
+    /// again after a detour asks for its picks before they are known.
+    private func refreshNewSessionStart() {
+        guard case .draft(let d) = mode, newSessionStart?.draftId != d.id else { return }
+        appState.dropNewSessions(ofGroupsNotIn: config.agentCustomGroups(for: d.agentKey),
+                                 agentKey: d.agentKey)
+        newSessionStart = newSessionStartingSetup(for: d)
+        if showsSkillChip, !skillPicks.isEmpty {
+            SkillCatalog.shared.ensurePicksReadable(skillPicks, agent: sessionAgentKey,
+                                                    folder: composerFolder)
+        }
+    }
+
+    /// What a new session's chips start from, under whatever was changed
+    /// on them at its place (`NewSessionChipEdits`): those of its group's
+    /// newest session (`NewSessionPlace.startingSetup`) — mode, model,
+    /// effort, speed, Non-stop / Chat only, as the group's + already takes
+    /// that session's folder; a new session whose first message has gone
+    /// counts from that moment, named or not — else the agent's latest
+    /// choices: for no group, and for a group with nothing to remember
+    /// yet. Its skills and schedule are not part of it: those belong to
+    /// the one session they were set on, and a new session starts with
+    /// the agent's pinned skills alone (`skillPicks`) and no schedule.
+    private func newSessionStartingSetup(for d: ClaudeSessionDraft) -> NewSessionStart {
+        let agent = d.agentKey
+        let start = d.place.startingSetup(
+            among: agents.regularSessions(for: agent),
+            unnamed: agents.unnamedNewSessions(for: agent),
+            customGroups: config.agentCustomGroups(for: agent),
+            assignments: config.agentSessionGroupAssignments,
+            setup: { config.agentSessionLaunchOptions(for: $0) })
+        var options = start?.options ?? config.agentLaunchOptions(for: agent)
+        // The id that session last ran under names ITS model; the chip's
+        // hover would read it as this new session's "last ran as".
+        options.modelFullId = nil
+        // Where codex keeps that session's speed, its chips show the speed
+        // it keeps, which its pick need not be (`CodexKeptSpeed`).
+        if agent == "codex", let session = start?.session,
+           CodexKeptSpeed.applies(
+               codexVersion: AgentCLIUpdateMonitor.shared.installed["codex"]?.text,
+               driver: AgentTurnDriver.pick(
+                   agentKey: agent, options: options, isNewSession: false,
+                   frontEndOffered: AskingModeGate.frontEnd(agentKey: agent) == .offered)) {
+            options.serviceTier = CodexKeptSpeed.startingTier(
+                pick: options.serviceTier, saved: Self.codexSavedSpeed(of: session.fileURL))
+        }
+        return NewSessionStart(draftId: d.id, options: options)
+    }
+
+    /// A new session's chips once its first message has gone: the new
+    /// session's own, kept on it until the session is named (`sentOptions`)
+    /// — and on the manager's copy, which is what the session is filed with
+    /// if this page has moved on by then. Before its first message, what
+    /// the user changes is kept for its place where the pick is made
+    /// (`keepNewSessionPick`).
+    private func keepSentOptions(_ options: AgentLaunchOptions) {
+        guard case .draft(let d) = mode, loadedDraftKey == transcriptKey,
+              !isDraftBeforeFirstSend, let sent = d.sentOptions, sent != options else { return }
+        appState.pendingClaudeSessionDraft?.sentOptions = options
+        if let draft = appState.pendingClaudeSessionDraft { agents.noteSentDraft(draft) }
+    }
+
+    /// A pick on an unsent new session's chips, kept for its place chip by
+    /// chip (`NewSessionChipEdits`): the chips it moved come back as they
+    /// were left, and the others go on following what the place starts
+    /// with — its group's newest session as that moves on.
+    private func keepNewSessionPick(from old: AgentLaunchOptions, to new: AgentLaunchOptions) {
+        guard case .draft(let d) = mode, isDraftBeforeFirstSend else { return }
+        let key = newSessionStoreKey(d)
+        var edits = appState.newSessionChipEdits(for: key) ?? NewSessionChipEdits()
+        edits.note(from: old, to: new)
+        appState.setNewSessionChipEdits(edits, for: key)
+    }
+
+    /// What `model` offers on the chips, for fitting an unsent new
+    /// session's kept chips to the model they land on
+    /// (`NewSessionChipEdits.applied`): read off the catalogs the
+    /// composer's menus read, the way it reads them, except that what is
+    /// not known yet is nil and drops nothing — a catalog still loading
+    /// must not take a saved level.
+    private func newSessionChipOffer(forModel model: String?) -> ModelOffer {
+        let folder = composerFolder
+        switch sessionAgentKey {
+        case "kimi":
+            return ModelOffer(efforts: KimiCatalog.shared.effortLevels(forModel: model),
+                              fastMode: false)
+        case "codex":
+            let codex = CodexCatalog.shared
+            let slug = (model?.isEmpty == false) ? model : codex.defaultModel(forFolder: folder.path)
+            return ModelOffer(efforts: codex.effortLevels(forModel: slug),
+                              tiers: codex.speedTiers(forModel: model, folder: folder.path)?
+                                .tiers.map(\.id))
+        case "claude_code":
+            let caps = ClaudeCapabilities.shared
+            let id = config.resolvedClaudeModelId(
+                picked: model, configuredDefault: ClaudeModelCatalog.configuredDefaultModel(cwd: folder))
+            // Claude offers fast mode on Anthropic's own API alone.
+            let cloud = ClaudeModelCatalog.childEnvironmentFacts().provider != nil
+            return ModelOffer(efforts: caps.effortLevels(forModelId: id),
+                              fastMode: cloud ? false : caps.fastModeSupported(forModelId: id))
+        default:
+            // An agent this app has no code for offers no effort and no
+            // speed: a kept level or switch is dropped, not carried over.
+            return ModelOffer(efforts: [], fastMode: false)
+        }
+    }
+
+    /// The new session on screen kept its id and changed its key: its
+    /// custom group was renamed, and what was kept for it moved with the
+    /// name (`AppState.renameNewSessionGroup`). The page takes the new key
+    /// and carries nothing. A switch to another new session changes the
+    /// id too, and is `stashAndRestoreComposerDraft`'s.
+    private func adoptRenamedPlace(from old: DraftPlaceIdentity?, to new: DraftPlaceIdentity?) {
+        guard let old, let new, old.id == new.id, old.key != new.key,
+              loadedDraftKey == old.key else { return }
+        loadedDraftKey = new.key
+    }
+
     /// Seed the composer's mode / model / effort chips. An existing
     /// session shows its own latest recorded values — every writer
     /// (this app, a terminal, the desktop app) records them in the
     /// JSONL — so reopening picks up exactly where it left off.
-    /// Drafts fall back to the sticky global launch prefs.
+    /// A new session shows its own chips once its first message has gone,
+    /// else what its place starts with, under the chips changed on it there.
     private func seedLaunchOptions() {
         refreshObservedModelNames()
         switch mode {
         case .existing(let id, let url, _, _):
+            // What the thread runs at, whatever its picks say
+            // (`CodexKeptSpeed`). A read that finds no record leaves what
+            // the runner already knows: a new thread's first turn has not
+            // written one when the page flips from its draft.
+            if sessionAgentKey == "codex",
+               case let read = Self.codexSavedSpeed(of: url), read != .unknown {
+                codexSavedSpeed = read
+            }
             // The user's own explicit picks for THIS session win over
             // anything the transcript recorded — an external writer
             // (same session driven from a terminal) records ITS mode
@@ -2173,45 +3261,176 @@ struct AgentSessionView: View {
                 seeded.modelFullId = fullId
             }
             applySeededOptions(seeded)
-        case .draft, .empty:
+        case .draft(let d):
+            refreshNewSessionStart()
+            let start = newSessionStart?.options ?? config.agentLaunchOptions(for: sessionAgentKey)
+            applySeededOptions(d.sentOptions
+                ?? appState.newSessionChipEdits(for: newSessionStoreKey(d))?
+                    .applied(to: start, offer: newSessionChipOffer(forModel:))
+                ?? start)
+        case .empty:
             applySeededOptions(config.agentLaunchOptions(for: sessionAgentKey))
         }
     }
 
-    /// Equality-guarded so the `seedingOptions` flag is armed only when
-    /// `onChange` will actually fire to consume it — arming it on a
-    /// no-op assignment would swallow the user's next real edit.
+    /// The speed a codex rollout says its thread saved (`CodexSessionScanner
+    /// .savedServiceTier`), as the composer reads it.
+    private static func codexSavedSpeed(of url: URL) -> CodexKeptSpeed.Saved {
+        let saved = CodexSessionScanner.savedServiceTier(of: url)
+        return saved.found ? .tier(saved.tier) : .unknown
+    }
+
+    /// SipAI's own update of the chips: what a session recorded, the
+    /// sticky picks, a card's mode switch. Written to the state alone —
+    /// it is not the user's pick and saves nothing; the callers that
+    /// must also save do so themselves, on purpose.
     private func applySeededOptions(_ options: AgentLaunchOptions) {
+        var options = options
+        // A turn in flight declines or shows questions as it was sent — a
+        // scheduled run as its task says — and the chip says what the turn
+        // does, whatever the saved pick is. Only while it runs:
+        // `restoreNonStopPick` puts the saved pick back when it ends.
+        if let runner = currentRunner, runner.status.isRunning {
+            options.nonStop = runner.nonStop
+        }
         guard options != launchOptions else { return }
-        seedingOptions = true
         launchOptions = options
     }
 
-    /// An approved plan ends plan mode for THIS session. Claude leaves
-    /// plan mode inside the turn — to accept-edits when the card asked
-    /// for it, else to the mode it was in before planning, Default for a
-    /// session launched on Plan (both measured) — but the chip still
-    /// says Plan, and the next turn would be launched with
-    /// `--permission-mode plan` and plan again ("you MUST NOT make any
-    /// edits"), undoing the approval. So the chip moves to the mode
-    /// claude is now in.
+    /// The composer's chips write through this binding — the only place a
+    /// change of mode, model, effort or switch is the user's own pick,
+    /// and so the only one that saves it.
     ///
-    /// Only when the chip is what put the session in plan mode: a plan
-    /// claude entered on its own (EnterPlanMode) ends inside its turn,
-    /// and the chip's mode resumes on the next. Written for this session
-    /// alone — never the agent's sticky pick for new sessions, so a user
-    /// who starts every session on Plan keeps doing so. A draft carries
-    /// it into its session with the rest of its picks
-    /// (`handleSessionIdDiscovered`).
-    private func leavePlanMode(to target: String?) {
-        guard let target, !target.isEmpty,
-              !launchOptions.chatOnly,
-              launchOptions.permissionMode == "plan" else { return }
-        var next = launchOptions
-        next.permissionMode = target
-        applySeededOptions(next)
+    /// Telling the user's picks from SipAI's own updates AFTER the fact
+    /// cannot be done: an `onChange` on `launchOptions` sees both, and a
+    /// flag set by each update of SipAI's miscounts — SwiftUI may deliver
+    /// two of them as two changes (a new session's page opened again
+    /// while its first message runs: the model refine, then the flip's
+    /// seed), and the second would be saved as the user's pick, for the
+    /// session and as the default for new sessions; or merge two into one
+    /// change, and a count would then swallow the user's next pick.
+    private var userPicks: Binding<AgentLaunchOptions> {
+        Binding(
+            get: { launchOptions },
+            set: { picked in
+                let old = launchOptions
+                launchOptions = picked
+                guard picked != old else { return }
+                saveUserPick(picked, replacing: old)
+            })
+    }
+
+    /// Save a pick the user made on the chips, and let the turn in flight
+    /// know what it needs to.
+    private func saveUserPick(_ new: AgentLaunchOptions, replacing old: AgentLaunchOptions) {
+        // What is saved is the user's own pick: with a turn running,
+        // the Non-stop switch shows THAT turn's setting, which is the
+        // pick only when this edit flipped it (`ownPick`).
+        let picked = ownPick(new, nonStopFlipped: old.nonStop != new.nonStop)
+        // Per AGENT. The two CLIs share this picker but not its
+        // vocabulary — "bypassPermissions" is meaningless to codex
+        // and "workspace-write" to claude — so one sticky slot
+        // would hand each agent the other's last choice.
+        config.setAgentLaunchOptions(picked, for: sessionAgentKey)
         if case .existing(let id, _, _, _) = mode {
-            config.setAgentSessionLaunchOptions(next, for: id)
+            config.setAgentSessionLaunchOptions(picked, for: id)
+        }
+        keepNewSessionPick(from: old, to: picked)
+        // Non-stop also reaches the turn in flight: turned on, a
+        // question already on screen is declined and the turn goes on.
+        if old.nonStop != new.nonStop {
+            currentRunner?.setNonStop(new.nonStop)
+        }
+        // A codex chip moved to Plan: the mode it left is the one the
+        // session was in before it planned — what "Implement this
+        // plan?" may offer Full Access on.
+        if new.permissionMode == AgentAskingMode.codexPlan,
+           old.permissionMode != AgentAskingMode.codexPlan {
+            currentRunner?.noteCodexChipLeftForPlan(
+                previous: old.chatOnly ? nil : old.permissionMode)
+        }
+    }
+
+    /// Put the Non-stop switch back on the user's own pick — this
+    /// session's, else the agent's sticky one — through the seeding path,
+    /// which shows a running turn's own setting over it and writes
+    /// nothing back. Without it a Non-stop scheduled run watched while it
+    /// ran would leave its Non-stop on the chip, and the first message
+    /// typed into that session afterwards would be sent, and saved,
+    /// Non-stop.
+    private func restoreNonStopPick() {
+        var next = launchOptions
+        next.nonStop = savedNonStopPick()
+        applySeededOptions(next)
+    }
+
+    /// The user's own Non-stop pick: this session's as config has it — a
+    /// new session's own once its first message has gone — else the
+    /// agent's sticky one.
+    private func savedNonStopPick() -> Bool {
+        if case .existing(let id, _, _, _) = mode,
+           let mine = config.agentSessionLaunchOptions(for: id) {
+            return mine.nonStop
+        }
+        // A new session whose first message has gone keeps the pick that
+        // message went out with — its place may have started it on a
+        // setup other than the agent's sticky one.
+        if case .draft(let d) = mode, let sent = d.sentOptions {
+            return sent.nonStop
+        }
+        return config.agentLaunchOptions(for: sessionAgentKey).nonStop
+    }
+
+    /// `options` as the user's own pick, fit to save. With a turn running
+    /// the Non-stop switch shows THAT turn's setting
+    /// (`applySeededOptions`), which is the pick only when the edit
+    /// being saved flipped it: an edit of another chip, or a card's mode
+    /// switch, made while a scheduled run is watched would otherwise save
+    /// the run's Non-stop as the session's — and as the agent's sticky
+    /// pick, so every later new session would start Non-stop.
+    private func ownPick(_ options: AgentLaunchOptions,
+                         nonStopFlipped: Bool = false) -> AgentLaunchOptions {
+        guard !nonStopFlipped, currentRunner?.status.isRunning == true else { return options }
+        var picked = options
+        picked.nonStop = savedNonStopPick()
+        return picked
+    }
+
+    /// A card switched claude to another permission mode, and the chip
+    /// follows. A plan card's approval names the mode the session carries
+    /// on in ("Yes, and use auto mode", "Yes, auto-accept edits", …), and
+    /// "Allow Always" on an edit switches it to accept-edits; claude makes
+    /// the switch inside the turn, but every LATER turn is launched from
+    /// the chip. Left where it was, a chip still on Plan would launch the
+    /// next turn with `--permission-mode plan` and plan again ("you MUST
+    /// NOT make any edits"), undoing the approval, and a chip on Manual
+    /// would go back to asking about every edit the user had just
+    /// allowed for the session.
+    ///
+    /// Whatever the chip said before: the user chose the mode on the
+    /// card, for the session. Written for this session alone — never the
+    /// agent's sticky pick for new sessions, so a user who starts every
+    /// session on Plan keeps doing so. A draft carries it into its
+    /// session with the rest of its picks (`handleSessionIdDiscovered`).
+    ///
+    /// One exception to "whatever the chip said": an answer that only
+    /// ENDS the planning moves a chip that is on Plan, to Default, and no
+    /// other (`AgentAskingMode.adoption`). `target` is a mode as the chip
+    /// spells it, or `AgentAskingMode.adoptDefault` /
+    /// `adoptLeavingPlan`.
+    private func adoptSessionMode(_ target: String) {
+        guard !launchOptions.chatOnly,
+              case .set(let mode) = AgentAskingMode.adoption(of: target,
+                                                             from: launchOptions.permissionMode),
+              launchOptions.permissionMode != mode
+        else { return }
+        var next = launchOptions
+        next.permissionMode = mode
+        applySeededOptions(next)
+        if case .existing(let id, _, _, _) = self.mode {
+            // A card is answered mid-turn: the switch's overlay is not
+            // the pick (`ownPick`).
+            config.setAgentSessionLaunchOptions(ownPick(next), for: id)
         }
     }
 
@@ -2244,8 +3463,15 @@ struct AgentSessionView: View {
             config.setAgentSessionDisplayName(name, for: id)
         }
         // Carry the composer picks the draft was sent with — they are
-        // the user's explicit choices for this new session.
+        // the user's explicit choices for this new session — and the
+        // skill chip's. The manager has filed both under the id already
+        // (`AgentManager.migrateRunner`, kept in step by `noteSentDraft`),
+        // for a page that moves on before the session is named; here they
+        // are written as this page has them at the switch.
         config.setAgentSessionLaunchOptions(launchOptions, for: id)
+        if let picks = appState.pendingClaudeSessionDraft?.skillPicks {
+            config.setAgentSessionSkillPicks(picks, for: id)
+        }
         // Also persist last-cwd so the next new-session draft starts
         // there — under the DRAFT's agent, or a codex send would move
         // the claude section's new-session folder.
@@ -2264,12 +3490,24 @@ struct AgentSessionView: View {
 
     // MARK: - Historical JSONL loading
 
-    private func reload() {
+    /// - Parameter migratedFromDraft: this is the draft→session flip of the
+    ///   conversation already on screen, not a session being opened.
+    private func reload(migratedFromDraft: Bool = false) {
+        // The chosen skills' paths and states, read before the next send
+        // needs them (codex's mentions name a skill by its exact path) —
+        // and a subfolder's, for a pick that is none of the folder's own.
+        if showsSkillChip, !skillPicks.isEmpty {
+            SkillCatalog.shared.ensurePicksReadable(skillPicks, agent: sessionAgentKey,
+                                                    folder: composerFolder)
+        }
         // An open edit belongs to the transcript it was opened in. This
         // also covers the branch flow's own routing flip, where the edit
         // has already been closed — a second clear costs nothing.
         editingRowId = nil
         editDraft = ""
+        // So does the review picker — except over the draft→session flip,
+        // which is the same conversation.
+        if !migratedFromDraft { reviewPickerOpen = false }
         // So does a find: a query left standing would count matches in
         // a transcript nobody asked it about, and the widened-scope
         // flags describe the file being left behind. Arrival from a
@@ -2281,6 +3519,7 @@ struct AgentSessionView: View {
         historyPartial = false
         historyTruncationNote = nil
         inheritedHistoryBytes = 0
+        historyReadReachedStart = nil
         wideningHistory = false
         guard case .existing(_, let url, _, _) = mode else {
             // Draft mode: nothing on disk yet. RunnerStreamView
@@ -2293,11 +3532,14 @@ struct AgentSessionView: View {
             seededContextModel = nil
             liveContextTokens = 0
             liveContextWindow = 0
+            codexSavedSpeed = .unknown
             liveContextModel = ""
             seededTurnDuration = 0
             liveTurnDuration = nil
+            livePause = TurnPause()
             liveResolvedModel = nil
             liveFastModeReport = ClaudeFastModeReport()
+            liveCodexSpeedReport = CodexSpeedReport()
             seededCallSpeed = nil
             externalTurnStart = nil
             externalStoppable = false
@@ -2312,14 +3554,26 @@ struct AgentSessionView: View {
         // ours in flight.
         if case .existing(let id, _, _, _) = mode, sessionAgentKey == "kimi" {
             agents.healKimiToolPolicies(sessionId: id)
+            agents.healKimiRuntimeBindings(sessionId: id)
         }
-        // Draft→existing migration mid-first-turn: the JSONL already
-        // holds the first user record the runner is rendering live, so
-        // a disk read here duplicated the first bubble. There is no
-        // history a fresh draft could be missing — keep the (already
-        // empty) list and let the stream carry the whole session.
-        if let runner = currentRunner, runner.status.isRunning,
-           historicalItems.isEmpty {
+        // The draft→session flip of the conversation already on screen
+        // reads nothing (`TranscriptSeam.readsTranscript`): the live
+        // buffer holds the whole session, mid-first-turn or with that
+        // turn already over — the transcript is found a beat after its
+        // id, and a turn that fails, or is answered without the model, is
+        // over in tens of milliseconds. A read would REPLACE the live
+        // rows with the file's, and what only the buffer holds would go
+        // with them: the error row of a turn that failed, an answer the
+        // agent gave without recording it (kimi's own slash commands).
+        // Every other reload reads — an empty page with a turn running
+        // included: this view is rebuilt after every detour, a draft or a
+        // task page leaves it empty as well, and the buffer may hold no
+        // more than the running turn.
+        if let runner = currentRunner,
+           !TranscriptSeam.readsTranscript(draftFlip: migratedFromDraft,
+                                           historyOnScreen: !historicalItems.isEmpty,
+                                           turnRunning: runner.status.isRunning,
+                                           liveRows: runner.events.count) {
             isLoading = false
             return
         }
@@ -2331,14 +3585,17 @@ struct AgentSessionView: View {
         // for the duration chip and the external-turn mirrors.
         liveContextTokens = 0
         liveContextWindow = 0
+        codexSavedSpeed = .unknown
         liveContextModel = ""
         liveTurnDuration = nil
+        livePause = TurnPause()
         // Cleared with them: the incoming runner replays its own value
         // within a frame, and a mirror still holding the OUTGOING
         // session's pair would suppress an identical observation here
         // as though it had already been seen.
         liveResolvedModel = nil
         liveFastModeReport = ClaudeFastModeReport()
+        liveCodexSpeedReport = CodexSpeedReport()
         externalTurnStart = nil
         externalStoppable = false
 
@@ -2348,13 +3605,21 @@ struct AgentSessionView: View {
         // when it lands and pull to the new end.
         if case .existing(let sid, _, _, _) = mode,
            let cached = historyCache.entry(for: sid) {
+            // A read made with compact view on kept every turn's thoughts;
+            // with it off since, only a Chat only turn's draw. Put on the
+            // page as it was, the rest would sit in the rows unseen until
+            // the fresh read below lands.
+            let items = cached.allThoughts && !config.display.agentCompactView
+                ? AgentSessionHistoryItem.keepingThoughts(cached.items,
+                                                          inTurns: chatOnlyTurnHandles)
+                : cached.items
             // Re-warm the markdown cache SYNCHRONOUSLY for the rows
             // the first frame renders — the parse cache is shared and
             // bounded, so another session's rows may have evicted
             // these since the last visit, and this path skips the
             // loader (whose prewarm covers first visits).
-            Self.prewarmMarkdown(cached.items, tail: 30)
-            historicalItems = trimmedForInFlight(cached.items)
+            Self.prewarmMarkdown(items, tail: 30)
+            adoptHistory(items, fromFile: false)
             seededContextTokens = cached.contextTokens
             seededContextWindow = cached.contextWindow
             seededContextModel = cached.contextModel
@@ -2368,7 +3633,6 @@ struct AgentSessionView: View {
             // outgoing session's rows. Say so explicitly rather than
             // relying on the swap's own geometry to imply it.
             repositionNonce &+= 1
-            currentRunner?.clearEvents()
             let stat = Self.fileStat(url)
             // "Show earlier" needs the partial verdict from the first
             // frame, not from the find bar opening. Cache entries are
@@ -2376,13 +3640,16 @@ struct AgentSessionView: View {
             // `reload()` reset the budget a moment ago, so the inputs
             // agree with what this cache entry was read with.
             inheritedHistoryBytes = cached.inheritedBytes
-            updateHistoryScope(items: cached.items,
+            historyReadReachedStart = cached.readReachedStart
+            updateHistoryScope(items: items,
                                fileSize: stat?.size ?? 0)
             // An unchanged file is not enough: a Chat only turn recorded
-            // since the read had its thoughts left out of it.
+            // since the read had its thoughts left out of it, and a read
+            // made before compact view was switched kept the wrong ones.
             if let stat,
                stat.size == cached.fileSize, stat.mtime == cached.fileMtime,
-               cached.chatOnlyTurns == chatOnlyTurnHandles {
+               cached.chatOnlyTurns == chatOnlyTurnHandles,
+               cached.allThoughts == config.display.agentCompactView {
                 return
             }
             startHistoryLoad(url: url, viaSpinner: false)
@@ -2407,21 +3674,28 @@ struct AgentSessionView: View {
     private func startHistoryLoad(url: URL, viaSpinner: Bool) {
         let agentKey = sessionAgentKey
         // Read on the MainActor, before the detached read: the readers
-        // keep thoughts only for a session that has Chat only turns, and
-        // `keepingThoughts` then drops every one outside those turns —
-        // what is cached is exactly what draws.
+        // keep every thought while compact view is on, and otherwise only
+        // for a session that has Chat only turns, where `keepingThoughts`
+        // then drops every one outside those turns — what is cached is
+        // exactly what draws.
         let chatOnlyTurns = chatOnlyTurnHandles
-        let withThoughts = !chatOnlyTurns.isEmpty
+        let allThoughts = config.display.agentCompactView
+        let withThoughts = allThoughts || !chatOnlyTurns.isEmpty
+        // Kimi's reader names the agent in a failed turn's row when kimi
+        // gave no words for it, and only the view knows the label.
+        let wordlessFailure = AgentAskingMode.wordlessFailureMessage(agentName: sessionAgentName)
         // Stat BEFORE the read: an append racing the read makes the
         // cache look stale next open — a refresh, never a miss.
         let stat = Self.fileStat(url)
+        let turnAtRead = currentRunner?.status.runningSince
         Task {
             let ownSize = stat?.size ?? 0
             let loaded = await Task.detached(priority: .userInitiated)
             { () -> (items: [AgentSessionHistoryItem], contextTokens: Int,
                      contextWindow: Int, contextModel: String?,
                      turnDuration: Double, commands: [String],
-                     inheritedBytes: UInt64, lastCallSpeed: String?) in
+                     inheritedBytes: UInt64, lastCallSpeed: String?,
+                     reachedStart: Bool?) in
                 if agentKey == "codex" {
                     // No turn duration: codex reports no wall-clock time
                     // anywhere, in the stream or the rollout. The context
@@ -2429,10 +3703,10 @@ struct AgentSessionView: View {
                     // per API call — and a hardcoded 0 here would keep
                     // the composer's context chip from ever appearing on
                     // a codex session (the chip hides itself at 0).
-                    let items = Self.keepingChatOnlyThoughts(
+                    let items = Self.keepingThoughts(
                         CodexSessionScanner.readHistory(of: url,
                                                         includeThinking: withThoughts),
-                        in: chatOnlyTurns)
+                        all: allThoughts, in: chatOnlyTurns)
                     Self.prewarmMarkdown(items)
                     let info = CodexSessionScanner.lastContextInfo(of: url)
                     // A branch's history reaches into its parent; what
@@ -2440,7 +3714,7 @@ struct AgentSessionView: View {
                     // partiality verdict has to count.
                     let extent = CodexSessionScanner.historyExtent(of: url)
                     let inherited = extent > ownSize ? extent - ownSize : 0
-                    return (items, info.tokens, info.window, nil, 0, [], inherited, nil)
+                    return (items, info.tokens, info.window, nil, 0, [], inherited, nil, nil)
                 }
                 if agentKey == "kimi" {
                     // No derived "Interrupted" marker: the two liveness
@@ -2456,22 +3730,27 @@ struct AgentSessionView: View {
                     // documents: the chip hides itself at 0, so a
                     // wrong 0 is indistinguishable from a fresh session
                     // and nothing says why.
-                    let items = Self.keepingChatOnlyThoughts(
+                    let items = Self.keepingThoughts(
                         KimiSessionScanner.readHistory(of: url,
-                                                       includeThinking: withThoughts),
-                        in: chatOnlyTurns)
+                                                       includeThinking: withThoughts,
+                                                       wordlessFailure: wordlessFailure),
+                        all: allThoughts, in: chatOnlyTurns)
                     Self.prewarmMarkdown(items)
                     // Tokens travel with the MODEL, not a window: the
                     // window is a config fact (`max_context_size`) and
                     // the catalog holding it is MainActor state, so
                     // the join happens after this task lands.
                     let usage = KimiSessionScanner.lastContextUsage(of: url)
-                    return (items, usage.tokens, 0, usage.model, 0, [], 0, nil)
+                    return (items, usage.tokens, 0, usage.model, 0, [], 0, nil, nil)
                 }
-                var items = Self.keepingChatOnlyThoughts(
-                    AgentSessionScanner.readHistory(of: url,
-                                                    includeThinking: withThoughts),
-                    in: chatOnlyTurns)
+                // A transcript no reader is named for is read by none: an
+                // empty page, never another agent's reader on its file.
+                guard agentKey == "claude_code" else {
+                    return ([], 0, 0, nil, 0, [], 0, nil, nil)
+                }
+                let reading = AgentSessionScanner.readHistoryReaching(
+                    of: url, includeThinking: withThoughts)
+                var items = Self.keepingThoughts(reading.items, all: allThoughts, in: chatOnlyTurns)
                 // Kill/quit residue: the newest turn's records simply
                 // stop, with no turn-end marker, and nothing is still
                 // writing. Say "interrupted" explicitly instead of
@@ -2519,10 +3798,17 @@ struct AgentSessionView: View {
                         // Off-main by construction — this is the only
                         // place the transcript is read for the clock.
                         AgentSessionScanner.lastTurnDurationSeconds(of: url),
-                        commands, 0, usage.speed)
+                        commands, 0, usage.speed, reading.reachedStart)
             }.value
             guard case .existing(let sid, let current, _, _) = mode, current == url else {
                 // The user switched away mid-load.
+                return
+            }
+            // The turn this read began under has ended since: the read may
+            // stop short of its end, which the live buffer drew.
+            if TranscriptSeam.readIsStale(turnStartAtRead: turnAtRead,
+                                          turnStartNow: currentRunner?.status.runningSince) {
+                startHistoryLoad(url: url, viaSpinner: viaSpinner)
                 return
             }
             // Kimi's window joins here: the wire named the model, the
@@ -2531,7 +3817,7 @@ struct AgentSessionView: View {
             // detached read could not touch. `ensureLoaded()` is one
             // stat when nothing changed.
             var window = loaded.contextWindow
-            if window == 0, let model = loaded.contextModel {
+            if window == 0, agentKey == "kimi", let model = loaded.contextModel {
                 KimiCatalog.shared.ensureLoaded()
                 if let w = KimiCatalog.shared.maxContextSize(forModel: model),
                    w > 0 {
@@ -2550,16 +3836,19 @@ struct AgentSessionView: View {
                     fileSize: stat?.size ?? 0,
                     fileMtime: stat?.mtime ?? .distantPast,
                     inheritedBytes: loaded.inheritedBytes,
-                    chatOnlyTurns: chatOnlyTurns
+                    readReachedStart: loaded.reachedStart,
+                    chatOnlyTurns: chatOnlyTurns,
+                    allThoughts: allThoughts
                 ),
                 for: sid
             )
             inheritedHistoryBytes = loaded.inheritedBytes
-            historicalItems = trimmedForInFlight(loaded.items)
+            historyReadReachedStart = loaded.reachedStart
+            adoptHistory(loaded.items, fromFile: true)
             // This read used the DEFAULT budget whatever the view held
-            // before (a turn-end reload of a widened transcript lands
-            // here too), so the scope verdict is judged against that
-            // budget, not a stale wider one.
+            // before (a reload of a widened transcript lands here too),
+            // so the scope verdict is judged against that budget, not a
+            // stale wider one.
             historyLoadedBudget = AgentSessionScanner.historyByteBudget
             historyTurnCapApplies = true
             updateHistoryScope(items: loaded.items,
@@ -2585,49 +3874,29 @@ struct AgentSessionView: View {
             } else {
                 repositionNonce &+= 1
             }
-            // The freshly-read history now covers every finished turn,
-            // including ones this runner streamed live earlier — drop
-            // the live buffer or those turns render twice. No-op while
-            // a turn is running (clearEvents refuses mid-turn).
-            currentRunner?.clearEvents()
         }
     }
 
-    /// See the in-flight-turn overlap note: the JSONL already holds a
-    /// running turn's records, but the live event buffer owns rendering
-    /// that turn (`clearEvents()` refuses mid-turn) — keeping both
-    /// showed the user's message and the turn's partial records TWICE
-    /// until the turn ended. Cut history at the in-flight turn's start
-    /// — but ONLY while the live buffer still holds the turn's
-    /// `.userMessage` head: the cap trims old events from the front,
-    /// and cutting past a trimmed buffer EATS the turn's middle.
-    private func trimmedForInFlight(
-        _ loaded: [AgentSessionHistoryItem]
-    ) -> [AgentSessionHistoryItem] {
-        guard let runner = currentRunner, runner.status.isRunning,
-              let sent = runner.inFlightUserText,
-              runner.events.contains(where: { event in
-                  if case .userMessage(let t) = event.kind { return t == sent }
-                  return false
-              })
-        else { return loaded }
-        // The record's text has been through its reader's cleaner, which
-        // also sweeps bare `<…>` tags (`cleanUserText`) — so a message
-        // spelling `Vec<String>` matches its record only once the sent
-        // text has been through the same cleaner. Both spellings match.
-        let spellings: Set<String> = [
-            sent,
-            AgentSessionScanner.cleanUserText(sent),
-            CodexSessionScanner.strippedTaskMarker(sent),
-        ]
-        guard let cut = loaded.lastIndex(where: { item in
-                  if case .userText(let t) = item.kind { return spellings.contains(t) }
-                  return false
-              })
-        else { return loaded }
-        var items = loaded
-        items.removeSubrange(cut...)
-        return items
+    /// Put a read of the transcript on the page, meeting the live buffer
+    /// below it exactly (`TranscriptSeam`): the read cut where the
+    /// running turn begins, and the buffer left with what the read does
+    /// not hold — nothing with no turn running, the running turn alone
+    /// once a read of the file has reached its start. Every read lands
+    /// here: the history cache's copy (`fromFile: false`, which may
+    /// predate turns the buffer holds), a read of the file, and "Show
+    /// earlier".
+    private func adoptHistory(_ read: [AgentSessionHistoryItem], fromFile: Bool) {
+        let runner = currentRunner
+        let cut = TranscriptSeam.cut(
+            read, runningTurnText: runner?.runningTurnStart != nil ? runner?.inFlightUserText : nil)
+        historicalItems = cut.items
+        switch TranscriptSeam.liveBuffer(turnRunning: runner?.status.isRunning ?? false,
+                                         readFromFile: fromFile,
+                                         readHeldRunningTurn: cut.heldRunningTurn) {
+        case .nothing: runner?.clearEvents()
+        case .runningTurn: runner?.dropTurnsBeforeRunningTurn()
+        case .everything: break
+        }
     }
 
     /// Feed the newest renderable texts through the markdown parser so
@@ -2654,45 +3923,41 @@ struct AgentSessionView: View {
         MarkdownRenderer.prewarm(texts)
     }
 
-    /// `AgentSessionHistoryItem.keepingThoughts` for a read that asked
-    /// for thoughts only when the session has Chat only turns — a no-op
-    /// otherwise, so a session without one pays nothing. Nonisolated for
-    /// the detached readers.
-    nonisolated private static func keepingChatOnlyThoughts(
-        _ items: [AgentSessionHistoryItem], in turns: Set<String>)
+    /// The thoughts a read keeps: every one while compact view is on
+    /// (`all`), else `AgentSessionHistoryItem.keepingThoughts` for a read
+    /// that asked for thoughts only because the session has Chat only
+    /// turns — a no-op for one that has none, so it pays nothing.
+    /// Nonisolated for the detached readers.
+    nonisolated private static func keepingThoughts(
+        _ items: [AgentSessionHistoryItem], all: Bool, in turns: Set<String>)
     -> [AgentSessionHistoryItem] {
-        turns.isEmpty ? items
+        all || turns.isEmpty ? items
             : AgentSessionHistoryItem.keepingThoughts(items, inTurns: turns)
     }
 
     /// Nonisolated: the history loader stats the file from its
     /// detached read task (the marker's quiet-window check).
+    ///
+    /// `size` is the size of the TEXT — what the partiality verdict
+    /// weighs a bounded read against: a compressed codex rollout's is
+    /// what it decodes to, read off the file whichever form codex has
+    /// left it in (`SessionFileCompression`).
     nonisolated private static func fileStat(_ url: URL)
     -> (size: UInt64, mtime: Date)? {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = (attrs[.size] as? NSNumber)?.uint64Value,
-              let mtime = attrs[.modificationDate] as? Date
+        var file = url
+        if SessionFileCompression.isCompressed(url),
+           FileManager.default.fileExists(atPath: SessionFileCompression.unpacked(url).path) {
+            file = SessionFileCompression.unpacked(url)
+        } else if !FileManager.default.fileExists(atPath: url.path) {
+            file = SessionFileCompression.packed(url)
+        }
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: file.path),
+              let mtime = attrs[.modificationDate] as? Date,
+              let size = SessionFileCompression.isCompressed(file)
+                ? AgentSessionScanner.contentSize(of: file)
+                : (attrs[.size] as? NSNumber)?.uint64Value
         else { return nil }
         return (size, mtime)
-    }
-}
-
-// MARK: - Approval button hover
-
-/// Hover feedback for the approval card's four verdict buttons. They
-/// keep their system bezels (one of them is `.borderedProminent` — a
-/// custom style would mean re-drawing that), so the hover cue is a
-/// slight lift + brighten on top of the bezel rather than a background
-/// wash behind it, which reads as a halo around a bezel's edges.
-private struct ApprovalButtonHover: ViewModifier {
-    @State private var hovered = false
-
-    func body(content: Content) -> some View {
-        content
-            .scaleEffect(hovered ? 1.04 : 1)
-            .brightness(hovered ? 0.05 : 0)
-            .animation(.easeOut(duration: 0.12), value: hovered)
-            .onHover { hovered = $0 }
     }
 }
 
@@ -2702,6 +3967,12 @@ private struct ApprovalButtonHover: ViewModifier {
 // `Utilities/TranscriptFollow.swift` — one object, shared with
 // `ChatView`.
 
+/// The held row's distance from the newest row — see
+/// `RunnerStreamView.heldAnchor` for why it is an object and not `@State`.
+private final class HeldRowAnchor {
+    var fromEnd: Int? = nil
+}
+
 /// Observes one AgentRunner and renders its live events below the
 /// JSONL-derived historical turns. Split out as an @ObservedObject
 /// subview so SwiftUI re-renders on event-buffer mutations without
@@ -2710,6 +3981,8 @@ private struct RunnerStreamView: View {
     @ObservedObject var runner: AgentRunner
     @EnvironmentObject var mcpBridge: MCPBridge
     @EnvironmentObject var config: ConfigManager
+    /// Read at key time only, for `ApprovalCardKeys.overlayHasKeys`.
+    @EnvironmentObject var appState: AppState
 
     /// This transcript's agent under the user's own label — the runner
     /// knows which CLI it drives, so nothing here has to be told.
@@ -2767,8 +4040,8 @@ private struct RunnerStreamView: View {
     /// freshly-minted UUIDs.
     @Binding var expandedToolResults: Set<UUID>
 
-    /// Which Chat only activity lines are open — the parent's state, for
-    /// the reason `expandedToolResults` is.
+    /// Which activity lines are open — the parent's state, for the reason
+    /// `expandedToolResults` is.
     @Binding var expandedActivityLines: Set<UUID>
 
     /// The handles of this session's turns that ran in Chat only
@@ -2776,6 +4049,11 @@ private struct RunnerStreamView: View {
     /// row carries one draws its thoughts and web lookups as one line; a
     /// live turn says so itself (`StreamEvent.chatOnlyTurn`).
     let chatOnlyTurns: Set<String>
+
+    /// Compact view (Settings → Display, the toolbar's window, View →
+    /// Agent Session Compact View): every turn's run of thoughts and tool
+    /// calls drawn as one line, the agent's name once per answer.
+    let compact: Bool
 
     /// In draft mode (no history, no events yet) this is shown to
     /// explain the target cwd.
@@ -2819,17 +4097,30 @@ private struct RunnerStreamView: View {
     @Binding var editingRowId: UUID?
     @Binding var editDraft: String
     let branching: Bool
-    let onBeginEdit: (UUID, String) -> Void
+    /// `(the row, its text, the skills it names under it)`.
+    let onBeginEdit: (UUID, String, [String]) -> Void
     /// `(record uuid or nil for a live row, the original text, the
     /// edited text, and — for a live row, whose record is resolved by a
     /// newest-first text match — how many newer live rows say the same
     /// thing, so the pencil on the older of two identical rows cuts at
     /// that one)`.
     let onCreateBranch: (String?, String, String, Int) -> Void
+    /// Send: `(the row, then onCreateBranch's four)` — the session goes
+    /// back to the row and the edit is sent there
+    /// (`AgentSessionView.editSessionInPlace`).
+    let onSendInPlace: (UUID, String?, String, String, Int) -> Void
+    /// Whether the installed tool can take this session back to a message
+    /// (`AgentSessionRewind.support`).
+    let rewindSupport: AgentSessionRewind.Support
     let onCancelEdit: () -> Void
-    /// A plan card was approved; the argument is the mode claude is in
-    /// now (`AgentSessionView.leavePlanMode(to:)` moves the chip).
-    let onPlanApproved: (String?) -> Void
+    /// A card switched claude to another permission mode — a plan
+    /// approved into one, an edit allowed for good; the argument is that
+    /// mode as the chip spells it (`AgentSessionView.adoptSessionMode`).
+    let onModeAdopted: (String) -> Void
+    /// "Yes, implement in …" on the card a codex Plan turn ends with; the
+    /// argument is the mode it names, as the chip spells it
+    /// (`AgentSessionView.implementProposedPlan`).
+    let onImplementPlan: (String) -> Void
 
     init(runner: AgentRunner,
          historicalItems: [AgentSessionHistoryItem],
@@ -2841,6 +4132,7 @@ private struct RunnerStreamView: View {
          expandedToolResults: Binding<Set<UUID>>,
          expandedActivityLines: Binding<Set<UUID>>,
          chatOnlyTurns: Set<String>,
+         compact: Bool,
          draftCwd: URL?,
          draftCustomGroup: String?,
          emptySessionCommands: [String],
@@ -2851,10 +4143,13 @@ private struct RunnerStreamView: View {
          editingRowId: Binding<UUID?>,
          editDraft: Binding<String>,
          branching: Bool,
-         onBeginEdit: @escaping (UUID, String) -> Void,
+         onBeginEdit: @escaping (UUID, String, [String]) -> Void,
          onCreateBranch: @escaping (String?, String, String, Int) -> Void,
+         onSendInPlace: @escaping (UUID, String?, String, String, Int) -> Void,
+         rewindSupport: AgentSessionRewind.Support,
          onCancelEdit: @escaping () -> Void,
-         onPlanApproved: @escaping (String?) -> Void) {
+         onModeAdopted: @escaping (String) -> Void,
+         onImplementPlan: @escaping (String) -> Void) {
         self.runner = runner
         self.historicalItems = historicalItems
         self.isLoadingHistory = isLoadingHistory
@@ -2865,6 +4160,7 @@ private struct RunnerStreamView: View {
         self._expandedToolResults = expandedToolResults
         self._expandedActivityLines = expandedActivityLines
         self.chatOnlyTurns = chatOnlyTurns
+        self.compact = compact
         self.draftCwd = draftCwd
         self.draftCustomGroup = draftCustomGroup
         self.emptySessionCommands = emptySessionCommands
@@ -2877,8 +4173,11 @@ private struct RunnerStreamView: View {
         self.branching = branching
         self.onBeginEdit = onBeginEdit
         self.onCreateBranch = onCreateBranch
+        self.onSendInPlace = onSendInPlace
+        self.rewindSupport = rewindSupport
         self.onCancelEdit = onCancelEdit
-        self.onPlanApproved = onPlanApproved
+        self.onModeAdopted = onModeAdopted
+        self.onImplementPlan = onImplementPlan
     }
 
     // Nothing in this view is time-based, deliberately — a 1 Hz tick
@@ -2920,9 +4219,7 @@ private struct RunnerStreamView: View {
     /// outcome inline and the standalone result row disappears. Results
     /// whose use isn't in the visible window (history cap) stay
     /// unconsumed and render as orphan chips.
-    private var toolPairing: (byUseId: [String: PairedResult],
-                             consumed: Set<UUID>,
-                             labelled: Set<UUID>) {
+    private var toolPairing: Pairing {
         var knownUses: Set<String> = []
         for item in historicalItems {
             if case .toolUse(let id, _, _) = item.kind { knownUses.insert(id) }
@@ -2951,61 +4248,20 @@ private struct RunnerStreamView: View {
             }
         }
 
-        // Third product of the same walk: which tool chips OPEN the
-        // agent's answer and therefore have to carry the label a text
-        // bubble would have carried.
-        //
-        // `MessageBubble` draws the "Claude Code" header, and only
-        // `.assistantText` / `.userText` rows go through it — so a turn
-        // whose first output is a tool call (very common: the agent
-        // reads a file before saying anything) began with an unattributed
-        // chip. Marked here rather than in the row renderer because a
-        // row cannot see what came before it, and this walk is already
-        // paid for once per render pass.
-        var labelled: Set<UUID> = []
-        var sawAgentRow = false
-        func advance(isUser: Bool, isTool: Bool, id: UUID) {
-            if isUser { sawAgentRow = false; return }
-            if isTool, !sawAgentRow { labelled.insert(id) }
-            sawAgentRow = true
-        }
-        for item in historicalItems {
-            switch item.kind {
-            case .userText: advance(isUser: true, isTool: false, id: item.id)
-            case .assistantText: advance(isUser: false, isTool: false, id: item.id)
-            case .toolUse: advance(isUser: false, isTool: true, id: item.id)
-            // Folded into its own chip, or a rare orphan — neither opens
-            // a block, and neither should end one. Same for the
-            // interrupted and compaction markers: standalone notes, not
-            // blocks, and a compaction mid-turn must not make the next
-            // tool row look like the start of a new answer. A thought is
-            // drawn inside an activity line, whose chips carry no label.
-            case .toolResult, .interrupted, .compaction, .thinking: break
-            }
-        }
-        for event in runner.events {
-            switch event.kind {
-            case .userMessage: advance(isUser: true, isTool: false, id: event.id)
-            case .assistantText: advance(isUser: false, isTool: false, id: event.id)
-            case .toolUse: advance(isUser: false, isTool: true, id: event.id)
-            // systemInit / result / error / toolResult: not block starts.
-            default: break
-            }
-        }
-        return (byUse, consumed, labelled)
+        return (byUse, consumed)
     }
 
     private typealias Pairing = (byUseId: [String: PairedResult],
-                                 consumed: Set<UUID>,
-                                 labelled: Set<UUID>)
+                                 consumed: Set<UUID>)
 
-    // MARK: - Chat only activity lines
+    // MARK: - Activity lines
     //
     // A Chat only turn draws its thoughts and web lookups as ONE line
-    // under the question; `ChatOnlyActivity` holds the rules. The layout
-    // is computed once per render pass over every row this view holds,
-    // like `toolPairing`, and costs nothing for a session with no Chat
-    // only turn in it.
+    // under the question, and with compact view on so does every turn's
+    // run of thoughts and tool calls; `ChatOnlyActivity` holds the rules.
+    // The layout is computed once per render pass over every row this view
+    // holds, like `toolPairing`, and with compact view off costs nothing
+    // for a session with no Chat only turn in it.
 
     /// One member of an activity line: a row from either array.
     private enum ActivityMember: Identifiable {
@@ -3037,64 +4293,195 @@ private struct RunnerStreamView: View {
         /// line and never on its own.
         var lineOfMember: [UUID: UUID] = [:]
 
+        /// A line is still being written. It IS the waiting row then —
+        /// the same spinner, where "Sipping…" would be — so no second one
+        /// is drawn under it (a background task's notice opens no row of
+        /// its own: it is the live line's newest words).
+        var hasLiveLine: Bool { lines.values.contains(where: \.isLive) }
+
         static let empty = ActivityLayout()
+    }
+
+    /// The fold's plan and the rows it leaves drawn, kept for as long as
+    /// the rows are what they were (`activityPlan`). A CLASS in plain
+    /// `@State`, like `HeldRowAnchor`: nothing is drawn from it that the
+    /// rows do not already decide, and as rendered state every pass that
+    /// filled it would re-render the transcript once more.
+    final class ActivityPlanCache {
+        struct Key: Equatable {
+            let historyCount: Int
+            let historyFirst: UUID?, historyLast: UUID?
+            let eventCount: Int
+            let eventFirst: UUID?, eventLast: UUID?
+            let compact: Bool, turnRunning: Bool, answerSettled: Bool
+            let chatOnlyTurns: Set<String>
+            let trimmedHeadChatOnly: Bool
+        }
+        var key: Key?
+        var plan: ChatOnlyActivity.Plan = .empty
+        /// Per row over history + live buffer: whether it is drawn on its
+        /// own at the transcript's top level — a row of its own, or the
+        /// first member of a line (a line counts once, however many rows
+        /// it holds). A result folded into its chip, plumbing and every
+        /// later member of a line draw nothing there. Empty when nothing
+        /// folds.
+        var drawn: [Bool] = []
+
+        /// Nothing folds: no plan, every row as it is.
+        static let none = ActivityPlanCache()
+    }
+
+    /// Whether anything folds at all: compact view, a recorded Chat only
+    /// turn, or a live one (whose message the live buffer may have
+    /// trimmed away). Otherwise every row draws as it always has, and the
+    /// plan is never worked out.
+    private var anythingFolds: Bool {
+        compact || !chatOnlyTurns.isEmpty || runner.trimmedHeadChatOnly
+            || runner.events.contains(where: \.chatOnlyTurn)
+    }
+
+    /// The fold over every row, and which rows it leaves drawn on their
+    /// own, worked out once per state of the rows: the window, the layout,
+    /// the name pass and find each ask, several times a pass.
+    private func activityPlan(pairing given: Pairing? = nil) -> ActivityPlanCache {
+        guard anythingFolds else { return .none }
+        let turnRunning = runner.status.isRunning || runner.externalInProgress
+        let answerSettled = !runner.awaitedBackgroundTasks.isEmpty
+        let key = ActivityPlanCache.Key(
+            historyCount: historicalItems.count,
+            historyFirst: historicalItems.first?.id, historyLast: historicalItems.last?.id,
+            eventCount: runner.events.count,
+            eventFirst: runner.events.first?.id, eventLast: runner.events.last?.id,
+            compact: compact, turnRunning: turnRunning, answerSettled: answerSettled,
+            chatOnlyTurns: chatOnlyTurns, trimmedHeadChatOnly: runner.trimmedHeadChatOnly)
+        if planCache.key == key { return planCache }
+        let pairing = given ?? toolPairing
+        let h = historicalItems.count
+        let rows = activityRows(pairing: pairing)
+        let plan = ChatOnlyActivity.plan(
+            rows, turnRunning: turnRunning,
+            liveStart: ChatOnlyActivity.LiveStart(row: h, chatOnly: runner.trimmedHeadChatOnly),
+            compact: compact, answerSettled: answerSettled)
+        var drawn = [Bool](repeating: true, count: rows.count)
+        for (i, item) in historicalItems.enumerated() {
+            switch item.kind {
+            case .thinking: drawn[i] = false
+            case .toolResult: drawn[i] = !pairing.consumed.contains(item.id)
+            default: break
+            }
+        }
+        for (j, event) in runner.events.enumerated() {
+            switch event.kind {
+            case .thinking, .systemInit, .result: drawn[h + j] = false
+            case .toolResult: drawn[h + j] = !pairing.consumed.contains(event.id)
+            default: break
+            }
+        }
+        for group in plan.groups {
+            for member in group.members.dropFirst() { drawn[member] = false }
+            if let first = group.members.first { drawn[first] = true }
+        }
+        planCache.key = key
+        planCache.plan = plan
+        planCache.drawn = drawn
+        return planCache
+    }
+
+    /// Every row reduced to what the fold reads (`ChatOnlyActivity.Row`).
+    private func activityRows(pairing: Pairing) -> [ChatOnlyActivity.Row] {
+        var rows: [ChatOnlyActivity.Row] = []
+        rows.reserveCapacity(historicalItems.count + runner.events.count)
+        // A compaction's summary is a notice in the user column that the
+        // agent goes on after, inside the same answer — not one that
+        // opens an answer of its own.
+        var afterCompaction = false
+        func toolRow(_ id: String, _ name: String,
+                     _ input: [String: Any]) -> ChatOnlyActivity.Row {
+            // The agent's question with its answer and a plan put to the
+            // user are steps like any other: their cards stand apart while
+            // they wait, and once answered they are in the line.
+            let result = pairing.byUseId[id]
+            return .toolUse(name: name, title: AgentRendering.displayToolName(name),
+                            input: input, resultText: result?.output,
+                            failed: result?.isError ?? false)
+        }
+        func userRow(_ text: String, notice: Bool, sentIntoTurn: Bool, belongsToAnswer: Bool,
+                     chatOnly: @autoclosure () -> Bool) -> ChatOnlyActivity.Row {
+            // A background task reporting back and the user's reply on a
+            // question's card are part of the agent's answer: inside its
+            // line, whichever turn carried them.
+            if belongsToAnswer { return .notice(text) }
+            // The user's own words sent into the running turn, and a
+            // notice the turn took in as it went.
+            if sentIntoTurn { return notice ? .notice(text) : .split }
+            if notice { return afterCompaction ? .notice(text) : .answerStart }
+            return .turnStart(chatOnly: chatOnly())
+        }
+        func add(_ row: ChatOnlyActivity.Row, compaction: Bool = false) {
+            rows.append(row)
+            switch row {
+            case .invisible, .turnBoundary: return
+            default: afterCompaction = compaction
+            }
+        }
+        for item in historicalItems {
+            switch item.kind {
+            case .userText(let text):
+                add(userRow(text, notice: item.isSystemNotice, sentIntoTurn: item.sentIntoTurn,
+                            belongsToAnswer: item.belongsToAnswer,
+                            chatOnly: item.recordUuid.map(chatOnlyTurns.contains) ?? false))
+            case .assistantText(let text):
+                add(.words(text))
+            case .interrupted(let message), .error(let message):
+                add(.outcome(message))
+            case .compaction(let pre, let post):
+                add(.notice(Self.compactionMessage(preTokens: pre, postTokens: post)), compaction: true)
+            case .shellOutput:
+                add(.answerStart)
+            case .thinking(let text):
+                add(.thought(text))
+            case .toolUse(let id, let name, let input):
+                add(toolRow(id, name, input))
+            case .toolResult:
+                add(.toolResult)
+            }
+        }
+        for event in runner.events {
+            switch event.kind {
+            case .userMessage(let text):
+                add(userRow(text, notice: event.isSystemNotice, sentIntoTurn: event.sentIntoTurn,
+                            belongsToAnswer: event.belongsToAnswer,
+                            chatOnly: event.chatOnlyTurn))
+            case .assistantText(let text):
+                add(.words(text))
+            case .error(let message), .interrupted(let message):
+                add(.outcome(message))
+            case .compaction(let pre, let post):
+                add(.notice(Self.compactionMessage(preTokens: pre, postTokens: post)), compaction: true)
+            case .shellOutput:
+                add(.answerStart)
+            case .thinking(let text):
+                add(.thought(text))
+            case .toolUse(let id, let name, let input):
+                add(toolRow(id, name, input))
+            case .toolResult:
+                add(.toolResult)
+            // A turn's start: inside an answer, a turn the agent runs on
+            // its own — for an event of claude's Monitor tool it is all
+            // claude prints, so the final message is the newest turn's.
+            case .systemInit: add(.turnBoundary)
+            case .result: add(.invisible)
+            }
+        }
+        return rows
     }
 
     /// `pairing` is the pass's own `toolPairing`: a codex search run
     /// through code mode names its query only in its result.
     private func activityLayout(pairing: Pairing) -> ActivityLayout {
-        // Nothing to collapse: no recorded Chat only turn and no live one
-        // (whose message the live buffer may have trimmed away).
-        guard !chatOnlyTurns.isEmpty
-                || runner.trimmedHeadChatOnly
-                || runner.events.contains(where: \.chatOnlyTurn)
-        else { return .empty }
-        let h = historicalItems.count
-        var rows: [ChatOnlyActivity.Row] = []
-        rows.reserveCapacity(h + runner.events.count)
-        func toolRow(_ id: String, _ name: String,
-                     _ input: [String: Any]) -> ChatOnlyActivity.Row {
-            .toolUse(name: name, title: AgentRendering.displayToolName(name),
-                     input: input, resultText: pairing.byUseId[id]?.output)
-        }
-        for item in historicalItems {
-            switch item.kind {
-            case .userText:
-                rows.append(item.isSystemNotice
-                    ? .boundary
-                    : .turnStart(chatOnly: item.recordUuid.map(chatOnlyTurns.contains) ?? false))
-            case .assistantText, .interrupted, .compaction:
-                rows.append(.boundary)
-            case .thinking(let text):
-                rows.append(.thought(text))
-            case .toolUse(let id, let name, let input):
-                rows.append(toolRow(id, name, input))
-            case .toolResult:
-                rows.append(.toolResult)
-            }
-        }
-        for event in runner.events {
-            switch event.kind {
-            case .userMessage:
-                rows.append(event.isSystemNotice
-                    ? .boundary
-                    : .turnStart(chatOnly: event.chatOnlyTurn))
-            case .assistantText, .error, .interrupted, .compaction:
-                rows.append(.boundary)
-            case .thinking(let text):
-                rows.append(.thought(text))
-            case .toolUse(let id, let name, let input):
-                rows.append(toolRow(id, name, input))
-            case .toolResult:
-                rows.append(.toolResult)
-            case .systemInit, .result:
-                rows.append(.invisible)
-            }
-        }
-        let plan = ChatOnlyActivity.plan(
-            rows, turnRunning: runner.status.isRunning,
-            liveStart: ChatOnlyActivity.LiveStart(row: h, chatOnly: runner.trimmedHeadChatOnly))
+        let plan = activityPlan(pairing: pairing).plan
         guard !plan.groups.isEmpty else { return .empty }
+        let h = historicalItems.count
         func member(_ i: Int) -> ActivityMember {
             i < h ? .history(historicalItems[i]) : .event(runner.events[i - h])
         }
@@ -3117,6 +4504,90 @@ private struct RunnerStreamView: View {
         return layout
     }
 
+    /// Who draws the agent's name in this pass (`ChatOnlyActivity.names`).
+    private struct NameLayout {
+        /// Chips and lines with the name above them, and bubbles whose
+        /// header is the name.
+        var named: Set<UUID> = []
+        /// The agent's words drawn with NO header.
+        var quiet: Set<UUID> = []
+        /// The name goes over "Sipping…".
+        var waitingNamed = false
+    }
+
+    /// Computed once per pass, after `activityLayout`, over every row: an
+    /// answer opens at a row in the user column and its name goes to the
+    /// first row it draws — a line at its anchor, a chip, its words; in an
+    /// answer drawn compact, the first one the display window draws.
+    private func transcriptNames(pairing: Pairing, activity: ActivityLayout) -> NameLayout {
+        let h = historicalItems.count
+        let historyStart = h - displayedHistory.count
+        let liveFrom = runner.events.count - displayedEvents.count
+        var rows: [ChatOnlyActivity.NameRow] = []
+        var onScreen: [Bool] = []
+        var ids: [UUID] = []
+        rows.reserveCapacity(h + runner.events.count)
+        onScreen.reserveCapacity(h + runner.events.count)
+        ids.reserveCapacity(h + runner.events.count)
+        func drawn(_ id: UUID, _ row: ChatOnlyActivity.NameRow) -> ChatOnlyActivity.NameRow {
+            if activity.lines[id] != nil { return .line }
+            if activity.lineOfMember[id] != nil { return .silent }
+            return row
+        }
+        for (i, item) in historicalItems.enumerated() {
+            onScreen.append(i >= historyStart)
+            let row: ChatOnlyActivity.NameRow
+            switch item.kind {
+            // A notice or a reply in the user column is structure — unless a
+            // line holds it (a compaction's summary, a notice the turn took
+            // in), where it is one of the answer's own rows.
+            case .userText:
+                row = item.isSystemNotice || item.sentIntoTurn
+                    ? drawn(item.id, .userColumn)
+                    : .turnStart(chatOnly: item.recordUuid.map(chatOnlyTurns.contains) ?? false)
+            // A `!` command's output is the command's, not the agent's: an
+            // answer after it is one of its own.
+            case .shellOutput: row = .userColumn
+            case .assistantText: row = drawn(item.id, .words)
+            case .toolUse: row = drawn(item.id, .chip)
+            case .thinking: row = drawn(item.id, .silent)
+            // Folded into its chip, or a rare orphan chip: neither opens an
+            // answer nor names it.
+            case .toolResult: row = drawn(item.id, .note)
+            case .interrupted, .compaction, .error: row = drawn(item.id, .note)
+            }
+            rows.append(row)
+            ids.append(item.id)
+        }
+        for (j, event) in runner.events.enumerated() {
+            onScreen.append(j >= liveFrom)
+            let row: ChatOnlyActivity.NameRow
+            switch event.kind {
+            case .userMessage:
+                row = event.isSystemNotice || event.sentIntoTurn
+                    ? drawn(event.id, .userColumn) : .turnStart(chatOnly: event.chatOnlyTurn)
+            case .shellOutput: row = .userColumn
+            case .assistantText: row = drawn(event.id, .words)
+            case .toolUse: row = drawn(event.id, .chip)
+            case .thinking: row = drawn(event.id, .silent)
+            case .toolResult: row = drawn(event.id, .note)
+            case .interrupted, .compaction, .error: row = drawn(event.id, .note)
+            case .systemInit, .result: row = .silent
+            }
+            rows.append(row)
+            ids.append(event.id)
+        }
+        let names = ChatOnlyActivity.names(
+            rows, compact: compact,
+            liveStart: ChatOnlyActivity.LiveStart(row: h, chatOnly: runner.trimmedHeadChatOnly),
+            onScreen: onScreen)
+        var out = NameLayout()
+        for i in names.named { out.named.insert(ids[i]) }
+        for i in names.quiet { out.quiet.insert(ids[i]) }
+        out.waitingNamed = names.waitingNamed
+        return out
+    }
+
     // MARK: - Find in transcript
     //
     // The contract with `transcriptStack`: this list holds exactly the
@@ -3126,9 +4597,10 @@ private struct RunnerStreamView: View {
     // the highlights on different transcripts.
     //
     // Matches cover the WHOLE loaded history, not the rendered window —
-    // `historyDisplayCap` is a rendering bound, and a find that could
-    // only see 40 rows would be answering a different question than the
-    // one asked. Jumping past the window grows it (`jumpToActiveMatch`).
+    // the window (`transcriptWindow`) is a rendering bound, and a find
+    // that could only see 40 rows would be answering a different question
+    // than the one asked. Jumping past the window grows it
+    // (`jumpToActiveMatch`).
 
     /// Title of an orphaned tool result's chip. One constant, because
     /// the chip renders it and the search counts it, and a second
@@ -3148,13 +4620,40 @@ private struct RunnerStreamView: View {
     /// time a chevron is clicked.
     private func chipTexts(name: String, input: [String: Any],
                            result: PairedResult?) -> [String] {
-        var texts = [AgentRendering.displayToolName(name),
-                     AgentRendering.summarizeToolInput(name: name, input: input)]
+        let summary = AgentRendering.toolSummary(name: name, input: input, resultOutput: result?.output)
+        var texts = [AgentRendering.displayToolName(name), summary]
         texts += AgentRendering.fullToolBody(name: name, input: input).map(\.text)
         if let result {
-            texts += AgentRendering.fullToolResultBody(result.output).map(\.text)
+            texts += AgentRendering.toolResultRows(name: name, output: result.output).map(\.text)
         }
         return texts
+    }
+
+    /// The agent's words inside an opened line: its bubble without the
+    /// name, which the line already carries, and with find's highlight.
+    private func memberWords(id: UUID, text: String) -> some View {
+        MessageBubble(
+            message: ChatMessage(id: id, role: "assistant", content: text),
+            assistantLabelOverride: assistantLabel,
+            showsHeader: false
+        )
+        .environment(\.sipSearchSlot, find.slot(forRow: id))
+    }
+
+    /// Title of a thought's row inside an opened line — the word each
+    /// agent's own terminal puts over a thought. Composed, not the
+    /// thought's own words, so it is not one of the row's pieces (the
+    /// compaction row's rule).
+    private static var thoughtChipTitle: String {
+        String(localized: "Thinking",
+               comment: "Title of one of the model's thoughts, a row inside an opened activity line; click it to read the whole thought")
+    }
+
+    /// A thought row's searchable pieces, in the order `thoughtRow`
+    /// draws them: the first line on the closed row, then the whole
+    /// thought (counted while closed — the collapsed-chip rule).
+    private func thoughtTexts(_ text: String) -> [String] {
+        [ChatOnlyActivity.headline(of: text), MarkdownRenderer.plainText(text, fileBase: runner.cwd.path)]
     }
 
     private func orphanChipTexts(output: String) -> [String] {
@@ -3198,6 +4697,7 @@ private struct RunnerStreamView: View {
         // Exactly the rows that still exist, handed back to the memo at
         // the end so a cap-trimmed event's entry goes with it.
         var live: [TranscriptRowTextCache.Key: String] = [:]
+        let fileBase = runner.cwd.path
 
         func add(_ id: UUID, resolved: Bool = false, _ build: () -> String) {
             let key = TranscriptRowTextCache.Key(id: id, resolved: resolved)
@@ -3208,14 +4708,18 @@ private struct RunnerStreamView: View {
 
         for item in historicalItems {
             switch item.kind {
+            case .userText(let text) where item.shellCommand:
+                add(item.id) { MarkdownRenderer.plainText(ShellCommandInput.markdown(text), fileBase: fileBase) }
             case .userText(let text), .assistantText(let text):
-                add(item.id) { MarkdownRenderer.plainText(text) }
-            // Drawn inside its turn's activity line (only a Chat only
-            // turn keeps one), and counted while that line is closed —
-            // the collapsed-chip rule.
+                add(item.id) { MarkdownRenderer.plainText(text, fileBase: fileBase) }
+            case .shellOutput(let output):
+                add(item.id) { output.shown.text }
+            // Drawn inside its turn's activity line (a Chat only turn's,
+            // or any turn's in compact view), and counted while that line
+            // is closed — the collapsed-chip rule.
             case .thinking(let text):
                 guard inLine[item.id] != nil else { continue }
-                add(item.id) { MarkdownRenderer.plainText(text) }
+                add(item.id) { thoughtTexts(text).joined(separator: "\n") }
             case .toolUse(let id, let name, let input):
                 let result = pairing.byUseId[id]
                 add(item.id, resolved: result != nil) {
@@ -3229,7 +4733,7 @@ private struct RunnerStreamView: View {
                 add(item.id) {
                     orphanChipTexts(output: content).joined(separator: "\n")
                 }
-            case .interrupted(let message):
+            case .interrupted(let message), .error(let message):
                 add(item.id) { message }
             // Composed at render time from localized strings, so there
             // is nothing here to match a query against — see
@@ -3241,11 +4745,15 @@ private struct RunnerStreamView: View {
 
         for event in runner.events {
             switch event.kind {
+            case .userMessage(let text) where event.shellCommand:
+                add(event.id) { MarkdownRenderer.plainText(ShellCommandInput.markdown(text), fileBase: fileBase) }
             case .userMessage(let text), .assistantText(let text):
-                add(event.id) { MarkdownRenderer.plainText(text) }
+                add(event.id) { MarkdownRenderer.plainText(text, fileBase: fileBase) }
+            case .shellOutput(let output):
+                add(event.id) { output.shown.text }
             case .thinking(let text):
                 guard inLine[event.id] != nil else { continue }
-                add(event.id) { MarkdownRenderer.plainText(text) }
+                add(event.id) { thoughtTexts(text).joined(separator: "\n") }
             case .toolUse(let id, let name, let input):
                 let result = pairing.byUseId[id]
                 add(event.id, resolved: result != nil) {
@@ -3284,28 +4792,19 @@ private struct RunnerStreamView: View {
         // consulted by `chipShell`.
         expandedToolResults.insert(match.rowId)
 
-        // Both windows are SUFFIXES, so what matters is the match's
-        // distance from the newest row.
+        // The window is one run back from the newest row, over history
+        // and the live buffer alike, so what matters is the match's place
+        // in that run.
         //
         // Located by ROW ID, never by `match.rowIndex`: that index runs
         // over the SEARCHABLE rows, which skip every tool result folded
-        // into its call, while the windows are suffixes of the raw
-        // arrays. On any transcript with tool activity — i.e. all of
-        // them — the two disagree, and the window would be grown by the
-        // wrong amount.
+        // into its call, while the window runs over the raw arrays. On
+        // any transcript with tool activity — i.e. all of them — the two
+        // disagree, and the window would be grown by the wrong amount.
         var grew = false
-        if let index = historicalItems.firstIndex(where: { $0.id == match.rowId }) {
-            let fromEnd = historicalItems.count - index
-            if fromEnd > historyDisplayCap {
-                historyDisplayCap = fromEnd + 5
-                grew = true
-            }
-        } else if let index = runner.events.firstIndex(where: { $0.id == match.rowId }) {
-            let fromEnd = runner.events.count - index
-            if fromEnd > liveDisplayCap {
-                liveDisplayCap = fromEnd + 5
-                grew = true
-            }
+        if let index = rowIndex(of: match.rowId), index < transcriptWindow.top {
+            revealRows(through: index)
+            grew = true
         }
         // A match inside a closed activity line: open the line too. Its
         // steps only exist once it is laid out open, so the scroll waits
@@ -3340,33 +4839,192 @@ private struct RunnerStreamView: View {
     /// the draft's task uuid for as long as that child lives, so the
     /// runner's own uuid must keep matching after its session id is
     /// known — see `MCPBridge.request(sessionId:taskUuid:…)`.
+    /// The card on the shared keyboard: the newest one a turn waits on,
+    /// else the plan follow-up.
+    private var activeCardId: String? {
+        approvalsForRunner.last?.id ?? (showsPlanFollowUp ? planFollowUpCardId : nil)
+    }
+
+    /// "Implement this plan?" is up: a codex Plan turn ended on a plan, the
+    /// turn is over, no card is waiting, and nobody else is mid-turn on
+    /// the thread (an answer would be a second writer on it).
+    private var showsPlanFollowUp: Bool {
+        runner.planFollowUp != nil && !runner.status.isRunning
+            && !runner.externalInProgress && approvalsForRunner.isEmpty
+    }
+
+    private var planFollowUpCardId: String { "plan-follow-up:" + runner.key }
+
     private var approvalsForRunner: [MCPApprovalRequest] {
         mcpBridge.pending(forSession: runner.sessionId,
                           taskUuid: runner.taskUuidForBridge)
     }
 
-    /// How many of the newest history rows render initially. These are
-    /// laid out EAGERLY (see `transcriptStack`), so this is the knob
-    /// that trades open-time cost against how far back you can scroll
-    /// before "Show earlier". Reset per session by the parent's
-    /// `.id(runner.key)`.
-    @State private var historyDisplayCap = 40
+    /// Rows drawn above the newest live ones (`TranscriptSeam.window`):
+    /// with no live rows — at open — the history rows that render first.
+    /// They are laid out EAGERLY (see `transcriptStack`), so this is the
+    /// knob that trades open-time cost against how far back you can
+    /// scroll before "Show earlier", which adds 200. The live rows below
+    /// them are capped at `TranscriptSeam.liveRows` — mostly one-line
+    /// tool chips, and an EMPTY stack at open (`clearEvents()`), so their
+    /// cost is paid a row at a time as a turn streams. Reset per session
+    /// by the parent's `.id(runner.key)`.
+    @State private var earlierRows = 40
 
-    private var displayedHistory: ArraySlice<AgentSessionHistoryItem> {
-        historicalItems.suffix(historyDisplayCap)
+    /// The first drawn row while the reader is away from the end, so the
+    /// window holds still under them instead of sliding (`TranscriptSeam
+    /// .window`). An id, not an index: the live buffer is cut back from
+    /// the front, and an index would then name another row. Nil while
+    /// they follow the end.
+    @State private var heldTopId: UUID? = nil
+
+    /// The held row's distance from the newest row, kept beside its id
+    /// (`TranscriptSeam.heldIndex`): every history row's id is minted per
+    /// parse, so a read landing while the window is held — a wider read
+    /// behind "Show earlier", a read taken again after its turn ended —
+    /// leaves the id naming nothing, and a window with no held row slides,
+    /// the rows above the reader with it. An object, not `@State`: it is
+    /// refreshed on every sample and every streamed row while the id
+    /// still resolves, and nothing is drawn from it that the id does not
+    /// already decide — written as `@State` that often, it would re-render
+    /// the transcript once more per row for the length of a hold.
+    @State private var heldAnchor = HeldRowAnchor()
+
+    /// `activityPlan`'s memo.
+    @State private var planCache = ActivityPlanCache()
+
+    /// The rows drawn, over `historicalItems` and the live buffer below.
+    private var transcriptWindow: TranscriptSeam.Window {
+        TranscriptSeam.window(historyCount: historicalItems.count,
+                              liveCount: runner.events.count,
+                              earlierRows: earlierRows,
+                              heldTop: heldIndex,
+                              draws: drawnRows)
     }
 
-    /// How many of the newest LIVE rows render. Same trade as
-    /// `historyDisplayCap` — these are laid out eagerly too now — but a
-    /// looser cap, because live rows are mostly one-line tool chips and
-    /// because this stack is EMPTY at open (`clearEvents()`), so the
-    /// cost is paid a row at a time as a turn streams rather than all
-    /// at once. `AgentRunner.liveEventCap` (800) is the buffer's own
-    /// ceiling; this is the rendered window into it.
-    @State private var liveDisplayCap = 150
+    /// In compact view the window, its "Show earlier" and its reveals count
+    /// rows DRAWN, a line once (`ActivityPlanCache.drawn`); drawn in full,
+    /// rows. Nil when nothing is folded.
+    private var drawnRows: ((Int) -> Bool)? {
+        guard compact else { return nil }
+        let drawn = activityPlan().drawn
+        guard drawn.count == rowCount else { return nil }
+        return { drawn[$0] }
+    }
+
+    /// Rows above the window, as the window counts them.
+    private func rowsAbove(_ window: TranscriptSeam.Window) -> Int {
+        guard let draws = drawnRows else { return window.top }
+        return TranscriptSeam.drawnCount(0..<window.top, draws)
+    }
+
+    private var rowCount: Int { historicalItems.count + runner.events.count }
+
+    /// Where the held row is now, by the rule.
+    private var heldIndex: Int? {
+        guard let id = heldTopId else { return nil }
+        return TranscriptSeam.heldIndex(resolved: rowIndex(of: id),
+                                        fromEnd: heldAnchor.fromEnd,
+                                        rowCount: rowCount)
+    }
+
+    /// Hold the window at `index`: the row's id, and its distance from the
+    /// newest row for the read that takes the id away. Writes state only
+    /// when the id changes — a new row, or a row's id given back after a
+    /// read.
+    private func holdWindow(at index: Int) {
+        guard let id = rowId(at: index) else { return }
+        if id != heldTopId { heldTopId = id }
+        heldAnchor.fromEnd = rowCount - index
+    }
+
+    private func releaseHold() {
+        heldTopId = nil
+        heldAnchor.fromEnd = nil
+    }
+
+    private var displayedHistory: ArraySlice<AgentSessionHistoryItem> {
+        historicalItems.suffix(transcriptWindow.historyShown)
+    }
 
     private var displayedEvents: ArraySlice<StreamEvent> {
-        runner.events.suffix(liveDisplayCap)
+        runner.events.suffix(transcriptWindow.liveShown)
+    }
+
+    /// A row's place over history + live buffer, the window's index space.
+    private func rowIndex(of id: UUID) -> Int? {
+        if let i = historicalItems.firstIndex(where: { $0.id == id }) { return i }
+        return runner.events.firstIndex(where: { $0.id == id })
+            .map { historicalItems.count + $0 }
+    }
+
+    private func rowId(at index: Int) -> UUID? {
+        let h = historicalItems.count
+        if index < h { return index >= 0 ? historicalItems[index].id : nil }
+        return index - h < runner.events.count ? runner.events[index - h].id : nil
+    }
+
+    /// Hold the window when the reader leaves the end, let it go once
+    /// they are at it (`TranscriptSeam.holdChange`). Asked after every
+    /// sample the follow engine takes; writes state only when the answer
+    /// changes it.
+    private func syncWindowHold(_ geometry: TranscriptGeometry) {
+        let held = heldIndex
+        switch TranscriptSeam.holdChange(following: follow.isNearBottom,
+                                         distanceFromEnd: Double(geometry.distanceFromEnd),
+                                         heldRowOnPage: held != nil) {
+        case .hold: holdWindow(at: transcriptWindow.top)
+        case .letGo: releaseHold()
+        // Held: the row's distance kept current, and its id given back
+        // once a read has re-minted the history's.
+        case .none: if let held { holdWindow(at: held) }
+        }
+    }
+
+    /// "Show earlier": 200 more rows above the first row drawn — counted
+    /// from that row, not added to the last count, since a held window
+    /// has grown past its count (`TranscriptSeam.earlierRowsAfterShowEarlier`).
+    /// A held window is held at its new top — grown alone, it would slide
+    /// back down to the old one, a row per streamed row. The 200 are added
+    /// whole even when fewer rows are loaded above: a wider read of the
+    /// file is under way then, and the rows it lands are drawn at once.
+    /// In compact view all of this is counted in drawn rows (`drawnRows`).
+    private func showEarlierRows() {
+        let top = transcriptWindow.top
+        if let draws = drawnRows {
+            let h = historicalItems.count
+            earlierRows = TranscriptSeam.earlierRowsAfterShowEarlier(
+                top: TranscriptSeam.drawnCount(0..<top, draws), earlierRows: earlierRows,
+                historyCount: TranscriptSeam.drawnCount(0..<h, draws),
+                liveCount: TranscriptSeam.drawnCount(h..<rowCount, draws))
+            if heldTopId != nil {
+                holdWindow(at: TranscriptSeam.start(holding: TranscriptSeam.drawnCount(top..<rowCount, draws) + 200,
+                                                    before: rowCount, draws))
+            }
+            return
+        }
+        earlierRows = TranscriptSeam.earlierRowsAfterShowEarlier(top: top, earlierRows: earlierRows,
+                                                                 historyCount: historicalItems.count,
+                                                                 liveCount: runner.events.count)
+        if heldTopId != nil { holdWindow(at: max(0, top - 200)) }
+    }
+
+    /// Grow the window up to a few rows above `index`, held the same way.
+    /// In compact view a row inside a line is revealed through the line's
+    /// FIRST member: the window counts a line there and draws it there,
+    /// and a line whose members all sit above the window is not drawn at
+    /// all. Grown to the matched member alone, the only drawn row between
+    /// it and the window's top can be the answer's last words — the
+    /// window stops there, and a find jump lands on nothing.
+    private func revealRows(through index: Int) {
+        let top = transcriptWindow.top
+        let through = drawnRows == nil
+            ? index
+            : activityPlan().plan.group(containing: index)?.members.first ?? index
+        let newTop = max(0, through - 5)
+        guard newTop < top else { return }
+        earlierRows += drawnRows.map { TranscriptSeam.drawnCount(newTop..<top, $0) } ?? top - newTop
+        if heldTopId != nil { holdWindow(at: newTop) }
     }
 
     // MARK: Bottom-follow engine
@@ -3394,11 +5052,22 @@ private struct RunnerStreamView: View {
     /// `Utilities/TranscriptFollow.swift`.
     @State private var follow = TranscriptFollow(label: "transcript")
 
+    /// The line being read, kept under the top of the transcript when the
+    /// text size changes while it is on screen (View → Zoom In / Zoom Out
+    /// / Actual Size). A class in plain `@State`, like `follow`: written on
+    /// every layout, never drawn. See `Utilities/ReadingPlace.swift`.
+    @State private var readingPlace = ReadingPlace()
+
     /// Searchable text per row, so a find left open during a turn does
     /// not re-derive every chip on every streamed event. A class in
     /// plain `@State` for the same reason `follow` is one: nothing it
     /// holds is rendered.
     @State private var rowTextCache = TranscriptRowTextCache()
+
+    /// Arrow keys and Return for the newest card at the end of this
+    /// transcript. A class in plain `@State`, like `follow`: nothing it
+    /// holds is rendered — the cards hear it through its publisher.
+    @State private var cardKeys = ApprovalCardKeys()
 
     /// Go to the newest row. Unlike `scrollTo(id:)` this asks the
     /// scroll view for its own bottom edge, so it does not depend on
@@ -3407,38 +5076,78 @@ private struct RunnerStreamView: View {
         scrollPosition.scrollTo(edge: .bottom)
     }
 
+    /// The size every row is laid out at — what tells `readingPlace` a
+    /// layout from the one before it.
+    private var readingSize: ReadingPlace.Size {
+        ReadingPlace.Size(fontScale: fontScale, lineSpacing: lineSpacingFactor)
+    }
+
+    /// Back to the line being read after a change of size. Asked only for
+    /// a reader who was not following the end — `readingPlace` judges that
+    /// on the layout before the change, since a page that shrinks can
+    /// clamp a reader mid-page to the end.
+    private func restoreReadingPlace(_ offset: CGFloat) {
+        scrollPosition.scrollTo(y: offset)
+    }
+
     var body: some View {
         ScrollViewReader { proxy in
         ScrollView {
             transcriptStack
+                .coordinateSpace(.named(ReadingPlace.space))
         }
         // Born at the end. This is the whole "sessions open at their
         // newest row" feature — an initial position the scroll view
         // honours on its first layout pass, not a jump performed
         // afterwards and hidden until it lands.
         .scrollPosition($scrollPosition)
-        .onScrollGeometryChange(for: TranscriptGeometry.self) { geo in
-            TranscriptGeometry(geo)
-        } action: { old, new in
-            if follow.geometryChanged(from: old, to: new) == .snapToEnd {
-                scrollToEnd()
+        // One sample for the follow engine and `readingPlace`, so the
+        // verdict that rides with an edge is the verdict for that edge.
+        .onScrollGeometryChange(for: ScrollSample.self) { geo in
+            ScrollSample(geo)
+        } action: { [readingSize] old, new in
+            if new.geometry != old.geometry {
+                if follow.geometryChanged(from: old.geometry, to: new.geometry) == .snapToEnd {
+                    scrollToEnd()
+                }
+                syncWindowHold(new.geometry)
             }
+            readingPlace.noteEdge(new.edge, following: follow.isNearBottom, size: readingSize)
         }
         // Who is moving the scroll view, asked of the scroll view
         // itself. Geometry deltas cannot answer this — a sample says
         // the end moved, never whose hand did it — and guessing from
         // them is what let the follow engine fight the reader.
         .onScrollPhaseChange { _, phase, context in
-            if follow.phaseChanged(to: phase,
-                                   geometry: TranscriptGeometry(context.geometry)) {
+            let geometry = TranscriptGeometry(context.geometry)
+            if follow.phaseChanged(to: phase, geometry: geometry) {
                 scrollToEnd()
             }
+            if follow.readerIsScrolling { readingPlace.readerScrolled() }
+            syncWindowHold(geometry)
         }
         .onAppear {
             // Born mid-read (the parent's own onAppear calls reload()
             // before this view exists) sees no onChange — arm the
             // delayed spinner here too.
             if isLoadingHistory { armLoadingRow() }
+            // A card is answered from the keyboard only while the end of
+            // the transcript, where it is drawn, is on screen — and while
+            // no overlay of the window (the settings menu, the search
+            // palette, the usage window) has the keys for itself.
+            cardKeys.cardIsInView = { [follow] in follow.isNearBottom }
+            cardKeys.overlayHasKeys = { [weak appState = appState] in appState?.overlayHoldsKeys ?? false }
+            cardKeys.install()
+        }
+        .onDisappear { cardKeys.remove() }
+        .background(CardWindowReader { [cardKeys] window in cardKeys.window = window })
+        .onChange(of: activeCardId, initial: true) { _, newest in
+            cardKeys.setActiveCard(newest)
+        }
+        .onChange(of: showsPlanFollowUp) { _, shown in
+            guard shown, !find.isAnchored else { return }
+            follow.forceFollow()
+            withAnimation(.easeOut(duration: 0.2)) { scrollToEnd() }
         }
         .onChange(of: isLoadingHistory) { _, loading in
             // The async load landed (fires even when the reloaded item
@@ -3462,6 +5171,10 @@ private struct RunnerStreamView: View {
                 refreshFind()
             }
         }
+        // A change of text size re-lays out every row: real input, like a
+        // history swap, so the follow engine may spend snaps keeping the
+        // end. A reader elsewhere keeps their line through `readingPlace`.
+        .onChange(of: readingSize) { _, _ in follow.noteInput() }
         .onChange(of: repositionNonce) { _, _ in
             // In-place history swap (cache-hit refresh landed newer
             // content) — pull to the new end unless the reader has
@@ -3485,6 +5198,9 @@ private struct RunnerStreamView: View {
             // arriving by another door. The phase handler takes up
             // the slack when they let go.
             follow.noteInput()
+            // The held row's distance from the newest row moves with
+            // every row streamed under it, drawn or not.
+            if let i = heldTopId.flatMap(rowIndex(of:)) { heldAnchor.fromEnd = rowCount - i }
             if follow.isNearBottom, !follow.readerIsScrolling { scrollToEnd() }
             refreshFind()
         }
@@ -3538,12 +5254,13 @@ private struct RunnerStreamView: View {
     /// and lays out correctly). Eager rows make the height exact, so
     /// there is no estimate to be wrong.
     ///
-    /// This is why the window is CAPPED (`historyDisplayCap`): eager
-    /// means every row in the window is laid out up front, so the
-    /// window has to stay small enough for that to be cheap.
+    /// This is why the window is CAPPED (`earlierRows`): eager means
+    /// every row in the window is laid out up front, so the window has
+    /// to stay small enough for that to be cheap.
     ///
-    /// The LIVE rows below it are eager and capped (`liveDisplayCap`)
-    /// for a second reason — a lazy tail's estimated height moves as
+    /// The LIVE rows below it are eager and capped
+    /// (`TranscriptSeam.liveRows`), in the same window, for a second
+    /// reason — a lazy tail's estimated height moves as
     /// rows realize, and the follow engine cannot tell that movement
     /// from real content growth. See the note at the live block below,
     /// and `Utilities/TranscriptFollow.swift`.
@@ -3560,31 +5277,36 @@ private struct RunnerStreamView: View {
                     } else {
                         // Computed once per render pass, not per row —
                         // it walks the full item + event lists.
-                        let pairing: (byUseId: [String: PairedResult],
-                                      consumed: Set<UUID>,
-                                      labelled: Set<UUID>) = toolPairing
+                        let pairing = toolPairing
                         // Same: every row, once per pass.
                         let activity = activityLayout(pairing: pairing)
-                        let hiddenLoaded = historicalItems.count - historyDisplayCap
-                        if hiddenLoaded > 0 || historyHasMore {
+                        let names = transcriptNames(pairing: pairing, activity: activity)
+                        // ONE "Show earlier", at the top of the one run of
+                        // rows the window draws (`TranscriptSeam.window`):
+                        // what it counts is every row above that run, the
+                        // live buffer's included — in compact view every
+                        // DRAWN row, a line once (`rowsAbove`).
+                        let window = transcriptWindow
+                        let older = rowsAbove(window)
+                        if older > 0 || historyHasMore {
                             Button {
                                 // Fetch AHEAD of need: once the loaded
                                 // remainder is under one reveal, kick
                                 // the wider read so the next click has
-                                // rows waiting. The cap bump stands
-                                // either way — when the read lands,
-                                // `suffix(cap)` reveals the next ~200
-                                // rows above the top exactly as an
-                                // ordinary reveal does, and the button
-                                // returns with the true remainder.
-                                if historyHasMore, hiddenLoaded < 200 {
+                                // rows waiting. The 200 rows stand
+                                // either way — when the read lands, the
+                                // window reveals the next ~200 rows
+                                // above the top exactly as an ordinary
+                                // reveal does, and the button returns
+                                // with the true remainder.
+                                if historyHasMore, older < 200 {
                                     onLoadEarlier()
                                 }
-                                historyDisplayCap += 200
+                                showEarlierRows()
                             } label: {
                                 Group {
-                                    if hiddenLoaded > 0 {
-                                        Text(String(localized: "Show earlier — \(hiddenLoaded) older rows",
+                                    if older > 0 {
+                                        Text(String(localized: "Show earlier — \(older) older rows",
                                                     comment: "Button above a truncated transcript; placeholder is the hidden row count"))
                                     } else if isWideningHistory {
                                         Text(String(localized: "Loading earlier turns…",
@@ -3608,7 +5330,7 @@ private struct RunnerStreamView: View {
                             // With loaded rows still hidden a click can
                             // always reveal; only a pure fetch-click
                             // has nothing to do while one is running.
-                            .disabled(isWideningHistory && hiddenLoaded <= 0)
+                            .disabled(isWideningHistory && older <= 0)
                         } else if let note = historyTruncationNote {
                             Text(note)
                                 .font(.system(size: 12 * fontScale))
@@ -3618,10 +5340,10 @@ private struct RunnerStreamView: View {
                         }
                         // EAGER on purpose — see the container's note.
                         ForEach(displayedHistory) { item in
-                            historyRow(item, pairing: pairing, activity: activity)
+                            historyRow(item, pairing: pairing, activity: activity, names: names)
                         }
-                        // Live rows are EAGER and CAPPED, like the
-                        // history window above. A lazy stack's total
+                        // Live rows are EAGER and CAPPED, in the same
+                        // window as the history above. A lazy stack's total
                         // height is an estimate that MOVES as
                         // `ScrollViewHelper.prefetch` realizes rows;
                         // the follow engine reads that movement as
@@ -3634,24 +5356,10 @@ private struct RunnerStreamView: View {
                         // height stays exact and the cost is paid a
                         // row at a time as a turn streams.
                         if !runner.events.isEmpty
-                            || !approvalsForRunner.isEmpty {
-                            if runner.events.count > liveDisplayCap {
-                                Button {
-                                    liveDisplayCap += 200
-                                } label: {
-                                    Text(String(localized: "Show earlier — \(runner.events.count - liveDisplayCap) older rows in this turn",
-                                                comment: "Button above a truncated live event stream; placeholder is the hidden row count"))
-                                        .font(.system(size: 12 * fontScale))
-                                        .foregroundColor(ChatDesign.textSecondary)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 6)
-                                        .contentShape(Rectangle())
-                                }
-                                .buttonStyle(.plain)
-                            }
+                            || !approvalsForRunner.isEmpty || showsPlanFollowUp {
                             VStack(alignment: .leading, spacing: 12 * gapScale) {
                                 ForEach(displayedEvents) { event in
-                                    eventRow(event, pairing: pairing, activity: activity)
+                                    eventRow(event, pairing: pairing, activity: activity, names: names)
                                 }
                                 ForEach(approvalsForRunner) { req in
                                     // Only the newest card owns Return/Escape —
@@ -3666,15 +5374,38 @@ private struct RunnerStreamView: View {
                                                  ownsKeyboardShortcuts:
                                                     req.id == approvalsForRunner.last?.id)
                                 }
-                                // Only until Claude's first output lands
-                                // — see `awaitingFirstAgentEvent`. Not
-                                // shown under an approval card: there
-                                // the wait is on the USER, not on
-                                // Claude, and a spinner would say the
-                                // opposite.
-                                if awaitingFirstAgentEvent
-                                    && approvalsForRunner.isEmpty {
-                                    waitingRow
+                                // Once a codex Plan turn is over: whether to
+                                // carry its plan out. Never under a card a
+                                // turn waits on.
+                                if showsPlanFollowUp {
+                                    CodexPlanFollowUpCard(
+                                        cardId: planFollowUpCardId,
+                                        choices: CodexAppServer.planFollowUpChoices(
+                                            modeBeforePlan: runner.codexModeBeforePlan),
+                                        ownsKeys: true,
+                                        keys: cardKeys, onImplement: onImplementPlan,
+                                        onStay: { runner.dismissPlanFollowUp() })
+                                }
+                                // Only until the agent's first output
+                                // lands — see `awaitingFirstAgentEvent`.
+                                // Not shown under an approval card: there
+                                // the wait is on the USER, not on the
+                                // agent, and a spinner would say the
+                                // opposite. Nor under a live line, which
+                                // is this row already.
+                                if awaitingFirstAgentEvent && approvalsForRunner.isEmpty
+                                    && !activity.hasLiveLine {
+                                    // In an answer drawn compact the name
+                                    // stands over it, where the first step
+                                    // will be — nothing moves when it lands.
+                                    if names.waitingNamed {
+                                        VStack(alignment: .leading, spacing: 4 * gapScale) {
+                                            agentLabelHeader
+                                            waitingRow
+                                        }
+                                    } else {
+                                        waitingRow
+                                    }
                                 }
                                 // ONE row, replaced in place, for as
                                 // long as the child is retrying — see
@@ -3694,6 +5425,17 @@ private struct RunnerStreamView: View {
                                 // mid-turn, after plenty of output.
                                 if runner.status.isRunning, runner.compacting {
                                     compactingRow
+                                }
+                                // The answer has landed and the turn goes
+                                // on: claude and kimi wait for background
+                                // tasks they started and report each in a
+                                // turn of their own, and codex's turn waits
+                                // for a command still running. The clock
+                                // and Stop say the turn runs; this says
+                                // what it waits for.
+                                if runner.status.isRunning,
+                                   !runner.awaitedBackgroundTasks.isEmpty {
+                                    backgroundTaskRow
                                 }
                             }
                         }
@@ -3763,7 +5505,7 @@ private struct RunnerStreamView: View {
         .padding(.vertical, 24)
     }
 
-    // MARK: - Rows, with Chat only activity lines
+    // MARK: - Rows, with activity lines
 
     /// One history row as the stack draws it: the activity line when
     /// this row is where a line is drawn, nothing when the row is a
@@ -3774,56 +5516,70 @@ private struct RunnerStreamView: View {
     /// opened line, and a find jump scrolls to an id.
     @ViewBuilder
     private func historyRow(_ item: AgentSessionHistoryItem, pairing: Pairing,
-                            activity: ActivityLayout) -> some View {
+                            activity: ActivityLayout, names: NameLayout) -> some View {
         if let line = activity.lines[item.id] {
-            activityLine(line, pairing: pairing)
+            activityLine(line, pairing: pairing, named: names.named.contains(item.id))
                 .id(item.id)
+                .readingPlaceRow(item.id, place: readingPlace, size: readingSize,
+                                 restore: restoreReadingPlace)
         } else if activity.lineOfMember[item.id] == nil {
-            renderHistoricalItem(item, pairing: pairing)
+            renderHistoricalItem(item, pairing: pairing, names: names)
                 .id(item.id)
+                .readingPlaceRow(item.id, place: readingPlace, size: readingSize,
+                                 restore: restoreReadingPlace)
         }
     }
 
     /// `historyRow` for a live event.
     @ViewBuilder
     private func eventRow(_ event: StreamEvent, pairing: Pairing,
-                          activity: ActivityLayout) -> some View {
+                          activity: ActivityLayout, names: NameLayout) -> some View {
         if let line = activity.lines[event.id] {
-            activityLine(line, pairing: pairing)
+            activityLine(line, pairing: pairing, named: names.named.contains(event.id))
                 .id(event.id)
+                .readingPlaceRow(event.id, place: readingPlace, size: readingSize,
+                                 restore: restoreReadingPlace)
         } else if activity.lineOfMember[event.id] == nil {
-            renderEvent(event, pairing: pairing)
+            renderEvent(event, pairing: pairing, names: names)
                 .id(event.id)
+                .readingPlaceRow(event.id, place: readingPlace, size: readingSize,
+                                 restore: restoreReadingPlace)
         }
     }
 
     private static var showStepsHint: String {
         String(localized: "Show the steps",
-               comment: "Tooltip on a Chat only activity line that is closed: click to see the model's thoughts and web lookups")
+               comment: "Tooltip on an activity line that is closed: click to see its steps (the model's thoughts and tool calls)")
     }
 
     private static var hideStepsHint: String {
         String(localized: "Hide the steps",
-               comment: "Tooltip on a Chat only activity line that is open: click to hide the model's thoughts and web lookups")
+               comment: "Tooltip on an activity line that is open: click to hide its steps")
     }
 
-    /// A Chat only turn's thoughts and web lookups, as ONE line.
+    /// The agent's work as ONE line: everything an answer did between the
+    /// user's message and its final message — every answer's in compact
+    /// view, a Chat only turn's always — the words it said along the way
+    /// included.
     ///
-    /// While the group is still being written it IS the waiting row —
+    /// While the line is still being written it IS the waiting row —
     /// the same spinner, size, colour and padding as `waitingRow` — with
-    /// the newest step's words where "Sipping…" was, so the line changes
-    /// in place as the model works. Once the agent's words follow, the
-    /// spinner becomes a symbol and the words a summary
-    /// (`ChatOnlyActivity.summaryText`, one rule for every agent).
+    /// the newest step's or message's words where "Sipping…" was, so the
+    /// line changes in place as the model works. Once the answer is done,
+    /// the spinner becomes a symbol and the words a summary
+    /// (`ChatOnlyActivity.summaryText`, one rule for every agent), with
+    /// the orange triangle when a step failed.
     ///
-    /// No agent label over it, for `waitingRow`'s reason: the label
-    /// belongs to the answer, whose bubble draws its own. Nothing here is
-    /// time-based — the words change when the agent reports a step, and
-    /// never on a clock.
+    /// `named` puts the agent's name over it: the line opens the answer
+    /// (`ChatOnlyActivity.names` — the name once per answer). Nothing
+    /// here is time-based — the words change when the agent reports a
+    /// step, and never on a clock.
     private func activityLine(_ line: ActivityLineRender,
-                              pairing: Pairing) -> some View {
+                              pairing: Pairing, named: Bool) -> some View {
         let open = expandedActivityLines.contains(line.key)
-        let summary = ChatOnlyActivity.summary(of: line.group.steps)
+        let summary = ChatOnlyActivity.summary(of: line.group.steps,
+                                               failures: line.group.failures,
+                                               messages: line.group.messages)
         let text = line.isLive
             ? (ChatOnlyActivity.livePhrase(of: line.group)
                ?? String(localized: "Sipping…",
@@ -3831,6 +5587,11 @@ private struct RunnerStreamView: View {
             : ChatOnlyActivity.summaryText(summary)
         let hint = open ? Self.hideStepsHint : Self.showStepsHint
         return VStack(alignment: .leading, spacing: 0) {
+            if named {
+                // The bubble's own gap between its name and its words.
+                agentLabelHeader
+                    .padding(.bottom, 4 * gapScale)
+            }
             Button {
                 if open { expandedActivityLines.remove(line.key) }
                 else { expandedActivityLines.insert(line.key) }
@@ -3840,7 +5601,8 @@ private struct RunnerStreamView: View {
                         if line.isLive {
                             ProgressView().controlSize(.small)
                         } else {
-                            Image(systemName: ChatOnlyActivity.symbol(for: summary))
+                            Image(systemName: ChatOnlyActivity.symbol(
+                                for: summary, agentTurn: line.group.agentTurn))
                                 .font(.system(size: 12 * SipFont.contentRatio(fontScale)))
                                 .foregroundColor(ChatDesign.textSecondary)
                         }
@@ -3855,6 +5617,12 @@ private struct RunnerStreamView: View {
                         .foregroundColor(ChatDesign.textSecondary)
                         .lineLimit(1)
                         .truncationMode(.tail)
+                    // The chip's failure mark, at the chip's size.
+                    if summary.failures > 0 {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10 * SipFont.contentRatio(fontScale)))
+                            .foregroundColor(.orange)
+                    }
                     Image(systemName: open ? "chevron.down" : "chevron.right")
                         .font(.system(size: 9 * SipFont.contentRatio(fontScale),
                                       weight: .semibold))
@@ -3864,6 +5632,9 @@ private struct RunnerStreamView: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 6)
                 .contentShape(Rectangle())
+                // A line is a button with no frame of its own; the fill
+                // under the pointer says it opens.
+                .hoverFill(cornerRadius: 6)
             }
             .buttonStyle(.plain)
             .help(hint)
@@ -3876,9 +5647,11 @@ private struct RunnerStreamView: View {
     }
 
     /// The opened line: every member in order under a thin rule — a
-    /// thought as dim text, each lookup as the ordinary tool chip, so its
-    /// query or address shows at the first click and its output at the
-    /// second.
+    /// thought as a row of its own (`thoughtRow`), each tool call as the
+    /// ordinary tool chip, so its input shows at the first click and its
+    /// output at the second, and the agent's words and the notices as the
+    /// full transcript draws them (the words without the name: the line
+    /// carries it).
     private func activitySteps(_ line: ActivityLineRender,
                                pairing: Pairing) -> some View {
         VStack(alignment: .leading, spacing: 6 * gapScale) {
@@ -3929,8 +5702,10 @@ private struct RunnerStreamView: View {
                     orphanResultChip(chipId: item.id, output: content,
                                      isError: isError)
                 }
+            case .assistantText(let text):
+                memberWords(id: item.id, text: text)
             default:
-                EmptyView()
+                renderHistoricalItem(item, pairing: pairing, names: NameLayout())
             }
         case .event(let event):
             switch event.kind {
@@ -3944,22 +5719,36 @@ private struct RunnerStreamView: View {
                     orphanResultChip(chipId: event.id, output: output,
                                      isError: isError)
                 }
+            case .assistantText(let text):
+                memberWords(id: event.id, text: text)
             default:
-                EmptyView()
+                renderEvent(event, pairing: pairing, names: NameLayout())
             }
         }
     }
 
-    /// A thought inside an opened line: the markdown renderer at 13/14
-    /// of the answer's size, in the secondary colour — the reasoning
-    /// beside the answer, not the answer. Searchable like any drawn text:
-    /// `searchableRows` counts it through the same `plainText`.
+    /// A thought inside an opened line, as a row in the tool chip's
+    /// shape: closed, it names itself and the thought's first line; a
+    /// click opens the whole thought — the markdown renderer at 13/14 of
+    /// the answer's size, in the secondary colour, the reasoning beside
+    /// the answer and not the answer. Its expanded state is the chips'
+    /// (`expandedToolResults`), so a find jump to it opens it.
     private func thoughtRow(id: UUID, text: String) -> some View {
-        MarkdownRenderer.render(text)
-            .environment(\.sipMarkdownTextColor, ChatDesign.textSecondary)
-            .environment(\.sipFontScale, fontScale * 13 / 14)
-            .environment(\.sipSearchSlot, find.slot(forRow: id))
-            .frame(maxWidth: .infinity, alignment: .leading)
+        let texts = thoughtTexts(text)
+        let slots = pieceSlots(texts, base: find.slot(forRow: id))
+        return chipShell(chipId: id,
+                         symbol: "lightbulb",
+                         title: Self.thoughtChipTitle,
+                         summary: texts[0],
+                         isError: false,
+                         showsSpinner: false,
+                         summarySlot: slotAt(slots, 0)) {
+            MarkdownRenderer.render(text)
+                .environment(\.sipMarkdownTextColor, ChatDesign.textSecondary)
+                .environment(\.sipFontScale, fontScale * 13 / 14)
+                .environment(\.sipSearchSlot, slotAt(slots, 1))
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     // MARK: - Historical item rendering
@@ -3972,9 +5761,8 @@ private struct RunnerStreamView: View {
     @ViewBuilder
     private func renderHistoricalItem(
         _ item: AgentSessionHistoryItem,
-        pairing: (byUseId: [String: PairedResult],
-                  consumed: Set<UUID>,
-                  labelled: Set<UUID>)
+        pairing: Pairing,
+        names: NameLayout
     ) -> some View {
         switch item.kind {
         case .userText(let text):
@@ -3984,18 +5772,22 @@ private struct RunnerStreamView: View {
             // SwiftUI can never skip the subtree.
             userRow(rowId: item.id, text: text, recordUuid: item.recordUuid,
                     isSystemNotice: item.isSystemNotice,
-                    attachedFiles: item.attachedFiles)
+                    sentIntoTurn: item.sentIntoTurn,
+                    attachedFiles: item.attachedFiles,
+                    loadedSkills: item.loadedSkills,
+                    shellCommand: item.shellCommand)
                 .environment(\.sipSearchSlot, find.slot(forRow: item.id))
         case .assistantText(let text):
             MessageBubble(
                 message: ChatMessage(id: item.id, role: "assistant", content: text),
-                assistantLabelOverride: assistantLabel
+                assistantLabelOverride: assistantLabel,
+                showsHeader: !names.quiet.contains(item.id)
             )
             .environment(\.sipSearchSlot, find.slot(forRow: item.id))
         case .toolUse(let id, let name, let input):
             toolActivityChip(chipId: item.id, name: name, input: input,
                              result: pairing.byUseId[id],
-                             showsLabel: pairing.labelled.contains(item.id))
+                             showsLabel: names.named.contains(item.id))
         case .toolResult(_, let content, let isError):
             if !pairing.consumed.contains(item.id) {
                 orphanResultChip(chipId: item.id, output: content,
@@ -4003,9 +5795,13 @@ private struct RunnerStreamView: View {
             }
         case .interrupted(let message):
             interruptedRow(message: message, slot: find.slot(forRow: item.id))
+        case .error(let message):
+            errorRow(message: message, slot: find.slot(forRow: item.id))
         case .compaction(let pre, let post):
             compactionRow(preTokens: pre, postTokens: post,
                           slot: find.slot(forRow: item.id))
+        case .shellOutput(let output):
+            shellOutputRow(output, slot: find.slot(forRow: item.id))
         case .thinking:
             // Drawn only inside its turn's activity line.
             EmptyView()
@@ -4028,20 +5824,27 @@ private struct RunnerStreamView: View {
     private func userRow(rowId: UUID, text: String,
                          recordUuid: String?,
                          isSystemNotice: Bool = false,
+                         sentIntoTurn: Bool = false,
                          attachedFiles: [String] = [],
+                         loadedSkills: [String] = [],
+                         shellCommand: Bool = false,
                          newerIdentical: @escaping () -> Int = { 0 }) -> some View {
         if editingRowId == rowId {
+            let blocked = sendBlockedReason(forRow: rowId)
             BranchEditor(
                 text: $editDraft,
                 // `!canBranch` covers a turn that STARTED while the
                 // editor was open — from the composer below it, or from
                 // another terminal. Forking then would copy a prefix out
                 // of a file that is being appended to, i.e. guess where
-                // the conversation ends.
+                // the conversation ends; going back to the message would
+                // cut a turn that is still being written.
                 busy: branching || !canBranch,
-                explanation: String(
-                    localized: "Starts a new session from this point. This one is kept as it is.",
-                    comment: "Explanation under the branch editor in an agent transcript"),
+                explanation: blocked ?? String(
+                    localized: "Send replaces this message and everything after it. Files \(assistantLabel) changed stay as they are. Create Branch starts a new session and keeps this one.",
+                    comment: "Explanation under the message editor in an agent transcript; the placeholder is the agent's label"),
+                onSend: { onSendInPlace(rowId, recordUuid, text, editDraft, newerIdentical()) },
+                sendBlocked: blocked != nil || rewindSupport != .offered,
                 onCreate: { onCreateBranch(recordUuid, text, editDraft, newerIdentical()) },
                 onCancel: onCancelEdit
             )
@@ -4050,7 +5853,10 @@ private struct RunnerStreamView: View {
                 // The paperclip line under the bubble, the chat page's
                 // shape: the names an inlined message carried, off the
                 // record (history) or the send (live).
-                message: ChatMessage(id: rowId, role: "user", content: text,
+                // A `!` command is drawn as the line it was, never read as
+                // markdown.
+                message: ChatMessage(id: rowId, role: "user",
+                                     content: shellCommand ? ShellCommandInput.markdown(text) : text,
                                      files: attachedFiles.isEmpty ? nil
                                          : attachedFiles.joined(separator: ", ")),
                 assistantLabelOverride: assistantLabel,
@@ -4058,14 +5864,56 @@ private struct RunnerStreamView: View {
                 // A notice in the user column is not the user's message
                 // — a task notification, a compaction summary — and has
                 // no record of its own to cut at; the pencil would only
-                // ever answer with an error.
-                onEdit: (canBranch && editingRowId == nil && !isSystemNotice)
-                    ? { onBeginEdit(rowId, text) } : nil,
-                editHint: String(
-                    localized: "Create a new session branch from here",
-                    comment: "Tooltip for the branch pencil on a sent agent message")
+                // ever answer with an error. Nor is an answer steered into
+                // a running turn: a branch cuts at a turn, and editing the
+                // answer would replace the prompt of the turn it went into.
+                // A `!` command is not a message to edit or branch at:
+                // neither its record nor its row carries the words a
+                // branch is cut at (`AgentSessionHistoryItem.shellCommand`).
+                onEdit: (canBranch && editingRowId == nil && !isSystemNotice && !sentIntoTurn
+                         && !shellCommand)
+                    ? { onBeginEdit(rowId, text, loadedSkills) } : nil,
+                loadedSkills: loadedSkills
             )
         }
+    }
+
+    /// Why Send cannot take the session back to this row, or nil when it
+    /// can (the installed tool's support aside, which disables Send with
+    /// the ordinary sentence while it is still being read).
+    ///
+    /// A message above a summary is one the agent no longer holds as it
+    /// was: Kimi Code refuses to undo across one, and each tool's own
+    /// terminal offers only the messages after it. Create Branch is how to
+    /// start again from such a message.
+    private func sendBlockedReason(forRow rowId: UUID) -> String? {
+        if rewindSupport == .needsNewer {
+            return String(
+                localized: "Send needs a newer version of \(assistantLabel). Create Branch starts a new session and keeps this one.",
+                comment: "Message editor: the installed agent cannot go back to a message; the placeholder is the agent's label")
+        }
+        guard summarizedBelow(rowId) else { return nil }
+        return String(
+            localized: "\(assistantLabel) summarised the conversation after this message, so Send can't go back to it. Create Branch starts a new session and keeps this one.",
+            comment: "Message editor: a compaction sits below the edited message; the placeholder is the agent's label")
+    }
+
+    /// Whether a compaction row lies below the row, in what is on screen.
+    private func summarizedBelow(_ rowId: UUID) -> Bool {
+        let liveCompaction = { (events: ArraySlice<StreamEvent>) in
+            events.contains { if case .compaction = $0.kind { return true }; return false }
+        }
+        if let at = historicalItems.firstIndex(where: { $0.id == rowId }) {
+            let below = historicalItems[(at + 1)...].contains {
+                if case .compaction = $0.kind { return true }
+                return false
+            }
+            return below || liveCompaction(runner.events[...])
+        }
+        if let at = runner.events.firstIndex(where: { $0.id == rowId }) {
+            return liveCompaction(runner.events[(at + 1)...])
+        }
+        return false
     }
 
     /// How many live user rows BELOW this one say the same thing. A
@@ -4076,9 +5924,14 @@ private struct RunnerStreamView: View {
     /// same. History rows carry their record and never need this.
     private func newerIdenticalLiveRows(after id: UUID, text: String) -> Int {
         guard let at = runner.events.firstIndex(where: { $0.id == id }) else { return 0 }
+        // A message of attached files alone has no words, and its files
+        // are what it says: its record is found by them, so the rows to
+        // skip are the newer ones naming the same files.
+        let files = text.isEmpty ? runner.events[at].attachedFiles : []
         var count = 0
         for event in runner.events[(at + 1)...] {
-            if case .userMessage(let t) = event.kind, !event.isSystemNotice, t == text {
+            if case .userMessage(let t) = event.kind, !event.isSystemNotice, t == text,
+               !text.isEmpty || event.attachedFiles == files {
                 count += 1
             }
         }
@@ -4090,9 +5943,8 @@ private struct RunnerStreamView: View {
     @ViewBuilder
     private func renderEvent(
         _ event: StreamEvent,
-        pairing: (byUseId: [String: PairedResult],
-                  consumed: Set<UUID>,
-                  labelled: Set<UUID>)
+        pairing: Pairing,
+        names: NameLayout
     ) -> some View {
         switch event.kind {
         case .userMessage(let text):
@@ -4103,19 +5955,23 @@ private struct RunnerStreamView: View {
             // repeat it (counted at the click, not per pass).
             userRow(rowId: event.id, text: text, recordUuid: nil,
                     isSystemNotice: event.isSystemNotice,
+                    sentIntoTurn: event.sentIntoTurn,
                     attachedFiles: event.attachedFiles,
+                    loadedSkills: event.loadedSkills,
+                    shellCommand: event.shellCommand,
                     newerIdentical: { newerIdenticalLiveRows(after: event.id, text: text) })
                 .environment(\.sipSearchSlot, find.slot(forRow: event.id))
         case .assistantText(let text):
             MessageBubble(
                 message: ChatMessage(id: event.id, role: "assistant", content: text),
-                assistantLabelOverride: assistantLabel
+                assistantLabelOverride: assistantLabel,
+                showsHeader: !names.quiet.contains(event.id)
             )
             .environment(\.sipSearchSlot, find.slot(forRow: event.id))
         case .toolUse(let id, let name, let input):
             toolActivityChip(chipId: event.id, name: name, input: input,
                              result: pairing.byUseId[id],
-                             showsLabel: pairing.labelled.contains(event.id))
+                             showsLabel: names.named.contains(event.id))
         case .toolResult(_, let output, let isError):
             if !pairing.consumed.contains(event.id) {
                 orphanResultChip(chipId: event.id, output: output,
@@ -4136,10 +5992,58 @@ private struct RunnerStreamView: View {
         case .compaction(let pre, let post):
             compactionRow(preTokens: pre, postTokens: post,
                           slot: find.slot(forRow: event.id))
+        case .shellOutput(let output):
+            shellOutputRow(output, slot: find.slot(forRow: event.id))
         case .thinking:
             // Drawn only inside its turn's activity line.
             EmptyView()
         }
+    }
+
+    /// What a `!` command printed, under its row: a code block — Copy and
+    /// Save on hover, searched like any drawn text — and a quiet line for
+    /// what the block cannot say: a failure's exit code, a Stop, a command
+    /// the agent did not run (in its own words), or no output at all. A long
+    /// output is drawn as its start (`ShellCommandOutput.shown`), and says so.
+    private func shellOutputRow(_ output: ShellCommandOutput,
+                                slot: SearchHighlightSlot) -> some View {
+        let shown = output.shown
+        let cutNote: String? = shown.cut
+            ? String(localized: "Only the start of the output is shown.",
+                     comment: "Transcript line under a ! command whose output is too long to draw whole")
+            : nil
+        let note: String? = {
+            if let notRun = output.notRun { return notRun }
+            if output.interrupted {
+                return String(localized: "Stopped before it finished",
+                              comment: "Transcript line under a ! command the user stopped")
+            }
+            if output.failed {
+                if let code = output.exitCode {
+                    return String(localized: "Exit code \(code)",
+                                  comment: "Transcript line under a ! command that failed; placeholder is its exit code")
+                }
+                return String(localized: "The command failed",
+                              comment: "Transcript line under a ! command that failed without an exit code")
+            }
+            if shown.text.isEmpty {
+                return String(localized: "No output",
+                              comment: "Transcript line under a ! command that printed nothing")
+            }
+            return nil
+        }()
+        return VStack(alignment: .leading, spacing: 4) {
+            if !shown.text.isEmpty {
+                CodeBlockView(language: "", code: shown.text, slot: slot)
+            }
+            ForEach(Array([cutNote, note].compactMap { $0 }.enumerated()), id: \.offset) { _, line in
+                Text(line)
+                    .font(.system(size: 12 * SipFont.contentRatio(fontScale)))
+                    .foregroundColor(ChatDesign.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// Quiet system row for a turn that was stopped before finishing —
@@ -4174,18 +6078,22 @@ private struct RunnerStreamView: View {
     ///
     /// Static — no clock, no progress. Figures only when the agent
     /// recorded them; codex records none and the row simply says less.
-    private func compactionRow(preTokens: Int?, postTokens: Int?,
-                               slot: SearchHighlightSlot = .inactive) -> some View {
-        let message: String
+    /// The compaction row's words — also what a live line says when the
+    /// compaction is the newest thing in it.
+    static func compactionMessage(preTokens: Int?, postTokens: Int?) -> String {
         if let pre = preTokens, let post = postTokens {
-            message = String(
+            return String(
                 localized: "Conversation compacted (\(ContextUsageFormat.compact(pre)) → \(ContextUsageFormat.compact(post)) tokens)",
                 comment: "Transcript row after the agent summarised the conversation, with before and after sizes")
-        } else {
-            message = String(
-                localized: "Conversation compacted",
-                comment: "Transcript row after the agent summarised the conversation")
         }
+        return String(
+            localized: "Conversation compacted",
+            comment: "Transcript row after the agent summarised the conversation")
+    }
+
+    private func compactionRow(preTokens: Int?, postTokens: Int?,
+                               slot: SearchHighlightSlot = .inactive) -> some View {
+        let message = Self.compactionMessage(preTokens: preTokens, postTokens: postTokens)
         return HStack(spacing: 6) {
             Image(systemName: "arrow.down.right.and.arrow.up.left")
                 .font(.system(size: 12 * SipFont.contentRatio(fontScale)))
@@ -4209,17 +6117,18 @@ private struct RunnerStreamView: View {
     /// markers between messages, not as a terminal log.
     @ViewBuilder
     /// `showsLabel` puts the agent's name above the chip. True only when
-    /// this chip OPENS the answer (see `toolPairing.labelled`) — a turn
-    /// that starts by reading a file otherwise showed no attribution at
-    /// all, because the header lives in `MessageBubble` and a tool call
-    /// never goes through it.
+    /// this chip OPENS the answer (`transcriptNames`) — a turn that
+    /// starts by reading a file otherwise showed no attribution at all,
+    /// because the header lives in `MessageBubble` and a tool call never
+    /// goes through it.
     private func toolActivityChip(chipId: UUID,
                                   name: String,
                                   input: [String: Any],
                                   result: PairedResult?,
                                   showsLabel: Bool = false) -> some View {
-        let summary = AgentRendering.summarizeToolInput(name: name, input: input)
+        let summary = AgentRendering.toolSummary(name: name, input: input, resultOutput: result?.output)
         let rows = AgentRendering.fullToolBody(name: name, input: input)
+        let resultRows = result.map { AgentRendering.toolResultRows(name: name, output: $0.output) } ?? []
         // The chip's matches, split across the pieces it draws in the
         // order it draws them. `chipTexts` is the same list the find
         // engine counted this row in, so index i here is piece i there.
@@ -4234,6 +6143,10 @@ private struct RunnerStreamView: View {
                 summary: summary,
                 isError: result?.isError ?? false,
                 showsSpinner: result == nil && runner.status.isRunning,
+                // A call that has ended with nothing to show below its
+                // header — a Codex search, its terms beside the title —
+                // does not open onto an empty card.
+                opens: result == nil || !rows.isEmpty || !resultRows.isEmpty,
                 titleSlot: slots.first ?? .inactive,
                 summarySlot: slots.count > 1 ? slots[1] : .inactive
             ) {
@@ -4241,11 +6154,11 @@ private struct RunnerStreamView: View {
                     toolBodyText(row: row,
                                  slot: slotAt(slots, 2 + index))
                 }
-                if let result = result {
+                if let result = result, !resultRows.isEmpty {
                     if !rows.isEmpty {
                         Divider().padding(.vertical, 4)
                     }
-                    chipResultRows(result, slotOffset: 2 + rows.count, slots: slots)
+                    chipResultRows(result, rows: resultRows, slotOffset: 2 + rows.count, slots: slots)
                 }
             }
         }
@@ -4292,11 +6205,14 @@ private struct RunnerStreamView: View {
         }
     }
 
+    /// `rows` the chip has already worked out (`AgentRendering
+    /// .toolResultRows`), else the result's own body.
     @ViewBuilder
     private func chipResultRows(_ result: PairedResult,
+                                rows given: [AgentRendering.ToolBodyRow]? = nil,
                                 slotOffset: Int = 0,
                                 slots: [SearchHighlightSlot] = []) -> some View {
-        let rows = AgentRendering.fullToolResultBody(result.output)
+        let rows = given ?? AgentRendering.fullToolResultBody(result.output)
         ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
             HStack(spacing: 0) {
                 if result.isError && row == rows.first {
@@ -4317,19 +6233,24 @@ private struct RunnerStreamView: View {
                                        summary: String,
                                        isError: Bool,
                                        showsSpinner: Bool,
+                                       opens: Bool = true,
                                        titleSlot: SearchHighlightSlot = .inactive,
                                        summarySlot: SearchHighlightSlot = .inactive,
                                        @ViewBuilder body: () -> Body) -> some View {
-        let expanded = expandedToolResults.contains(chipId)
+        let expanded = opens && expandedToolResults.contains(chipId)
         VStack(alignment: .leading, spacing: 0) {
             Button {
+                guard opens else { return }
                 if expanded { expandedToolResults.remove(chipId) }
                 else { expandedToolResults.insert(chipId) }
             } label: {
                 HStack(spacing: 7) {
+                    // A chip that does not open keeps the chevron's place,
+                    // so its title lines up with every other chip's.
                     Image(systemName: expanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 9 * SipFont.contentRatio(fontScale), weight: .semibold))
                         .foregroundColor(ChatDesign.textHint)
+                        .opacity(opens ? 1 : 0)
                         .frame(width: 10)
                     Image(systemName: symbol)
                         .font(.system(size: 11 * SipFont.contentRatio(fontScale)))
@@ -4418,11 +6339,13 @@ private struct RunnerStreamView: View {
     private func errorRow(message: String,
                           slot: SearchHighlightSlot = .inactive) -> some View {
         HStack(alignment: .top, spacing: 6) {
+            // The interrupted row's sizes: what it shows at Default, inside
+            // the content re-scope, where a raw multiply lands 7 % under.
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 12 * SipFont.contentRatio(fontScale)))
                 .foregroundColor(.orange)
             Text(AttributedString.highlighting(message, slot: slot).0)
-                .font(.system(size: 12 * fontScale))
+                .font(.system(size: 12 * SipFont.contentRatio(fontScale)))
                 .foregroundColor(ChatDesign.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
@@ -4442,263 +6365,71 @@ private struct RunnerStreamView: View {
     // MARK: - Approval card
 
     /// ExitPlanMode is a plan to approve, not a tool call to allow: it
-    /// gets the plan card. Every other request gets the permission card.
+    /// gets the plan card. A question is not a permission either: it gets
+    /// the question card, where the user answers it. Every other request
+    /// gets the permission card. A request from codex's or kimi's own
+    /// protocol, or an MCP server's form or link, carries how it is drawn
+    /// (`presentation`), and gets the cards drawn from it — FIRST, so a
+    /// kimi ExitPlanMode never reaches claude's plan card. They all live in their own files
+    /// (`ApprovalCards.swift`, `AskingCards.swift`, `AgentQuestionCard
+    /// .swift`) and share one keyboard (`cardKeys`): only the newest card
+    /// takes it.
     @ViewBuilder
     private func approvalCard(_ req: MCPApprovalRequest,
                               ownsKeyboardShortcuts: Bool) -> some View {
-        if req.toolName == MCPBridge.planApprovalTool {
-            planApprovalCard(req, ownsKeyboardShortcuts: ownsKeyboardShortcuts)
+        if let content = req.permissionContent {
+            AgentPermissionCard(request: req, content: content,
+                                ownsKeys: ownsKeyboardShortcuts, keys: cardKeys,
+                                onModeAdopted: onModeAdopted)
+        } else if let content = req.planContent {
+            AgentPlanReviewCard(request: req, content: content,
+                                ownsKeys: ownsKeyboardShortcuts, keys: cardKeys,
+                                onModeAdopted: onModeAdopted)
+        } else if let content = req.linkContent {
+            AgentLinkCard(request: req, content: content,
+                          ownsKeys: ownsKeyboardShortcuts, keys: cardKeys)
+        } else if req.toolName == MCPBridge.planApprovalTool {
+            PlanApprovalCard(request: req, agentName: agentName,
+                             ownsKeys: ownsKeyboardShortcuts, keys: cardKeys,
+                             listedModes: ClaudeCapabilities.shared.permissionModes.map(\.name),
+                             modeBeforePlan: runner.modeBeforePlan,
+                             savedNote: mcpBridge.cardNotes[req.id],
+                             onModeAdopted: onModeAdopted)
+        } else if let form = req.question {
+            AgentQuestionCard(request: req, form: form, agentName: agentName,
+                              ownsKeys: ownsKeyboardShortcuts, keys: cardKeys,
+                              savedDraft: mcpBridge.questionDrafts[req.id])
         } else {
-            toolApprovalCard(req, ownsKeyboardShortcuts: ownsKeyboardShortcuts)
+            ToolApprovalCard(request: req, folder: runner.cwd, ownsKeys: ownsKeyboardShortcuts,
+                             keys: cardKeys, onModeAdopted: onModeAdopted)
         }
-    }
-
-    /// The end of a planning turn, asked the way claude's own terminal
-    /// asks it:
-    ///
-    /// * **Approve and accept edits** — allow, with a `setMode
-    ///   acceptEdits`: claude leaves plan mode straight into
-    ///   accept-edits (measured), so the implementation it starts in this
-    ///   same turn edits files without a card per file.
-    /// * **Approve, ask before edits** — allow alone: claude returns to
-    ///   the mode it was in before planning — Default for a session
-    ///   launched on Plan (measured) — and asks before each edit.
-    /// * **Keep planning** — deny, with words the model reads verbatim
-    ///   (`MCPBridge.keepPlanningMessage`): stop, stay in plan mode, and
-    ///   wait for the user's next message.
-    ///
-    /// The plan is drawn from the request itself: claude reads its plan
-    /// file back into the tool's input (`plan`, `planFilePath`). An
-    /// approval moves the session's chip off Plan (`onPlanApproved`).
-    /// No "Always" buttons: a plan is approved once.
-    private func planApprovalCard(_ req: MCPApprovalRequest,
-                                  ownsKeyboardShortcuts: Bool) -> some View {
-        let ratio = SipFont.contentRatio(fontScale)
-        let plan = ((req.toolInput["plan"] as? String) ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let path = (req.toolInput["planFilePath"] as? String) ?? ""
-        let acceptEdits = PlanApprovalModes.acceptEdits(
-            in: ClaudeCapabilities.shared.permissionModes.map(\.name))
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "map")
-                    .font(.system(size: 13 * ratio, weight: .semibold))
-                    .foregroundColor(.orange)
-                Text("Plan ready for review",
-                     comment: "Plan card title: an agent session in plan mode finished its plan and waits for the user's approval")
-                    .font(.system(size: 13 * ratio, weight: .semibold))
-                    .foregroundColor(ChatDesign.textPrimary)
-                Spacer(minLength: 8)
-            }
-            if !plan.isEmpty {
-                MarkdownRenderer.render(plan)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8)
-                            .fill(ChatDesign.cardBg.opacity(0.5))
-                    )
-            }
-            if !path.isEmpty {
-                Text(String(localized: "Saved as \(AgentRendering.shortenPath(path))",
-                            comment: "Plan card: the file the plan was saved to; placeholder is its path"))
-                    .font(.system(size: 12 * ratio))
-                    .foregroundColor(ChatDesign.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-            }
-            HStack(spacing: 8) {
-                Spacer(minLength: 0)
-                Button {
-                    mcpBridge.resolve(requestId: req.id, verdict: .deny,
-                                      message: MCPBridge.keepPlanningMessage)
-                } label: {
-                    Text("Keep planning",
-                         comment: "Plan card button: do not approve the plan yet; the agent stops and waits for the user's next message")
-                        .font(.system(size: 13 * ratio, weight: .medium))
-                        .frame(minWidth: 88)
-                }
-                .keyboardShortcut(ownsKeyboardShortcuts ? .cancelAction : nil)
-                .modifier(ApprovalButtonHover())
-                if acceptEdits != nil {
-                    Button {
-                        approvePlan(req, acceptEdits: false)
-                    } label: {
-                        Text("Approve, ask before edits",
-                             comment: "Plan card button: approve the plan; the agent asks before each edit")
-                            .font(.system(size: 13 * ratio, weight: .medium))
-                    }
-                    .modifier(ApprovalButtonHover())
-                }
-                Button {
-                    approvePlan(req, acceptEdits: acceptEdits != nil)
-                } label: {
-                    Group {
-                        if acceptEdits != nil {
-                            Text("Approve and accept edits",
-                                 comment: "Plan card button: approve the plan; the agent's edits are accepted without asking")
-                        } else {
-                            Text("Approve plan",
-                                 comment: "Plan card button when the tool offers no accept-edits mode: approve the plan")
-                        }
-                    }
-                    .font(.system(size: 13 * ratio, weight: .semibold))
-                }
-                .keyboardShortcut(ownsKeyboardShortcuts ? .defaultAction : nil)
-                .buttonStyle(.borderedProminent)
-                .modifier(ApprovalButtonHover())
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.orange.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.orange.opacity(0.4), lineWidth: 1)
-                )
-        )
-    }
-
-    /// Allow the plan — with claude's own "switch to accept-edits" when
-    /// asked — and hand the mode claude is now in to the session view.
-    private func approvePlan(_ req: MCPApprovalRequest, acceptEdits: Bool) {
-        let modes = ClaudeCapabilities.shared.permissionModes.map(\.name)
-        let switchTo = acceptEdits ? PlanApprovalModes.acceptEdits(in: modes) : nil
-        mcpBridge.resolve(requestId: req.id, verdict: .allow, setMode: switchTo)
-        onPlanApproved(switchTo ?? PlanApprovalModes.askBeforeEdits(in: modes))
-    }
-
-    private func toolApprovalCard(_ req: MCPApprovalRequest,
-                                  ownsKeyboardShortcuts: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "hand.raised")
-                    .font(.system(size: 13 * SipFont.contentRatio(fontScale), weight: .semibold))
-                    .foregroundColor(.orange)
-                Text("Permission request",
-                     comment: "Approval card title")
-                    .font(.system(size: 13 * SipFont.contentRatio(fontScale), weight: .semibold))
-                    .foregroundColor(ChatDesign.textPrimary)
-                Spacer(minLength: 8)
-                Text(req.toolName)
-                    .font(.system(size: 12 * SipFont.contentRatio(fontScale), weight: .semibold, design: .monospaced))
-                    .foregroundColor(ChatDesign.textSecondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(ChatDesign.cardBg)
-                    )
-            }
-            if !req.inputPreview.isEmpty {
-                Text(req.inputPreview)
-                    .font(.system(size: 13 * SipFont.contentRatio(fontScale), design: .monospaced))
-                    .foregroundColor(ChatDesign.textPrimary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(ChatDesign.cardBg.opacity(0.5))
-                    )
-            }
-            VStack(alignment: .trailing, spacing: 6) {
-                HStack(spacing: 8) {
-                    Button {
-                        mcpBridge.resolve(requestId: req.id, verdict: .denyAlways)
-                    } label: {
-                        Text("Deny Always",
-                             comment: "Approval card button — remember deny for matching future calls")
-                            .font(.system(size: 12 * SipFont.contentRatio(fontScale)))
-                            .frame(minWidth: 88)
-                    }
-                    .modifier(ApprovalButtonHover())
-                    Button {
-                        mcpBridge.resolve(requestId: req.id, verdict: .allowAlways)
-                    } label: {
-                        Text("Allow Always",
-                             comment: "Approval card button — remember allow for matching future calls")
-                            .font(.system(size: 12 * SipFont.contentRatio(fontScale)))
-                            .frame(minWidth: 88)
-                    }
-                    .modifier(ApprovalButtonHover())
-                }
-                HStack(spacing: 8) {
-                    Button {
-                        mcpBridge.resolve(requestId: req.id, verdict: .deny)
-                    } label: {
-                        Text("Deny",
-                             comment: "Approval card deny button — one-shot")
-                            .font(.system(size: 13 * SipFont.contentRatio(fontScale), weight: .medium))
-                            .frame(minWidth: 88)
-                    }
-                    .keyboardShortcut(ownsKeyboardShortcuts ? .cancelAction : nil)
-                    .modifier(ApprovalButtonHover())
-                    Button {
-                        mcpBridge.resolve(requestId: req.id, verdict: .allow)
-                    } label: {
-                        Text("Allow",
-                             comment: "Approval card allow button — one-shot")
-                            .font(.system(size: 13 * SipFont.contentRatio(fontScale), weight: .semibold))
-                            .frame(minWidth: 88)
-                    }
-                    .keyboardShortcut(ownsKeyboardShortcuts ? .defaultAction : nil)
-                    .buttonStyle(.borderedProminent)
-                    .modifier(ApprovalButtonHover())
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .trailing)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.orange.opacity(0.06))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12)
-                        .stroke(Color.orange.opacity(0.4), lineWidth: 1)
-                )
-        )
     }
 
     // MARK: - Waiting row
 
-    /// True from the moment a turn is sent until the first thing Claude
+    /// True from the moment a turn is sent until the first thing the agent
     /// actually produces lands — the dead stretch under the user's own
     /// message, where a running clock in the composer is not enough to
     /// stop the page reading as stale.
     ///
-    /// Walks back only as far as the turn's own `.userMessage`, so a
-    /// second send in an existing session gets the row again rather
-    /// than reading the previous turn's output as this turn's.
-    /// `systemInit` does NOT count as output: it is the handshake and
-    /// lands in milliseconds, so counting it would make the row blink
-    /// once and never be seen.
+    /// The walk back stops at the turn's own message (`WaitingRow`), so a
+    /// second send in an existing session gets the row again rather than
+    /// reading the previous turn's output as this turn's. A compaction row
+    /// is not the agent answering: the spinner stays under it.
     private var awaitingFirstAgentEvent: Bool {
-        guard runner.status.isRunning else { return false }
-        for event in runner.events.reversed() {
-            switch event.kind {
-            case .userMessage: return true
-            // Neither of these is the agent answering: the spinner
-            // stays until real output arrives.
-            case .systemInit, .compaction: continue
-            default: return false
-            }
-        }
-        return true
+        runner.status.isRunning
+            && WaitingRow.awaitsAgent(runner.events, compactionIsOutput: false)
     }
 
     /// Spinner + "Sipping…", and deliberately NO elapsed time.
     ///
-    /// No label above it either: the attribution belongs to the
-    /// answer, and putting it over a placeholder makes the wait look
-    /// like a message. The label arrives with the first real row
-    /// (`MessageBubble`'s header, or `toolPairing.labelled` when a
-    /// tool call opens the turn).
+    /// No label above it in an agent turn drawn in full: the attribution
+    /// belongs to the answer, and the label arrives with the first real
+    /// row (`MessageBubble`'s header, or the chip's when a tool call
+    /// opens the turn — `transcriptNames`). Where the answer is drawn
+    /// with the name once (compact view, a Chat only turn) the name
+    /// stands over this row instead (`NameLayout.waitingNamed`), where
+    /// the first step will be, so nothing moves when it lands.
     ///
     /// This row is static, appears for one gap per turn, and must stay
     /// that way — a time here would put the 1 Hz whole-transcript
@@ -4713,7 +6444,7 @@ private struct RunnerStreamView: View {
     /// wait does, never on a clock.
     private var waitingRow: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // The Chat only activity line shares this exact shape, so
+            // The activity line shares this exact shape, so
             // "Sipping…" turning into its first step is a text change in
             // place — keep the two in step (`Verification/ChatOnlyActivity`).
             HStack(spacing: 8) {
@@ -4759,6 +6490,56 @@ private struct RunnerStreamView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
+    }
+
+    /// The background work a turn whose answer has landed is waiting on
+    /// (`AgentRunner.awaitedBackgroundTasks`). Static, like every other
+    /// in-progress row here: no time in it, and it changes only when the
+    /// work does.
+    ///
+    /// Where a piece of work can be stopped on its own — claude's tasks,
+    /// codex's background terminals — it has a line of its own with a Stop:
+    /// that work alone stops, and the turn goes on waiting for the rest.
+    /// Kimi's front end has no such request; the composer's Stop ends the
+    /// turn and its work together.
+    private var backgroundTaskRow: some View {
+        let tasks = runner.awaitedBackgroundTasks
+        let terminals = runner.agentKey == "codex"
+        return VStack(alignment: .leading, spacing: 4) {
+            if runner.canStopBackgroundTasks {
+                ForEach(tasks, id: \.id) { task in
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        backgroundTaskText(BackgroundTaskLine.text([task], terminals: terminals))
+                        Spacer(minLength: 8)
+                        BackgroundTaskStopButton(
+                            stopping: runner.stoppingBackgroundTasks.contains(task.id),
+                            terminal: terminals,
+                            fontSize: 12 * SipFont.contentRatio(fontScale)
+                        ) {
+                            runner.stopBackgroundTask(id: task.id)
+                        }
+                    }
+                }
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    backgroundTaskText(BackgroundTaskLine.text(tasks, terminals: terminals))
+                    Spacer()
+                }
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
+    /// A String expression: task descriptions and commands are the agent's
+    /// words and must not be markdown-parsed.
+    private func backgroundTaskText(_ line: String) -> some View {
+        Text(line)
+            .font(.system(size: 13 * SipFont.contentRatio(fontScale)))
+            .foregroundColor(ChatDesign.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     /// The child is retrying a dropped stream and has said so. Static
@@ -4845,5 +6626,44 @@ private struct RunnerStreamView: View {
                         .stroke(ChatDesign.border, lineWidth: 1)
                 )
         )
+    }
+}
+
+/// Stop on one line of the background work a turn waits on: that work
+/// alone stops (`AgentRunner.stopBackgroundTask`), and the turn goes on
+/// waiting for the rest. Reads "Stopping…" until the work is gone.
+private struct BackgroundTaskStopButton: View {
+    let stopping: Bool
+    /// A codex background terminal, which runs a command.
+    let terminal: Bool
+    let fontSize: CGFloat
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(stopping
+                 ? String(localized: "Stopping…",
+                          comment: "Transcript: a background task or command the user stopped, until it is gone")
+                 : String(localized: "Stop",
+                          comment: "Transcript: stop one background task or command the turn waits on"))
+                .font(.system(size: fontSize, weight: .medium))
+                .foregroundColor(stopping ? ChatDesign.textSecondary : ChatDesign.textPrimary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(hovered && !stopping ? Color.gray.opacity(0.2) : Color.clear)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(stopping)
+        .onHover { hovered = $0 }
+        .help(terminal
+              ? String(localized: "Stop only this command",
+                       comment: "Hover hint on Stop beside one of Codex's background terminals")
+              : String(localized: "Stop only this task",
+                       comment: "Hover hint on Stop beside one background task of the turn"))
     }
 }

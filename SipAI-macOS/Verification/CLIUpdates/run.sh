@@ -32,12 +32,19 @@ if [ ! -f "$model" ]; then
   echo "        (the feature's model file — nothing to test)"
   exit 1
 fi
-# The badge and the header's queue live beside it, and are compiled
-# WHOLE: nothing in that file reaches for an app type.
+# The badge and the turns that wait for an update live beside it, and
+# are compiled WHOLE: nothing in that file reaches for an app type.
 notices="$root/SipAI/Models/UpdateNotices.swift"
 if [ ! -f "$notices" ]; then
   echo "  FAIL  $notices not found"
-  echo "        (the badge and the announcement queue — nothing to test)"
+  echo "        (the badge and the update wait list — nothing to test)"
+  exit 1
+fi
+# The line a tool that cannot start stopped with — compiled whole too.
+startFailure="$root/SipAI/Models/CLIStartFailure.swift"
+if [ ! -f "$startFailure" ]; then
+  echo "  FAIL  $startFailure not found"
+  echo "        (a tool that cannot start is read as a version out of its error)"
   exit 1
 fi
 
@@ -65,5 +72,5 @@ for required in "static func parse" "static func decideStatus" "static func upda
 done
 
 swiftc -O -o "$out/cliupdharness" \
-  "$here/Stubs.swift" "$out/Extracted.swift" "$notices" "$here/main.swift"
+  "$here/Stubs.swift" "$out/Extracted.swift" "$notices" "$startFailure" "$here/main.swift"
 "$out/cliupdharness" "$root"

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Headless check of Settings → Agent Guide and the presence rule that
+# Headless check of Settings → Agent Initialization and the presence rule that
 # holds the feature together — see the header of AgentGuide.swift.
 #
 # The rules under test are EXTRACTED VERBATIM from the shipping
@@ -53,7 +53,7 @@ done
   done
   awk -v pat="^enum TomlScalar[ :]" '$0 ~ pat, /^\}/' "$launch"
   echo
-  for decl in "enum AgentPresence" "enum AgentAddRow" "struct ClaudeAuthStatus" \
+  for decl in "enum AgentPresence" "enum AgentAddRow" "enum AgentCardButtons" "struct ClaudeAuthStatus" \
               "enum KimiServerAnswer" "enum KimiConfigProviders" "enum KimiCatalogListing" \
               "enum AgentInstallSource" "enum AgentDeletePlan" "enum AgentInstallRoute" "enum KimiSite" \
               "enum AgentSignIn" "enum TerminalText" "enum CodexPackageInstall" \
@@ -70,7 +70,7 @@ done
 } > "$out/Extracted.swift"
 
 for required in "static func resolve(installed: Bool," "static func carry(previous:" \
-                "static func label(presences:" "static func detect(agentKey: String," \
+                "static func label(presences:" "static func buttons(presence:" "static func detect(agentKey: String," \
                 "static func make(agentKey: String," "static func route(agentKey: String)" \
                 "static func expectedDigest(sums:" "static func needsRCLine(loginShellPath:" \
                 "agentListed: Bool = true," "static func scrubbed(_ output:" \
@@ -86,7 +86,8 @@ done
 
 if ! swiftc -O -o "$out/guide" \
   "$here/Stubs.swift" "$out/Extracted.swift" "$here/main.swift" \
-  "$src/SipAI/Models/PlanUsage.swift" 2>"$out/build.log"; then
+  "$src/SipAI/Models/PlanUsage.swift" "$src/SipAI/Models/KimiMembership.swift" \
+  "$src/SipAI/Models/CLIStartFailure.swift" 2>"$out/build.log"; then
   cat "$out/build.log" >&2
   exit 1
 fi

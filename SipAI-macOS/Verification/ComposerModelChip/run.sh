@@ -34,6 +34,7 @@ trap 'rm -rf "$out"' EXIT
 swiftc -O -o "$out/modelchipharness" \
   "$here/Stubs.swift" "$here/main.swift" \
   "$here/../../SipAI/Models/AgentLaunchOptions.swift" \
+  "$here/../../SipAI/Models/SkillModel.swift" \
   "$here/../../SipAI/Models/KimiToolPolicy.swift" \
   "$here/../../SipAI/Models/ConfigManager.swift" \
   "$here/../../SipAI/Models/ProviderCatalog.swift"

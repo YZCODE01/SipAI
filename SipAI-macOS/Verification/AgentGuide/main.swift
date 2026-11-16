@@ -109,6 +109,17 @@ check("userinfo's error envelope is signed out",
       KimiServerAnswer.userInfoVerdict(body: Data(#"{"code":0,"msg":"success","data":{"kind":"error","message":"No token for \"kimi-code\". Run /login to authenticate."}}"#.utf8)) == .signedOut)
 check("userinfo with data is a membership",
       KimiServerAnswer.userInfoVerdict(body: Data(#"{"code":0,"msg":"success","data":{"kind":"user","name":"x"}}"#.utf8)) == .plan(name: nil))
+// kimi 2.5's own web UI shows `userLevelName`, trimmed, beside the account:
+// the membership's name, read from kimi's own answer, never a table of ours.
+let userInfoOK = #"{"code":0,"msg":"success","data":{"kind":"ok","userInfo":{"userId":"u-example","nickname":"Example","status":"","region":"","userLevel":20,"userLevelName":" Allegretto ","domain":1,"domainName":""}}}"#
+check("userinfo names the membership as kimi's own web UI does — userLevelName, trimmed",
+      KimiServerAnswer.userInfoVerdict(body: Data(userInfoOK.utf8)) == .plan(name: "Allegretto"))
+check("…a blank name is no name, and an answer without one is a membership all the same",
+      KimiServerAnswer.userInfoVerdict(body: Data(#"{"code":0,"data":{"kind":"ok","userInfo":{"userId":"u","userLevelName":"  "}}}"#.utf8)) == .plan(name: nil)
+      && KimiMembership.levelName(userInfoBody: Data(#"{"code":0,"data":{"kind":"ok","userInfo":{"userId":"u"}}}"#.utf8)) == nil)
+check("…and nothing is named from an error answer",
+      KimiMembership.levelName(userInfoBody: Data(#"{"code":0,"data":{"kind":"error","message":"No token"}}"#.utf8)) == nil
+      && KimiMembership.levelName(userInfoBody: Data("<html>".utf8)) == nil)
 check("a non-zero code is not the envelope", KimiServerAnswer.data(in: Data(#"{"code":50001,"msg":"Body cannot be empty","data":null}"#.utf8)) == nil)
 check("the region parses", KimiServerAnswer.region(body: Data(#"{"code":0,"msg":"success","data":{"region":"mainland-cn"}}"#.utf8)) == "mainland-cn")
 
@@ -327,6 +338,24 @@ check("no plan removes a session store",
           return false
       })
 
+// The card's buttons, left to right. Delete removes the program alone,
+// so whether the tool is signed in decides nothing about it: a tool SipAI
+// can tell how it was installed can be deleted signed in, hidden or
+// signed out. Signed out, Delete comes before Sign In.
+check("signed out and deletable: Delete, then Sign In",
+      AgentCardButtons.buttons(presence: .notSignedIn, canInstall: true, canDelete: true) == [.delete, .signIn])
+check("signed out, installed some way SipAI cannot tell: Sign In alone",
+      AgentCardButtons.buttons(presence: .notSignedIn, canInstall: true, canDelete: false) == [.signIn])
+check("signed in or hidden: Delete alone (Sign out is the status line's link)",
+      AgentCardButtons.buttons(presence: .listed, canInstall: true, canDelete: true) == [.delete]
+      && AgentCardButtons.buttons(presence: .hiddenByUser, canInstall: true, canDelete: true) == [.delete]
+      && AgentCardButtons.buttons(presence: .listed, canInstall: true, canDelete: false) == [])
+check("not installed: Install where SipAI has a route, nothing where it has none",
+      AgentCardButtons.buttons(presence: .notInstalled, canInstall: true, canDelete: false) == [.install]
+      && AgentCardButtons.buttons(presence: .notInstalled, canInstall: false, canDelete: false) == [])
+check("before the first account read: no buttons",
+      AgentCardButtons.buttons(presence: .pending, canInstall: true, canDelete: true) == [])
+
 section("4c. Install routes")
 check("claude: Anthropic's installer", AgentInstallRoute.route(agentKey: "claude_code") == .script(URL(string: "https://claude.ai/install.sh")!))
 // One kimi installer, whatever the site: Moonshot's two scripts differ only
@@ -394,9 +423,19 @@ check("each site's installer channel",
       && KimiSite.global.installer.absoluteString == "https://code.kimi.ai/kimi-code/install.sh")
 check("the update route accepts exactly the two sites' installers (kimi names its own site's)",
       Set(KimiSite.installers) == Set(AgentCLIRelease.measured(agentKey: "kimi")!.nativeInstallers))
-check("a site lists only its own key providers",
-      KimiSite.mainlandCN.keyProviders.map(\.id) == ["moonshotai-cn", "kimi-code-plan-cn"]
-      && KimiSite.global.keyProviders.map(\.id) == ["moonshotai", "kimi-code-plan-global"])
+// A key from the Kimi Code Console is the membership's own: kimi's /login
+// offers no key route for it ("If your API key was obtained from Kimi Code,
+// please select "Kimi Code" instead"), and models.dev's list for it is the
+// same six models for every plan, so a default taken from it fails a lower
+// plan (Moonshot answers 403 "Your current subscription does not have access").
+check("a site offers only its own platform key — a Kimi Code Console key signs in as the membership",
+      KimiSite.mainlandCN.keyProviders.map(\.id) == ["moonshotai-cn"]
+      && KimiSite.global.keyProviders.map(\.id) == ["moonshotai"])
+check("…while a Kimi Code key a config already holds is still recognized, for its row and its usage page",
+      AgentSignIn.kimiKeyProvider(forBaseURL: "https://api.kimi.com/coding/v1")?.id == "kimi-code-plan-cn"
+      && AgentSignIn.kimiKeyProvider(forBaseURL: "https://api.kimi.ai/coding/v1/")?.id == "kimi-code-plan-global"
+      && AgentSignIn.kimiKeyProvider(forBaseURL: "https://api.kimi.com/coding/v1")?.isKimiCodeKey == true
+      && AgentSignIn.kimiKeyProvider(forBaseURL: "https://api.moonshot.cn/v1")?.isKimiCodeKey == false)
 check("every key provider's API base is on its own site",
       AgentSignIn.kimiKeyProviders.allSatisfy { p in
           let host = URL(string: p.apiBase)?.host ?? ""
@@ -565,14 +604,16 @@ check("OnboardingView is the welcome page alone",
       !onboarding.contains("ModelFetcher") && !onboarding.contains("case chooseProvider") && onboarding.contains("completeOnboarding(installedAgents:"))
 let content = source("SipAI/Views/ContentView.swift")
 check("ContentView's gate reads needsOnboarding", content.contains("showOnboarding ?? config.needsOnboarding"))
-check("the window floor reads the same gate", source("SipAI/SipAIApp.swift").contains("configManager.needsOnboarding ? 720 : 640"))
+check("the window floor reads the same gate",
+      source("SipAI/SipAIApp.swift").contains("configManager.needsOnboarding ? FirstWindowSize.floor.width : 640")
+      && source("SipAI/SipAIApp.swift").contains("configManager.needsOnboarding ? FirstWindowSize.floor.height : 480"))
 check("ContentView closes an open page of an agent that stops being listed",
       content.contains(".onChange(of: agents.listedAgents)") && content.contains("appState.openAgentSessionId = nil"))
 check("ContentView routes .openSettingsTab", content.contains("publisher(for: .openSettingsTab)"))
 // Updates live in Settings → Updates, and an update on offer is shown
 // by the badge there — nothing about a newer version routes to the
 // Guide. (A banner once did, after the rows had moved back.)
-check("no update notice routes to the Agent Guide",
+check("no update notice routes to Agent Initialization",
       !content.contains("settingsTab = .agents") && !content.contains("CLIUpdateBanner"))
 let sidebar = source("SipAI/Views/Sidebar/LeftSidebar.swift")
 check("the sidebar appends each agent section on presence alone",
@@ -581,7 +622,7 @@ check("the sidebar appends each agent section on presence alone",
 check("the ADD row is the rule's label, uppercased in code, last in the column",
       sidebar.contains("AgentAddRow.label(presences:") && sidebar.contains(".textCase(.uppercase)")
       && sidebar.contains("                addAgentsRow\n            }\n        }\n        .frame(maxHeight: .infinity)"))
-check("the ADD row opens the Agent Guide", sidebar.contains("SettingsView.Tab.agents.rawValue"))
+check("the ADD row opens Agent Initialization", sidebar.contains("SettingsView.Tab.agents.rawValue"))
 let allSources = ["SipAI/Models", "SipAI/Views", "SipAI/Utilities", "SipAI/SipAIApp.swift"].flatMap { rel -> [String] in
     let path = root + "/" + rel
     var isDir: ObjCBool = false
@@ -616,11 +657,11 @@ let settings = source("SipAI/Views/Settings/SettingsView.swift")
 check("the Updates pane owns the agent-CLI rows and the switch that governs them",
       settings.contains("CLIUpdateRow(agent:") && settings.contains("Check these tools for new versions automatically")
       && settings.contains("cliUpdates.paneAppeared()"))
-// The chat's two sections come first — Chat models, then Chat Prompt and
-// Roles, whose prompt and roles reach chat turns alone — and the Guide
-// right under them, the first of the agents' sections.
-check("the Agent Guide tab sits third, under Chat models and Chat Prompt and Roles",
-      settings.contains("case models, prompt, agents,"))
+// Chat Settings comes first — its prompt and roles reach chat turns
+// alone — and Agent Initialization right under it, the first of the
+// agents' sections.
+check("the Agent Initialization tab sits second, under Chat Settings",
+      settings.contains("case chat, agents,"))
 let pane = source("SipAI/Views/Settings/AgentGuidePane.swift")
 // Install, sign in, sign out, delete and hide — and nothing about a
 // NEWER version, which is the Updates pane's claim to make. The Guide
@@ -638,6 +679,11 @@ check("guideAppeared is local only — no release request from the Guide",
 """))
 check("Delete and Sign out wait for a running turn; Install and Sign In do not",
       pane.contains(".disabled(isBusy || hasRunningTurn)") && pane.contains("Text(\"Install\", comment:") && pane.contains("Text(\"Sign In\", comment:"))
+check("the card draws the buttons the rule names, in its order, from one property named for the row",
+      pane.contains("AgentCardButtons.buttons(presence: presence,") && pane.contains("ForEach(buttons, id: \\.self)")
+      && pane.contains("private var cardButtons: some View") && !pane.contains("primaryButton"))
+check("a signed-out tool's delete confirmation keeps no sign-in it never had",
+      pane.contains("Its sessions and settings stay in \\(store)") && pane.contains("Its sessions, settings and sign-in stay in \\(store)"))
 let guide = source("SipAI/Models/AgentGuide.swift")
 check("codex's authUrl and kimi's verification URL are host-checked before they open",
       guide.contains("AgentSignIn.hostMatches(authUrl, expected: AgentSignIn.codexHost)") && guide.contains("AgentSignIn.hostMatches(complete, expected: expectedHost)"))
@@ -759,6 +805,22 @@ check("Install asks no site: one installer, the site is asked on Sign In",
 check("signed in, the row names kimi's site or the key's platform",
       pane.contains("\"Membership (\\(site))\"") && pane.contains("\"API key (\\(platform))\"")
       && guide.contains("KimiConfigProviders.keyedBaseURL(configText: text)"))
+check("…the membership's name from kimi's own answer beside it",
+      pane.contains("\"Membership · \\(name) (\\(site))\"") && pane.contains("\"Membership · \\(name)\"")
+      && guide.contains("return .plan(name: KimiMembership.levelName(userInfoBody: body))"))
+check("…and a Kimi Code key a config already holds is named one, never an API key billed per token",
+      pane.contains("\"Kimi Code key (\\(platform))\"") && pane.contains("actions.kimiAccountKeyProvider?.isKimiCodeKey == true"))
+check("the sheet sends a Kimi Code Console key's owner to the membership sign-in, as kimi's own /login does",
+      signInSheetBody.contains("A Kimi Code Console key belongs to your membership. Choose Kimi Code membership above."))
+// models.dev lists the same models for every account in an order that is no
+// ranking; kimi's own key login lists the platform's models and lets the
+// user pick. The first listed id as the default is the bug this replaces.
+check("a platform key starts on the model the user picks from kimi's own catalog list — never the list's first",
+      signInSheetBody.contains("kimiModelPicker") && pane.contains("actions.kimiKeyModels(providerId:")
+      && guide.contains("\"--default-model\", model]")
+      && !guide.contains("KimiCatalogListing.modelIds(from: listing.output).first"))
+check("…and Continue waits for that pick",
+      signInSheetBody.contains("|| (key == \"kimi\" && method == .apiKey && kimiModel == nil)"))
 
 // MARK: 9. Strings
 
@@ -774,7 +836,7 @@ func zh(_ key: String) -> String? {
     ((catalog[key] as? [String: Any])?["localizations"] as? [String: Any]).flatMap { $0["zh-Hans"] as? [String: Any] }
         .flatMap { $0["stringUnit"] as? [String: Any] }.flatMap { $0["value"] as? String }
 }
-for key in ["Agent Guide", "Add agents", "Add more agents", "About chats", "Not installed", "Installed · not signed in",
+for key in ["Agent Initialization", "Add agents", "Add more agents", "About chats", "Not installed", "Installed · not signed in",
             "Signed in — %@", "Install", "Sign In", "Sign out", "Continue in your browser", "Delete %@ from this Mac?",
             "Nothing else on your Mac is changed.", "Mainland China (kimi.com)", "Global (kimi.ai)", "%@ is hidden in SipAI.",
             "Updating these tools is in Settings → Updates.", "The version could not be looked up, so nothing was downloaded.",
@@ -784,7 +846,11 @@ for key in ["Agent Guide", "Add agents", "Add more agents", "About chats", "Not 
             "Kimi Code membership — opens %@ and shows a code to confirm there.",
             "Kimi Code membership — opens the site you pick and shows a code to confirm there.",
             "SipAI downloads Moonshot's installer from code.kimi.com and runs it. It installs to ~/.kimi-code/bin and adds that folder to your shell's PATH.",
-            "Membership (%@)", "API key (%@)"] {
+            "Membership (%@)", "API key (%@)",
+            "Membership · %@ (%@)", "Membership · %@", "Kimi Code key (%@)",
+            "A Kimi Code Console key belongs to your membership. Choose Kimi Code membership above.",
+            "Choose a model", "Reading the models…", "This provider's models could not be listed.",
+            "This removes the %@ command-line tool, the same as uninstalling it in Terminal — here, %@. Its sessions and settings stay in %@ and are back the moment you reinstall. Nothing else on your Mac is changed."] {
     check("\"\(key)\" is translated", zh(key).map { !$0.isEmpty } ?? false)
 }
 for prefix in ["SipAI runs each supported provider's own command-line tool", "You can install a tool below or in Terminal."] {
@@ -792,15 +858,17 @@ for prefix in ["SipAI runs each supported provider's own command-line tool", "Yo
     check("the intro paragraph \"\(prefix.prefix(40))…\" is translated", key.flatMap(zh).map { !$0.isEmpty } ?? false)
 }
 let learnMore = catalog.keys.first { $0.hasPrefix("The Chat section talks to AI models") }
-check("the chat page's sentence carries its link in both languages",
-      learnMore != nil && learnMore!.contains("(sipai://settings/models)") && (zh(learnMore!)?.contains("(sipai://settings/models)") ?? false))
+check("the chat page's sentence carries its link to Chat Settings in both languages",
+      learnMore != nil && learnMore!.contains("(sipai://settings/chat)") && (zh(learnMore!)?.contains("(sipai://settings/chat)") ?? false))
 let subscription = catalog.keys.first { $0.hasPrefix("If you would rather use a subscription plan for your conversations") }
-check("the Chat-models paragraph carries its link in both languages",
-      subscription != nil && subscription!.contains("(sipai://settings/agents)") && (zh(subscription!)?.contains("(sipai://settings/agents)") ?? false))
+check("About chats carries its link to Agent Initialization in both languages",
+      subscription != nil && subscription!.contains("[Agent Initialization](sipai://settings/agents)")
+      && (zh(subscription!)?.contains("[智能体初始化](sipai://settings/agents)") ?? false))
 check("the reordered npm clause uses positional placeholders in Chinese",
       zh("the npm package %@ under %@")?.contains("%1$@") ?? false)
 for stale in ["Kimi Code membership — opens kimi.com (or kimi.ai for the global region) and shows a code to confirm there.",
               "Which site do you use?",
+              "The provider's model list could not be fetched, so nothing was written.",
               "SipAI downloads Moonshot's installer from %@ and runs it. It installs to ~/.kimi-code/bin and adds that folder to your shell's PATH.",
               "(read only)", "Skip — agent sessions only", "Agent command-line tools are updated from Agent Guide.",
               "Agent-only mode — pick an agent session from the sidebar, or add a chat model in Settings → Models.",

@@ -1,38 +1,48 @@
 #!/bin/bash
-# Headless check that a backgrounded task can no longer be silently
-# discarded by a SipAI-driven `claude -p` turn — see the header of
-# main.swift for the rule and the measurements behind it.
+# Headless checks for the work an agent leaves running in the background:
+# Claude Code's background tasks are allowed only where claude reports
+# them, and a SipAI turn stays open until claude has reported every task;
+# Kimi Code's tasks and Codex's background terminals are named while the
+# turn waits on them; a finished or stopped one reads the same live and on
+# reopen — see the header of main.swift for the rules.
 #
-# `ClaudePrintMode` is EXTRACTED VERBATIM from the shipping
-# AgentLaunchOptions.swift rather than restated here: a harness holding
-# its own copy of the rule under test passes for the wrong reason. It
-# needs nothing but Foundation, so nothing else compiles.
+# Compiles the REAL AgentLaunchOptions.swift (the gate), AgentEventParsing
+# .swift (claude's turn rule, the line), CodexEventParsing.swift (codex's),
+# AgentSession.swift, KimiSessions.swift and CodexSessions.swift (the
+# readers), with the readers' stubs, so it pins the shipped code rather
+# than a paraphrase of it.
 #
-# Section 4 is the one that matters over time. The whole fix rests on
-# one undocumented environment variable read out of claude's bundled
-# binary; if a future Claude Code drops or renames it, background tasks
-# return and fail exactly as silently as before. Run this after a Claude
-# Code upgrade.
+# Section 6 runs the installed claude against the ChatOnlyMode stand-in
+# endpoint under a throwaway CLAUDE_CONFIG_DIR, and 6b the installed kimi
+# and codex under throwaway homes: no token is spent, and nothing is
+# written into the user's own stores. It takes about a minute. Run it
+# after a Claude Code, Kimi Code or Codex upgrade: whether a headless run
+# waits for a background task, and the records each keeps of one, are the
+# CLIs' to change.
 #
-# Section 5 spends tokens on a real turn and is opt-in:
+# Section 7 spends one real claude turn and is opt-in:
 #
-#   ./run.sh                    # structural + binary checks, free
+#   ./run.sh                    # everything token-free
 #   SIPAI_BG_LIVE=1 ./run.sh    # plus one real claude turn
 #   ./run.sh <source-root>      # point the source pass at another checkout
 set -e
 here="$(cd "$(dirname "$0")" && pwd)"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
-
-opts="$here/../../SipAI/Models/AgentLaunchOptions.swift"
-awk '/^enum ClaudePrintMode \{/,/^\}/' "$opts" > "$out/ClaudePrintMode.swift"
-if ! grep -q "static func environmentOverlay" "$out/ClaudePrintMode.swift"; then
-  echo "  FAIL  ClaudePrintMode not found in $opts"
-  echo "        (nothing keeps a claude child from reaching for a"
-  echo "         background task that will be killed 5 s later)"
-  exit 1
-fi
-
+models="$here/../../SipAI/Models"
 swiftc -O -o "$out/bgharness" \
-  "$out/ClaudePrintMode.swift" "$here/main.swift"
-"$out/bgharness" "${1:-$here/../..}"
+  "$here/../KimiCode/Stubs.swift" \
+  "$models/AttachmentInline.swift" \
+  "$models/SkillModel.swift" \
+  "$models/ShellCommands.swift" \
+  "$models/AgentSession.swift" \
+  "$models/AgentSessionTailer.swift" \
+  "$models/AgentEventParsing.swift" \
+  "$models/CodexEventParsing.swift" \
+  "$models/CodexSessions.swift" \
+  "$models/CodexRecordedTools.swift" \
+  "$models/AgentLaunchOptions.swift" \
+  "$models/KimiSessions.swift" \
+  "$models/KimiEventParsing.swift" \
+  "$here/main.swift"
+"$out/bgharness" "${1:-$here/../..}" "$here/../ChatOnlyMode/fake_server.py"

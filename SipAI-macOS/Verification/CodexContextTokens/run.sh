@@ -15,8 +15,19 @@ set -e
 here="$(cd "$(dirname "$0")" && pwd)"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
+# The real readers, the shared one included (`AgentSession.swift`), with
+# the kimi harness's stubs for the few app-level types they name.
 swiftc -O -o "$out/codexctxharness" \
-  "$here/Stubs.swift" "$here/main.swift" \
+  "$here/../KimiCode/Stubs.swift" "$here/main.swift" \
   "$here/../../SipAI/Models/AttachmentInline.swift" \
-  "$here/../../SipAI/Models/CodexSessions.swift"
+  "$here/../../SipAI/Models/SkillModel.swift" \
+  "$here/../../SipAI/Models/ShellCommands.swift" \
+  "$here/../../SipAI/Models/AgentSession.swift" \
+  "$here/../../SipAI/Models/AgentSessionTailer.swift" \
+  "$here/../../SipAI/Models/AgentEventParsing.swift" \
+  "$here/../../SipAI/Models/CodexSessions.swift" \
+  "$here/../../SipAI/Models/CodexRecordedTools.swift" \
+  "$here/../../SipAI/Models/AgentLaunchOptions.swift" \
+  "$here/../../SipAI/Models/KimiSessions.swift" \
+  "$here/../../SipAI/Models/KimiEventParsing.swift"
 "$out/codexctxharness" "$@"

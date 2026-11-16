@@ -69,6 +69,11 @@ struct ScheduledTaskPanel: View {
     @ObservedObject private var capabilities = ClaudeCapabilities.shared
     @ObservedObject private var codexCatalog = CodexCatalog.shared
     @ObservedObject private var kimiCatalog = KimiCatalog.shared
+    @ObservedObject private var skillCatalog = SkillCatalog.shared
+    /// The installed CLIs' versions decide which modes the Mode picker
+    /// offers, as they do the composer's.
+    @ObservedObject private var cliMonitor = AgentCLIUpdateMonitor.shared
+    @State private var showingSkillPicker = false
 
     /// The font tier. The panel sits outside the transcript's re-scope —
     /// above it as a banner, or as the whole page — so every size here
@@ -101,15 +106,28 @@ struct ScheduledTaskPanel: View {
 
     /// Which CLI this task fires under — the frontmatter's `agent`,
     /// which `ScheduledTaskScheduler.fire` now honours.
-    private var isCodexTask: Bool { task.definition?.agent == "codex" }
-    /// Kimi tasks carry no MODE: its headless runs refuse the flag and
-    /// auto-approve on their own, so that one picker is replaced by a
-    /// readout rather than offering a value that would be written to
-    /// the file and then rejected at fire time. Effort is a different
-    /// story — kimi grades thinking and takes the level through the
-    /// environment, so that picker stays. See
-    /// `AgentLaunchOptions.kimiFlags`.
-    private var isKimiTask: Bool { task.definition?.agent == "kimi" }
+    private var isCodexTask: Bool { taskAgentKey == "codex" }
+    /// A kimi task's modes are kimi's own — Default, Ask When Needed,
+    /// Never Ask, Plan — and a kimi with no front end runs headless
+    /// whatever is picked, so there the Mode picker is a readout
+    /// (`modeIsReadout`). Kimi takes its effort through the environment,
+    /// so that picker stays either way. See `AgentLaunchOptions.kimiFlags`.
+    private var isKimiTask: Bool { taskAgentKey == "kimi" }
+    /// Named, never "not codex and not kimi": a task of an agent this app
+    /// has no code for would otherwise be offered claude's efforts and
+    /// fast mode.
+    private var isClaudeTask: Bool { taskAgentKey == "claude_code" }
+
+    /// The task's agent, as the registry keys it: its file's, or — for a
+    /// task whose file is gone — its runs' (`ScheduledAgentTask.agent`).
+    private var taskAgentKey: String { task.definition?.agent ?? task.agent }
+
+    /// The task's agent as the user labels it — every sentence names it so.
+    private var taskAgentName: String {
+        config.agentLabel(for: taskAgentKey,
+                          defaultName: AgentManager.registry.first { $0.key == taskAgentKey }?.name
+                              ?? "Claude Code")
+    }
 
     /// Whether the panel is open. Global rather than per-task: it is a
     /// preference about how much chrome the user wants above their
@@ -192,6 +210,9 @@ struct ScheduledTaskPanel: View {
             seedDraft()
             refreshClaudeConfiguredDefault()
             refreshSpeedSources()
+            // What the Mode picker's rows rest on — each read a no-op once
+            // it has landed for the installed binary.
+            ScheduledTaskScheduler.readModeGates()
             // The page exists to be edited; opening it in a read-only
             // view behind an Edit button would be a click for nothing.
             if presentation == .page { editing = definition != nil }
@@ -566,8 +587,13 @@ struct ScheduledTaskPanel: View {
                               ?? String(localized: "Home folder",
                                         comment: "Scheduled-task detail: no cwd recorded"))
                     detailRow(String(localized: "Runs as",
-                                     comment: "Scheduled-task detail label: permission mode"),
+                                     comment: "Scheduled-task detail label: the model, effort and mode each run uses"),
                               runtimeText(def))
+                    if !def.skills.isEmpty, !def.chatOnly {
+                        detailRow(String(localized: "Skills",
+                                         comment: "Scheduled-task detail label: skills each run loads"),
+                                  def.skills.joined(separator: ", "))
+                    }
                     detailRow(String(localized: "Missed runs",
                                      comment: "Scheduled-task detail label"),
                               def.catchUpMissed
@@ -690,57 +716,45 @@ struct ScheduledTaskPanel: View {
     /// level is chosen, and they must offer the same set.
     private var taskEffortLevels: [String] {
         if isKimiTask { return kimiCatalog.effortLevels(forModel: draft.model) }
-        if isCodexTask { return codexCatalog.effortLevels(forModel: draft.model) }
+        if isCodexTask {
+            // The model a run runs as — the pick, else the model codex's
+            // config names in the task's folder — as the composer reads it.
+            let slug = (draft.model?.isEmpty == false) ? draft.model
+                : codexCatalog.defaultModel(forFolder: Self.runFolder(draft))
+            return codexCatalog.effortLevels(forModel: slug)
+        }
+        guard isClaudeTask else { return [] }
         return capabilities.effortLevels(forModelId: config.resolvedClaudeModelId(
             picked: draft.model, configuredDefault: claudeConfiguredDefault))
     }
 
     private func refreshClaudeConfiguredDefault() {
-        guard !isCodexTask, !isKimiTask else { return }
+        guard isClaudeTask else { return }
         let found = ClaudeModelCatalog.configuredDefaultModel(cwd: draft.workingDirectory)
         if found != claudeConfiguredDefault { claudeConfiguredDefault = found }
     }
 
+    /// The Runs as line: model · effort · mode, the composer's order, each
+    /// named as the composer's chips name it — and the speed and Non-stop
+    /// where a run gets them. A model or effort left on Default goes
+    /// unsaid; the mode is always said.
     private func runtimeText(_ def: ScheduledTaskDefinition) -> String {
         let codex = def.agent == "codex"
         let kimi = def.agent == "kimi"
-        if kimi {
-            // No mode — the summary opens with the auto-approve
-            // statement instead — but kimi does have an effort, and it
-            // reaches its runs through the environment rather than the
-            // command line (`KimiCapabilities.effortEnvVar`).
-            var parts = [KimiCapabilities.autoApproveTitle]
-            if let model = def.model, !model.isEmpty {
-                parts.append(kimiCatalog.displayName(forModel: model))
-            }
-            if let effort = def.effort, !effort.isEmpty {
-                parts.append(AgentEffort.displayName(effort))
-            }
-            return parts.joined(separator: " · ")
-        }
-        // A codex task with no explicit mode has no "default" preset to
-        // name, and `CodexCapabilities.title(for: "")` answers "" — the
-        // summary would open with a stray separator.
-        let modeTitle: String
-        if codex {
-            let mode = def.mode ?? ""
-            modeTitle = mode.isEmpty
-                ? String(localized: "Default",
-                         comment: "Scheduled-task summary: codex sandbox left at its default")
-                : CodexCapabilities.title(for: mode)
-        } else {
-            modeTitle = AgentPermissionMode(name: def.mode ?? "default").title
-        }
-        var parts: [String] = [modeTitle]
+        let mode = AgentAskingMode.taskMode(agentKey: def.agent, fileMode: def.mode)
+        var parts: [String] = []
         if let model = def.model, !model.isEmpty {
-            // Frontmatter stores the picker ALIAS ("opus"), which carries
-            // no version — `ClaudeModelDisplay.name` on it can only ever
-            // answer "Opus". The version comes from the ids this machine
-            // has observed the alias resolve to, exactly as the composer's
-            // model chip does. Codex ids are literal and have no alias
-            // layer, so they print as recorded.
-            parts.append(codex ? model
-                               : config.rememberedModelName(forAlias: model))
+            // Frontmatter stores claude's picker ALIAS ("opus"), which
+            // carries no version — the version comes from what the alias
+            // resolves to, exactly as the composer's model chip names it.
+            // Codex's and kimi's ids are literal, named by their catalogs.
+            if codex {
+                parts.append(codexCatalog.models.first { $0.slug == model }?.displayName ?? model)
+            } else if kimi {
+                parts.append(kimiCatalog.displayName(forModel: model))
+            } else {
+                parts.append(config.rememberedModelName(forAlias: model))
+            }
         }
         if let effort = def.effort, !effort.isEmpty {
             // Through `AgentEffort.displayName` like every other surface
@@ -748,8 +762,18 @@ struct ScheduledTaskPanel: View {
             // to the editor's own "XHigh".
             parts.append(AgentEffort.displayName(effort))
         }
+        parts.append(AgentMenus.modeTitle(agentKey: def.agent, mode: mode,
+                                          chatOnly: def.chatOnly,
+                                          frontEnd: AskingModeGate.frontEnd(agentKey: def.agent)))
         if let speed = runtimeSpeedText(def, codex: codex) {
             parts.append(speed)
+        }
+        if def.nonStop,
+           AgentAskingMode.asksQuestions(agentKey: def.agent, mode: mode, chatOnly: def.chatOnly,
+                                         frontEndOffered: AskingModeGate.frontEnd(agentKey: def.agent)
+                                            != .unavailable,
+                                         kimiDefaultPermission: kimiCatalog.defaultPermissionMode) {
+            parts.append(AgentComposer.nonStopTitle)
         }
         return parts.joined(separator: " · ")
     }
@@ -871,110 +895,58 @@ struct ScheduledTaskPanel: View {
 
             field(String(localized: "Runs as", comment: "Scheduled-task editor field label")) {
                 VStack(alignment: .leading, spacing: 6 * rhythm) {
-                    HStack(spacing: 8 * ratio) {
-                        // Per-agent catalogs. A codex task offered claude's
-                        // permission modes would be saved with a mode its
-                        // CLI has no idea about, and claude's model aliases
-                        // would put `-m opus` on a codex command line.
-                        //
-                        // No "Chat only" row here, on purpose: a scheduled
-                        // task is unattended agent work, and the composer's
-                        // Chat only is a per-turn shape with no file tools — a
-                        // task that could not read the folder it was pointed
-                        // at would run to nothing. `ScheduledTaskCreator
-                        // .Request` carries no such field, and a task
-                        // scheduled from a Chat only composer gets the
-                        // agent's unattended default.
-                        if isKimiTask {
-                            // A readout in the picker's place — the same
-                            // reason the composer swaps kimi's mode chip
-                            // for one: an option its CLI refuses must not
-                            // be offered, and a control that silently does
-                            // nothing is worse than no control.
-                            Text(verbatim: KimiCapabilities.autoApproveTitle)
-                                .foregroundStyle(.secondary)
-                                .help(KimiCapabilities.autoApproveHint(
-                                    agentName: config.agentLabel(
-                                        for: "kimi", defaultName: "Kimi Code")))
-                        } else {
-                            Picker("", selection: modeBinding) {
-                                if isCodexTask {
-                                    ForEach(CodexCapabilities.modePresets, id: \.value) { preset in
-                                        Text(verbatim: CodexCapabilities.title(for: preset.value))
-                                            .tag(preset.value)
-                                    }
-                                } else {
-                                    ForEach(capabilities.permissionModes) { mode in
-                                        Text(verbatim: mode.title).tag(mode.name)
-                                    }
-                                }
-                            }
-                            .labelsHidden()
-                            .frame(maxWidth: 150 * ratio)
+                    // The composer's three chips in the composer's order —
+                    // model, effort, mode — each listing exactly the
+                    // composer's rows (`AgentMenus`), names only: the
+                    // explanations stay in the composer's menus. Per agent,
+                    // so a codex task is never offered claude's modes, and
+                    // claude's aliases never reach a codex command line.
+                    HStack(alignment: .top, spacing: 10 * ratio) {
+                        pickerColumn(String(localized: "Model",
+                                            comment: "Scheduled-task editor: caption over the model picker")) {
+                            menuPicker(rows: modelRows, selection: modelBinding)
                         }
-                        Picker("", selection: modelBinding) {
-                            Text("Default model",
-                                 comment: "Scheduled-task editor: no explicit model").tag("")
-                            if isCodexTask {
-                                ForEach(codexCatalog.models) { model in
-                                    Text(verbatim: model.displayName).tag(model.slug)
-                                }
-                            } else if isKimiTask {
-                                // Kimi's own display names, like codex's —
-                                // no alias layer to resolve into a versioned
-                                // name, but the generated slugs carry their
-                                // provider (`kimi-for-coding/k3`) and read
-                                // as paths without this.
-                                ForEach(kimiCatalog.models) { model in
-                                    Text(verbatim: model.displayName)
-                                        .tag(model.slug)
-                                }
-                            } else {
-                                ForEach(capabilities.modelAliases, id: \.self) { alias in
-                                    // Versioned, same as the composer's rows.
-                                    Text(verbatim: config.rememberedModelName(forAlias: alias))
-                                        .tag(alias)
-                                }
-                                // The composer's "Other models" section,
-                                // so a task can pin the previous version
-                                // of a family the same way a session can.
-                                if !capabilities.otherModels.isEmpty {
-                                    Section(header: Text("Other models",
-                                                         comment: "Model menu section header: previous model versions the CLI still offers")) {
-                                        ForEach(capabilities.otherModels) { model in
-                                            Text(verbatim: model.displayName)
-                                                .tag(model.fullId)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(maxWidth: 150 * ratio)
                         // Hidden for a model that takes no levels (a kimi
                         // model with no `support_efforts`, claude's Haiku),
                         // exactly as the composer hides its chip — see
                         // `AgentComposer.showsEffortChip`.
                         if isCodexTask || !taskEffortLevels.isEmpty {
-                            Picker("", selection: optionalBinding($draft.effort)) {
-                                Text("Default effort",
-                                     comment: "Scheduled-task editor: no explicit effort").tag("")
-                                ForEach(taskEffortLevels, id: \.self) { level in
-                                    // Same casing as the composer's rows —
-                                    // a raw "xhigh" here would sit two
-                                    // panes from the composer's "XHigh".
-                                    Text(verbatim: AgentEffort.displayName(level))
-                                        .tag(level)
-                                }
+                            pickerColumn(String(localized: "Effort",
+                                                comment: "Scheduled-task editor: caption over the effort picker")) {
+                                menuPicker(rows: AgentMenus.effortRows(levels: taskEffortLevels,
+                                                                       defaultSubtitle: nil),
+                                           selection: optionalBinding($draft.effort))
                             }
-                            .labelsHidden()
-                            .frame(maxWidth: 150 * ratio)
+                        }
+                        pickerColumn(String(localized: "Mode",
+                                            comment: "Scheduled-task editor: caption over the mode picker")) {
+                            if modeIsReadout {
+                                // A statement where the installed kimi can
+                                // run nothing but its headless Never Ask —
+                                // the composer's readout, for its reason.
+                                Text(verbatim: KimiCapabilities.neverAskTitle)
+                                    .foregroundStyle(.secondary)
+                                    .help(KimiCapabilities.neverAskHint(
+                                        agentName: config.agentLabel(
+                                            for: "kimi", defaultName: "Kimi Code")))
+                            } else {
+                                menuPicker(rows: modeRows, selection: modeBinding)
+                            }
                         }
                         Spacer(minLength: 0)
                     }
                     speedControl
+                    nonStopControl
                 }
                 .sipFont(12)
+            }
+
+            // A Chat only run loads no skills (`ScheduledTaskScheduler.fire`),
+            // as a Chat only send from the composer loads none.
+            if !draft.chatOnly {
+                field(String(localized: "Skills", comment: "Scheduled-task editor field label")) {
+                    skillsField
+                }
             }
 
             Toggle(isOn: $draft.catchUpMissed) {
@@ -1116,6 +1088,64 @@ struct ScheduledTaskPanel: View {
         )
     }
 
+    /// The skills each run loads, and the picker that chooses them —
+    /// the composer's list, for the task's agent in the task's folder,
+    /// its subfolders' as the task's mode reaches them. A Kimi task loads
+    /// one (`SkillAgent.oneSkillPerMessage`).
+    private var skillsField: some View {
+        let taskFolder = draft.workingDirectory ?? FileManager.default.homeDirectoryForCurrentUser
+        let agent = draft.agent
+        let frontEnd = AskingModeGate.frontEnd(agentKey: agent)
+        return VStack(alignment: .leading, spacing: 4 * rhythm) {
+            HStack(alignment: .firstTextBaseline, spacing: 8 * ratio) {
+                Text(verbatim: draft.skills.isEmpty
+                     ? String(localized: "None", comment: "Scheduled-task editor: no skills")
+                     : draft.skills.joined(separator: ", "))
+                    .foregroundColor(draft.skills.isEmpty ? SipDesign.textSecondary : SipDesign.textPrimary)
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4 * ratio)
+                Button {
+                    skillCatalog.ensureLoaded(folder: taskFolder, maxAge: 20)
+                    skillCatalog.loadSubfolders(below: taskFolder)
+                    showingSkillPicker = true
+                } label: {
+                    Text("Choose…", comment: "Scheduled-task editor: pick the task's skills")
+                        .sipFont(11, weight: .medium)
+                }
+                .buttonStyle(PanelActionButtonStyle())
+                .popover(isPresented: $showingSkillPicker, arrowEdge: .bottom) {
+                    SkillListPopover(
+                        agentLabel: config.agentLabel(
+                            for: agent,
+                            defaultName: AgentManager.registry.first { $0.key == agent }?.name ?? agent),
+                        oneAtATime: SkillAgent.oneSkillPerMessage(agent),
+                        folderName: taskFolder.lastPathComponent,
+                        choices: skillCatalog.snapshot(folder: taskFolder) == nil
+                            ? nil : skillCatalog.choices(
+                                agent: agent, folder: taskFolder,
+                                codexSend: AskingModeGate.subfolderSkillSend(
+                                    agentKey: agent,
+                                    mode: AgentAskingMode.taskMode(agentKey: agent, fileMode: draft.mode),
+                                    chatOnly: draft.chatOnly),
+                                kimiCanLoad: frontEnd != .unavailable),
+                        picks: draft.skills,
+                        onDone: { picked in
+                            draft.skills = picked
+                            showingSkillPicker = false
+                        },
+                        onClose: { showingSkillPicker = false })
+                }
+            }
+            Text("Each run loads them with its prompt. A run whose skill is missing or switched off doesn’t start.",
+                 comment: "Scheduled-task editor: how a task's skills work")
+                .sipFont(11)
+                .foregroundColor(SipDesign.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .sipFont(12)
+    }
+
     /// The model picker's selection. A pick that strands the effort — a
     /// level the new model does not take — clears it, the composer's
     /// rule and for its reason: the effort picker stops OFFERING the
@@ -1133,7 +1163,7 @@ struct ScheduledTaskPanel: View {
                 }
                 // The speed too, for the same reason: a fast mode the
                 // new model has none of, a tier it does not advertise.
-                if draft.fastMode, !isCodexTask, !isKimiTask,
+                if draft.fastMode, isClaudeTask,
                    !claudeTaskTakesFastMode(model: draft.model) {
                     draft.fastMode = false
                 }
@@ -1147,14 +1177,169 @@ struct ScheduledTaskPanel: View {
         )
     }
 
-    /// Permission mode defaults to "default" rather than empty: an
-    /// unattended run with no mode prompts on every tool and then hangs
-    /// forever with nobody to answer.
+    /// The Mode picker's selection (`AgentAskingMode.taskPickerValue`): ""
+    /// is the list's first row, `ChatOnlyMode.rowValue` Chat only, else the
+    /// mode as the chip spells it — read off the task FILE's mode the way a
+    /// run reads it (`taskMode`: a kimi task with none is Never Ask). One
+    /// writer for the mode and Chat only (`ChatOnlyMode.select`); a pick is
+    /// stored as the file spells it (`taskFileMode`). A value for a row no
+    /// longer offered shows as Default, and the file keeps it until a row
+    /// is picked.
     private var modeBinding: Binding<String> {
         Binding(
-            get: { draft.mode ?? "default" },
-            set: { draft.mode = $0 }
+            get: {
+                AgentAskingMode.taskPickerValue(
+                    agentKey: taskAgentKey, fileMode: draft.mode, chatOnly: draft.chatOnly,
+                    frontEnd: taskFrontEnd, listedModes: capabilities.permissionModes.map(\.name))
+            },
+            set: { value in
+                var options = AgentLaunchOptions()
+                ChatOnlyMode.select(value.isEmpty ? nil : value, into: &options)
+                draft.chatOnly = options.chatOnly
+                // Chat only carries no mode.
+                draft.mode = options.chatOnly ? nil
+                    : AgentAskingMode.taskFileMode(agentKey: taskAgentKey,
+                                                   mode: options.permissionMode,
+                                                   frontEnd: taskFrontEnd)
+            }
         )
+    }
+
+    /// Whether the installed CLI has its own front end — what the Mode
+    /// rows, and Default's runs, rest on for codex and kimi.
+    private var taskFrontEnd: AgentAskingMode.Availability {
+        AskingModeGate.frontEnd(agentKey: taskAgentKey)
+    }
+
+    /// The composer's mode rows for the task's agent (`AgentMenus`), and
+    /// the task's own mode where the installed CLI no longer offers it —
+    /// shown, so the picker never stands blank over a value in the file
+    /// (the run then fails with words; `ScheduledTaskScheduler.modeVerdict`).
+    private var modeRows: [AgentMenuRow] {
+        var rows = AgentMenus.modeRows(
+            agentKey: taskAgentKey, agentName: taskAgentName,
+            chatOnlyOffered: ChatOnlyGate.offered(agentKey: taskAgentKey),
+            askingModesOffered: AskingModeGate.offered(agentKey: taskAgentKey) ?? [],
+            claudeModes: capabilities.permissionModes, frontEnd: taskFrontEnd)
+        let current = modeBinding.wrappedValue
+        if !rows.contains(where: { ($0.value ?? "") == current && !$0.isHeader }) {
+            rows.append(AgentMenuRow(
+                value: current,
+                title: AgentMenus.modeTitle(agentKey: taskAgentKey,
+                                            mode: current == ChatOnlyMode.rowValue || current.isEmpty
+                                                ? nil : current,
+                                            chatOnly: current == ChatOnlyMode.rowValue,
+                                            frontEnd: taskFrontEnd),
+                subtitle: nil))
+        }
+        return rows
+    }
+
+    /// Where the installed kimi can run nothing but its headless Never Ask,
+    /// the Mode picker is a readout, as the composer's chip is — unless the
+    /// task's file names something else (a mode or Chat only this kimi
+    /// cannot run): its run fails saying "pick another mode", and the
+    /// picker, with Never Ask in it, is where that is done.
+    private var modeIsReadout: Bool {
+        isKimiTask && taskFrontEnd == .unavailable && !ChatOnlyGate.offered(agentKey: "kimi")
+            && modeBinding.wrappedValue.isEmpty
+    }
+
+    /// The composer's model rows for the task's agent (`AgentMenus`), and
+    /// the task's own model where the list does not name it.
+    private var modelRows: [AgentMenuRow] {
+        var rows = AgentMenus.modelRows(agentKey: taskAgentKey, config: config,
+                                        codexFolder: Self.runFolder(draft),
+                                        claudeDefaultName: nil)
+        let current = draft.model ?? ""
+        if !current.isEmpty, !rows.contains(where: { $0.value == current && !$0.isHeader }) {
+            rows.append(AgentMenuRow(value: current, title: current, subtitle: nil))
+        }
+        return rows
+    }
+
+    /// A caption over one of the Runs as pickers, in the composer's words
+    /// for its chips — three pickers that each read "Default" need them.
+    private func pickerColumn<Content: View>(_ caption: String,
+                                             @ViewBuilder _ content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 2 * rhythm) {
+            Text(verbatim: caption)
+                .sipFont(11)
+                .foregroundColor(SipDesign.textSecondary)
+            content()
+        }
+    }
+
+    /// A picker over the composer's rows, names only: a section label
+    /// ("Other models") opens a section, and the selection is the row's
+    /// value ("" for Default).
+    private func menuPicker(rows: [AgentMenuRow], selection: Binding<String>) -> some View {
+        let sections = Self.sections(rows)
+        return Picker("", selection: selection) {
+            ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
+                if let header = section.header {
+                    Section(header: Text(verbatim: header)) {
+                        ForEach(section.rows) { row in
+                            Text(verbatim: row.title).tag(row.value ?? "")
+                        }
+                    }
+                } else {
+                    ForEach(section.rows) { row in
+                        Text(verbatim: row.title).tag(row.value ?? "")
+                    }
+                }
+            }
+        }
+        .labelsHidden()
+        .frame(maxWidth: 170 * ratio)
+    }
+
+    /// The rows split at their section labels.
+    private static func sections(_ rows: [AgentMenuRow])
+    -> [(header: String?, rows: [AgentMenuRow])] {
+        var out: [(header: String?, rows: [AgentMenuRow])] = [(nil, [])]
+        for row in rows {
+            if row.isHeader {
+                out.append((row.title, []))
+            } else {
+                out[out.count - 1].rows.append(row)
+            }
+        }
+        return out.filter { !$0.rows.isEmpty }
+    }
+
+    // MARK: - Non-stop
+
+    /// Under Fast mode: the composer's Non-stop switch as a checkbox, with
+    /// the composer's own line under it. A run is Non-stop only when this
+    /// is ticked. Drawn where the agent can ask a question in some mode
+    /// (claude always; codex and kimi where a mode that asks is offered),
+    /// and greyed, unticked, in a mode that never asks — the pick is kept.
+    @ViewBuilder
+    private var nonStopControl: some View {
+        let asks = AgentAskingMode.asksQuestions(
+            agentKey: taskAgentKey,
+            mode: AgentAskingMode.taskMode(agentKey: taskAgentKey, fileMode: draft.mode),
+            chatOnly: draft.chatOnly, frontEndOffered: taskFrontEnd != .unavailable,
+            kimiDefaultPermission: kimiCatalog.defaultPermissionMode)
+        let offered = taskAgentKey == "claude_code"
+            || (taskAgentKey == "codex" && taskFrontEnd == .offered)
+            || (AskingModeGate.offered(agentKey: taskAgentKey) ?? []).contains {
+                AgentAskingMode.asksQuestions(agentKey: taskAgentKey, mode: $0, chatOnly: false)
+            }
+        if offered {
+            checkboxRow(
+                title: AgentComposer.nonStopTitle,
+                isOn: Binding(get: { draft.nonStop && asks }, set: { draft.nonStop = $0 }),
+                enabled: asks,
+                lines: [draft.chatOnly
+                        ? String(localized: "Chat only turns never stop to ask.",
+                                 comment: "Mode menu Non-stop switch subtitle while Chat only is picked: such a turn cannot ask the user a question")
+                        : asks
+                        ? AskingModeGate.nonStopLine(agentName: taskAgentName)
+                        : String(localized: "\(taskAgentName) never stops to ask questions in this mode.",
+                                 comment: "Mode menu Non-stop switch subtitle while the picked mode is one in which the agent cannot ask the user a question; placeholder is the agent label")])
+        }
     }
 
     // MARK: - Speed
@@ -1166,14 +1351,18 @@ struct ScheduledTaskPanel: View {
         (def.workingDirectory ?? FileManager.default.homeDirectoryForCurrentUser).path
     }
 
-    /// Under the Runs as pickers: one Fast mode checkbox — claude's opt-in
-    /// or codex's Fast tier, the composer's switch over the task's own
+    /// Under the Runs as pickers: claude's Fast mode checkbox, or codex's
+    /// speed checkboxes — the composer's switches over the task's own
     /// model and folder. Kimi has no such mode.
     @ViewBuilder
     private var speedControl: some View {
         if isCodexTask {
-            codexFastModeRow
-        } else if !isKimiTask {
+            let folder = Self.runFolder(draft)
+            ForEach(codexCatalog.speedSwitches(forModel: draft.model, folder: folder),
+                    id: \.tier.id) { speed in
+                codexSpeedRow(speed, folder: folder)
+            }
+        } else if isClaudeTask {
             claudeFastModeRow
         }
     }
@@ -1198,46 +1387,42 @@ struct ScheduledTaskPanel: View {
                                                 creditsBlock: claudeCreditsBlock)))
     }
 
-    /// Codex's Fast mode, the composer's switch: checked runs the model's
-    /// Fast tier, unchecked pins standard (`default`) — so it holds even
-    /// where codex's config turns a tier on. Until it is flipped it shows
-    /// what the run gets by itself (`CodexSpeed.scheduled`: the config's
-    /// tier for the task's folder, never the model's own default).
-    private var codexFastModeRow: some View {
-        let folder = Self.runFolder(draft)
-        let featureEnabled = codexCatalog.speedSettings(forFolder: folder).featureEnabled
-        let fast = featureEnabled ? codexCatalog.fastTier(forModel: draft.model, folder: folder) : nil
-        let on = fast != nil && CodexSpeed.isFaster(
-            codexCatalog.scheduledServiceTier(pick: draft.serviceTier,
-                                              forModel: draft.model, folder: folder))
-        var lines: [String]
-        if let fast {
-            lines = [fast.description.isEmpty ? fast.name : fast.description]
-            if on, CodexSpeed.normalized(draft.serviceTier) == nil {
-                lines.append(String(localized: "On by default in \(codexName)",
-                                    comment: "Fast mode switch: on because codex itself turns it on here — its config, or the model's own default — and not because it was picked; the placeholder is the agent label"))
-            }
-        } else {
-            lines = [featureEnabled
-                     ? String(localized: "Not offered for this model",
-                              comment: "Model menu switch subtitle: the selected model has no fast mode")
-                     : String(localized: "Turned off in \(codexName)'s config (features.fast_mode)",
-                              comment: "Codex speed: the fast_mode feature is disabled in the user's codex config; placeholder is the agent label")]
-        }
-        return fastModeCheckbox(
+    /// One of codex's speed checkboxes, the composer's switch: checked
+    /// runs that speed, unchecked pins standard (`default`) — so it holds
+    /// even where codex's config turns a speed on — and checking one
+    /// unchecks the other. Until one is flipped they show what the run
+    /// gets by itself (`CodexSpeed.scheduled`: the config's tier for the
+    /// task's folder, never the model's own default).
+    private func codexSpeedRow(_ speed: CodexSpeed.SpeedSwitch, folder: String) -> some View {
+        let running = codexCatalog.scheduledServiceTier(pick: draft.serviceTier,
+                                                        forModel: draft.model, folder: folder)
+        let on = speed.offered && CodexSpeed.isFaster(running)
+            && CodexSpeed.normalized(running) == speed.tier.id
+        return checkboxRow(
+            title: speed.isFast ? ClaudeFastModeWords.title : speed.tier.name,
             isOn: Binding(get: { on }, set: { turnOn in
-                draft.serviceTier = turnOn ? fast?.id : CodexSpeed.standard
+                draft.serviceTier = turnOn ? speed.tier.id : CodexSpeed.standard
             }),
-            enabled: fast != nil, lines: lines)
+            enabled: speed.enabled,
+            lines: CodexSpeedWords.lines(speed, on: on,
+                                         picked: CodexSpeed.normalized(draft.serviceTier) != nil,
+                                         agentName: codexName))
     }
 
     /// The card's Fast mode checkbox, like its other switches, with each
     /// line under it wrapped.
     private func fastModeCheckbox(isOn: Binding<Bool>, enabled: Bool,
                                   lines: [String]) -> some View {
+        checkboxRow(title: ClaudeFastModeWords.title, isOn: isOn, enabled: enabled, lines: lines)
+    }
+
+    /// One of the card's switches as a checkbox — Fast mode, Non-stop —
+    /// with each line under it wrapped.
+    private func checkboxRow(title: String, isOn: Binding<Bool>, enabled: Bool,
+                             lines: [String]) -> some View {
         Toggle(isOn: isOn) {
             VStack(alignment: .leading, spacing: 1 * rhythm) {
-                Text(verbatim: ClaudeFastModeWords.title)
+                Text(verbatim: title)
                     .sipFont(12)
                 ForEach(lines, id: \.self) { line in
                     Text(verbatim: line)
@@ -1283,7 +1468,7 @@ struct ScheduledTaskPanel: View {
         if isCodexTask {
             codexCatalog.ensureLoaded()
             codexCatalog.refreshSpeedSettings(forFolder: Self.runFolder(draft))
-        } else if !isKimiTask {
+        } else if isClaudeTask {
             capabilities.refreshUsageCreditsBlock()
         }
     }

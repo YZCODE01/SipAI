@@ -1,6 +1,7 @@
 // AppState.swift
 // Shared, observable UI state for the app.
 
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -8,11 +9,24 @@ enum AppTheme: String, CaseIterable, Identifiable {
     case system, light, dark
     var id: String { rawValue }
 
-    var colorScheme: ColorScheme? {
+    /// The APPLICATION's appearance for this choice — nil for System, so
+    /// macOS decides. The window's root sets it as `NSApp.appearance`.
+    ///
+    /// Never SwiftUI's `.preferredColorScheme`. That preference reaches
+    /// only the window it is set in, so an alert run on its own, a file
+    /// panel, a menu and Sparkle's windows keep the Mac's look under Light
+    /// or Dark. And set back to nil it leaves the window's views on the
+    /// scheme they had: the window returns to the Mac's look, but SwiftUI
+    /// keeps the old scheme through every redraw until something such as
+    /// the window losing focus makes it read the window's look again — so
+    /// choosing System appears to do nothing. Every window inherits the
+    /// app's appearance, and a change of it — back to nil included —
+    /// reaches every view at once.
+    var appearance: NSAppearance? {
         switch self {
         case .system: return nil
-        case .light: return .light
-        case .dark: return .dark
+        case .light: return NSAppearance(named: .aqua)
+        case .dark: return NSAppearance(named: .darkAqua)
         }
     }
 
@@ -218,6 +232,43 @@ final class AppState: ObservableObject {
         if !leftSidebarVisible { leftSidebarVisible = true }
     }
 
+    /// Settings → Agent Skills: the folder whose own skills the pane lists
+    /// beside the global ones — nil for the global ones alone. Kept here,
+    /// not in the pane, because the pane is rebuilt on every visit;
+    /// `skillsFolderChosen` tells "the user chose the global skills" from
+    /// "nothing chosen yet", when the pane picks the open session's
+    /// folder.
+    @Published var skillsFolder: URL? = nil
+    var skillsFolderChosen = false
+    /// Settings → Agent Skills: the section and group headers whose fold the
+    /// user has flipped from its default (plugin and built-in groups
+    /// start folded, everything else open).
+    @Published var skillGroupsToggled: Set<String> = []
+
+    /// Settings → Agent Skills back as a new install has it: nothing chosen,
+    /// nothing folded. For the factory reset — the folder chosen before
+    /// it is held here, in memory, and the page writes the folder it
+    /// shows into the browse history the reset has just cleared.
+    func forgetSkillsPage() {
+        skillsFolder = nil
+        skillsFolderChosen = false
+        skillGroupsToggled = []
+    }
+
+    /// Whether one of the main window's own overlays is up — the menu
+    /// over the sidebar's Settings row, the search palette, the
+    /// plan-usage window. Each is drawn IN the window, over the pane,
+    /// and takes the keyboard for itself while it shows. The cards a
+    /// turn waits on read their keys through a local event monitor
+    /// (`ApprovalCardKeys`), which sees a key BEFORE the window
+    /// dispatches it to such an overlay — and under a focused SwiftUI
+    /// view the first responder is the hosting view, as it is when
+    /// nothing has focus, so the overlay cannot be told from an idle
+    /// window by asking the window. It is told here instead: written by
+    /// `ContentView`, which owns the three, and read at key time only —
+    /// not `@Published`, since nothing renders from it.
+    var overlayHoldsKeys = false
+
     /// Currently-selected model id (key in config.json `models`).
     @Published var activeModel: String? = nil
 
@@ -242,10 +293,10 @@ final class AppState: ObservableObject {
     /// In memory only, deliberately: drafts live until the user clears
     /// them or the app quits.
     ///
-    /// NOT `@Published`. Views own the live text and write here only when
-    /// the identity changes or the view goes away; publishing every stash
-    /// would re-render the whole window for a bookkeeping write. (Same
-    /// reasoning as `AgentManager.historyCache`.)
+    /// NOT `@Published`. Views own the live text and write it through here
+    /// on every change; publishing each write would re-render the whole
+    /// window for a bookkeeping write. (Same reasoning as
+    /// `AgentManager.historyCache`.)
     private var composerDrafts: [String: String] = [:]
 
     /// Draft key for a chat. An empty slug is the unsent new chat, which
@@ -256,7 +307,8 @@ final class AppState: ObservableObject {
     }
 
     /// Draft key for an agent transcript. `transcriptKey` is the session
-    /// id, or `draft:<uuid>` before the first send reveals one; the
+    /// id, or — before the first send reveals one — the key of the place
+    /// the new session was started from (`NewSessionPlace.draftKey`); the
     /// prefix keeps the two id spaces from colliding with chat slugs.
     static func agentDraftKey(_ transcriptKey: String?) -> String {
         "agent:\(transcriptKey ?? "")"
@@ -266,17 +318,17 @@ final class AppState: ObservableObject {
         composerDrafts[key] ?? ""
     }
 
-    /// Files staged in an agent composer's Chat only mode, keyed like
-    /// the text and for the same reason: a staged file is the user's
-    /// work and must survive a detour. Same store rules — written on
-    /// every change, empty removes, not `@Published`.
-    private var composerAttachments: [String: [ChatAttachment]] = [:]
+    /// Files staged in an agent composer, keyed like the text and for
+    /// the same reason: a staged file is the user's work and must survive
+    /// a detour. Same store rules — written on every change, empty
+    /// removes, not `@Published`.
+    private var composerAttachments: [String: [AgentAttachment]] = [:]
 
-    func composerAttachments(for key: String) -> [ChatAttachment] {
+    func composerAttachments(for key: String) -> [AgentAttachment] {
         composerAttachments[key] ?? []
     }
 
-    func setComposerAttachments(_ attachments: [ChatAttachment], for key: String) {
+    func setComposerAttachments(_ attachments: [AgentAttachment], for key: String) {
         if attachments.isEmpty {
             composerAttachments.removeValue(forKey: key)
         } else {
@@ -312,15 +364,66 @@ final class AppState: ObservableObject {
         composerDrafts = composerDrafts.filter { !$0.key.hasPrefix(prefix) }
     }
 
-    /// Forget every unsent message. Only the factory reset calls this:
-    /// drafts are deliberately kept through every ordinary navigation,
-    /// and they live in RAM alone, so wiping the data directory cannot
-    /// reach them. Without this a "reset to first run" hands the very
-    /// first composer the user opens a half-written message from the
-    /// install they just erased.
+    /// The schedule set up on an unsent new session (the composer's
+    /// calendar control), keyed like the text, for the same reason and
+    /// under the same rules: written on every change, dropped once back
+    /// to untouched, not `@Published`. Only a new session's key ever
+    /// holds one — a session that exists cannot become a task.
+    private var composerSchedules: [String: ScheduleDraft] = [:]
+
+    func composerSchedule(for key: String) -> ScheduleDraft {
+        composerSchedules[key] ?? ScheduleDraft()
+    }
+
+    func setComposerSchedule(_ schedule: ScheduleDraft, for key: String) {
+        if schedule == ScheduleDraft() {
+            composerSchedules.removeValue(forKey: key)
+        } else {
+            composerSchedules[key] = schedule
+        }
+    }
+
+    /// What an unsent new session's skill chip was set to, and what was
+    /// changed on its mode / model / effort / speed chips (chip by chip,
+    /// `NewSessionChipEdits`), keyed like its text — by the place it was
+    /// started from (`NewSessionPlace`). The new session itself
+    /// (`pendingClaudeSessionDraft`) is dropped the moment anything else
+    /// opens, so what was set on it is kept here, where the next new
+    /// session started from the same + finds it, as it finds the text.
+    /// Nil where nothing was set: the new session's chips then start from
+    /// its place's memory, and its skills are the agent's pinned ones. An
+    /// empty skill list is a choice of its own.
+    private var newSessionSkillPicks: [String: [String]] = [:]
+    private var newSessionChipEdits: [String: NewSessionChipEdits] = [:]
+
+    func newSessionSkillPicks(for key: String) -> [String]? {
+        newSessionSkillPicks[key]
+    }
+
+    func setNewSessionSkillPicks(_ picks: [String]?, for key: String) {
+        newSessionSkillPicks[key] = picks
+    }
+
+    func newSessionChipEdits(for key: String) -> NewSessionChipEdits? {
+        newSessionChipEdits[key]
+    }
+
+    func setNewSessionChipEdits(_ edits: NewSessionChipEdits?, for key: String) {
+        newSessionChipEdits[key] = edits
+    }
+
+    /// Forget every unsent message, and what was set up beside it. Only
+    /// the factory reset calls this: drafts are deliberately kept through
+    /// every ordinary navigation, and they live in RAM alone, so wiping
+    /// the data directory cannot reach them. Without this a "reset to
+    /// first run" hands the very first composer the user opens a
+    /// half-written message from the install they just erased.
     func clearComposerDrafts() {
         composerDrafts.removeAll()
         composerAttachments.removeAll()
+        composerSchedules.removeAll()
+        newSessionSkillPicks.removeAll()
+        newSessionChipEdits.removeAll()
     }
 
     /// Clear all four routing fields so the center column shows the empty
@@ -340,5 +443,51 @@ final class AppState: ObservableObject {
         // it was handed to. Starting fresh cancels that route, so the
         // query must not survive to open a find bar on an empty chat.
         pendingFindQuery = nil
+    }
+
+    // MARK: - New sessions by place
+
+    /// A custom group was renamed. Groups are keyed by name, and so is
+    /// the unsent new session of each one's + (`NewSessionPlace.custom`):
+    /// what it holds moves to the new name, REPLACING what the new name
+    /// held, and nothing stays behind — the next group given the old name
+    /// must not find it. A new session of that group on screen moves too;
+    /// its page adopts the new key (`AgentSessionView`'s place identity).
+    func renameNewSessionGroup(_ old: String, to new: String, agentKey: String) {
+        guard old != new else { return }
+        let from = Self.agentDraftKey(NewSessionPlace.custom(old).draftKey(agentKey: agentKey))
+        let to = Self.agentDraftKey(NewSessionPlace.custom(new).draftKey(agentKey: agentKey))
+        moveComposerDraft(from: from, to: to)
+        setComposerAttachments(composerAttachments(for: from), for: to)
+        setComposerAttachments([], for: from)
+        setComposerSchedule(composerSchedule(for: from), for: to)
+        composerSchedules.removeValue(forKey: from)
+        newSessionSkillPicks[to] = newSessionSkillPicks.removeValue(forKey: from)
+        newSessionChipEdits[to] = newSessionChipEdits.removeValue(forKey: from)
+        if pendingClaudeSessionDraft?.agentKey == agentKey,
+           pendingClaudeSessionDraft?.place == .custom(old) {
+            pendingClaudeSessionDraft?.place = .custom(new)
+        }
+    }
+
+    /// Forget the unsent new sessions of `agentKey`'s custom groups that
+    /// are gone: a group deleted with one waiting has no + left to reach
+    /// it, and the next group given its name must not inherit it. The new
+    /// session on screen is left alone — it is the user's, whatever
+    /// happens to its group.
+    func dropNewSessions(ofGroupsNotIn groups: [String], agentKey: String) {
+        let prefix = Self.agentDraftKey(NewSessionPlace.customKeyPrefix(agentKey: agentKey))
+        let open = pendingClaudeSessionDraft.map {
+            Self.agentDraftKey($0.place.draftKey(agentKey: $0.agentKey))
+        }
+        func gone(_ key: String) -> Bool {
+            key.hasPrefix(prefix) && key != open
+                && !groups.contains(String(key.dropFirst(prefix.count)))
+        }
+        composerDrafts = composerDrafts.filter { !gone($0.key) }
+        composerAttachments = composerAttachments.filter { !gone($0.key) }
+        composerSchedules = composerSchedules.filter { !gone($0.key) }
+        newSessionSkillPicks = newSessionSkillPicks.filter { !gone($0.key) }
+        newSessionChipEdits = newSessionChipEdits.filter { !gone($0.key) }
     }
 }

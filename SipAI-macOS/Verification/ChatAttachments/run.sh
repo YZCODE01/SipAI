@@ -22,11 +22,19 @@ set -e
 here="$(cd "$(dirname "$0")" && pwd)"
 out="$(mktemp -d)"
 trap 'rm -rf "$out"' EXIT
+# The real `ProviderHTTP` — the session every provider request rides and
+# the Anthropic API version it carries — lifted out of ProviderCatalog.swift
+# whole, so the request this harness checks is the app's own.
+awk '/^enum ProviderHTTP \{/,/^\}/' "$here/../../SipAI/Models/ProviderCatalog.swift" \
+  | { echo "import Foundation"; cat; } > "$out/ProviderHTTP.swift"
+grep -q "static let anthropicVersion" "$out/ProviderHTTP.swift" \
+  || { echo "could not lift ProviderHTTP out of ProviderCatalog.swift" >&2; exit 1; }
 swiftc -O -o "$out/attachmentharness" \
   "$here/Stubs.swift" \
   "$here/../../SipAI/Models/AttachmentInline.swift" \
   "$here/../../SipAI/Models/ChatAttachment.swift" \
   "$here/../../SipAI/Models/APIClient.swift" \
+  "$out/ProviderHTTP.swift" \
   "$here/main.swift"
 # An explicit source root overrides, so the structural pass can be
 # pointed at an older checkout to confirm it still catches the bug.

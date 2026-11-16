@@ -1,8 +1,8 @@
 // AgentGuidePane.swift
-// Settings → Agent Guide: why a command-line tool is needed, and one
-// card per supported agent with the one thing it needs next — Install,
-// Sign In, or (installed and signed in) Delete — plus the checkbox
-// that hides it and the sheets each action asks through. Updating a
+// Settings → Agent Initialization: why a command-line tool is needed, and one
+// card per supported agent with its buttons (`AgentCardButtons`): Install,
+// Sign In, Delete — Delete beside Sign In on a tool not signed in — plus
+// the checkbox that hides it and the sheets each action asks through. Updating a
 // tool is NOT here: that row lives beside the app's own update
 // controls, under Settings → Updates, so this pane reads the installed
 // version and makes no claim about a newer one. State comes from
@@ -22,7 +22,7 @@ struct AgentGuidePane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Agent Guide", comment: "Settings pane header")
+            Text("Agent Initialization", comment: "Settings pane header")
                 .sipFont(14, weight: .semibold)
 
             intro
@@ -90,9 +90,6 @@ struct AgentGuidePane: View {
 
 struct AgentGuideCard: View {
     let agent: AgentInfo
-    /// For the theme alone: the sheets below are separate NSWindows and
-    /// do not reliably inherit the main window's forced appearance.
-    @EnvironmentObject var appState: AppState
     @EnvironmentObject var config: ConfigManager
     @EnvironmentObject var agents: AgentManager
     @ObservedObject private var cliUpdates = AgentCLIUpdateMonitor.shared
@@ -115,6 +112,13 @@ struct AgentGuideCard: View {
     /// .kimiRegion`); Continue waits for it.
     @State private var kimiSite: KimiSite? = nil
     @State private var kimiProviderId = AgentSignIn.kimiKeyProviders[0].id
+    /// The key provider's models, as kimi's own catalog lists them — nil
+    /// while they are read — and the one the key starts on. No model is
+    /// chosen for the user: Continue waits for a pick.
+    @State private var kimiModels: KimiKeyModels? = nil
+    @State private var kimiModel: String? = nil
+    /// Bumped by Try again, so the listing runs once more.
+    @State private var kimiModelsAttempt = 0
 
     private var key: String { agent.key }
 
@@ -126,8 +130,8 @@ struct AgentGuideCard: View {
     private var presence: AgentPresence { agents.presence(for: key) }
     private var progress: AgentGuideActions.Progress? { actions.progress[key] }
     /// One of this card's three sheets is up. They hang off the main
-    /// window, so the update announcer is told: a line beside the logo
-    /// waits while a sheet covers it (`UpdateAnnouncer.sheetCoversLockup`).
+    /// window, so the notices beside the logo are told: one waits to
+    /// start while a sheet covers it (`SidebarNotices.sheetCoversLockup`).
     /// One sheet is up at a time app-wide (a sheet is modal to its
     /// window), so a plain report per card cannot clobber another's.
     private var sheetUp: Bool {
@@ -178,7 +182,7 @@ struct AgentGuideCard: View {
 
                 Spacer(minLength: 8)
 
-                primaryButton
+                cardButtons
             }
 
             secondLine
@@ -189,20 +193,20 @@ struct AgentGuideCard: View {
         }
         .opacity(isHidden ? 0.55 : 1)
         .sheet(isPresented: $showingSignIn) {
-            signInSheet.preferredColorScheme(appState.theme.colorScheme)
+            signInSheet
         }
         .sheet(isPresented: $showingInstall) {
-            installSheet.preferredColorScheme(appState.theme.colorScheme)
+            installSheet
         }
         .sheet(item: browserStepBinding) { step in
-            browserSheet(step).preferredColorScheme(appState.theme.colorScheme)
+            browserSheet(step)
         }
-        .onChange(of: sheetUp) { _, up in UpdateAnnouncer.shared.setSheetPresented(up) }
+        .onChange(of: sheetUp) { _, up in SidebarNotices.shared.setSheetPresented(up) }
         // Torn down with a sheet up — a notification click closes
         // Settings underneath it — the sheet goes with the card, and so
         // must the report, or every later line waits on a sheet that is
         // gone.
-        .onDisappear { if sheetUp { UpdateAnnouncer.shared.setSheetPresented(false) } }
+        .onDisappear { if sheetUp { SidebarNotices.shared.setSheetPresented(false) } }
         .alert(String(localized: "Delete \(label) from this Mac?",
                       comment: "Agent Guide: title of the delete confirmation; placeholder is the agent's name"),
                isPresented: $confirmingDelete) {
@@ -233,10 +237,10 @@ struct AgentGuideCard: View {
         }
     }
 
-    // MARK: Line 1 — the primary button
+    // MARK: Line 1 — the buttons
 
     @ViewBuilder
-    private var primaryButton: some View {
+    private var cardButtons: some View {
         if let progress {
             Button {
                 cancel(progress)
@@ -246,51 +250,64 @@ struct AgentGuideCard: View {
             .sipFont(12)
             .disabled(progress.phase == .probing || progress.phase == .signingOut)
         } else {
-            switch presence {
-            case .notInstalled:
-                if AgentInstallRoute.route(agentKey: key) != nil {
-                    Button {
-                        showingInstall = true
-                    } label: {
-                        Text("Install", comment: "Agent Guide: install the agent's command-line tool")
+            let buttons = AgentCardButtons.buttons(presence: presence,
+                                                   canInstall: AgentInstallRoute.route(agentKey: key) != nil,
+                                                   canDelete: deletePlan != nil)
+            HStack(spacing: 8) {
+                ForEach(buttons, id: \.self) { kind in
+                    switch kind {
+                    case .install: installButton
+                    case .signIn: signInButton
+                    case .delete: deleteButton
                     }
-                    .sipFont(12)
-                    .disabled(isBusy)
                 }
-            case .notSignedIn:
-                Button {
-                    method = AgentSignIn.routes(agentKey: key).first?.method ?? .subscription
-                    apiKey = ""
-                    if key == "kimi" {
-                        // What kimi itself would use: a saved login's site,
-                        // else the site it was installed from. Nothing when
-                        // kimi did not answer — the user picks.
-                        selectKimiSite(KimiSite(region: actions.kimiRegion))
-                    }
-                    showingSignIn = true
-                } label: {
-                    Text("Sign In", comment: "Agent Guide: sign the agent's command-line tool in")
-                }
-                .sipFont(12)
-                .disabled(isBusy)
-            case .listed, .hiddenByUser:
-                if deletePlan != nil {
-                    Button {
-                        confirmingDelete = true
-                    } label: {
-                        Text("Delete", comment: "Confirm deleting a custom session group")
-                    }
-                    .sipFont(12)
-                    .disabled(isBusy || hasRunningTurn)
-                    .help(hasRunningTurn
-                          ? String(localized: "Finish the running turn before removing this tool.",
-                                   comment: "Agent Guide: why Delete is disabled")
-                          : "")
-                }
-            case .pending:
-                EmptyView()
             }
         }
+    }
+
+    private var installButton: some View {
+        Button {
+            showingInstall = true
+        } label: {
+            Text("Install", comment: "Agent Guide: install the agent's command-line tool")
+        }
+        .sipFont(12)
+        .disabled(isBusy)
+    }
+
+    private var signInButton: some View {
+        Button {
+            method = AgentSignIn.routes(agentKey: key).first?.method ?? .subscription
+            apiKey = ""
+            if key == "kimi" {
+                // What kimi itself would use: a saved login's site,
+                // else the site it was installed from. Nothing when
+                // kimi did not answer — the user picks.
+                selectKimiSite(KimiSite(region: actions.kimiRegion))
+            }
+            showingSignIn = true
+        } label: {
+            Text("Sign In", comment: "Agent Guide: sign the agent's command-line tool in")
+        }
+        .sipFont(12)
+        .disabled(isBusy)
+    }
+
+    /// Waits for a running turn: a tool removed under a running child
+    /// breaks its next call. A tool that reads as signed out may still be
+    /// running a turn in Terminal under a login SipAI cannot see.
+    private var deleteButton: some View {
+        Button {
+            confirmingDelete = true
+        } label: {
+            Text("Delete", comment: "Confirm deleting a custom session group")
+        }
+        .sipFont(12)
+        .disabled(isBusy || hasRunningTurn)
+        .help(hasRunningTurn
+              ? String(localized: "Finish the running turn before removing this tool.",
+                       comment: "Agent Guide: why Delete is disabled")
+              : "")
     }
 
     private func cancel(_ progress: AgentGuideActions.Progress) {
@@ -334,15 +351,10 @@ struct AgentGuideCard: View {
                     .sipFont(12)
                     .foregroundStyle(.secondary)
                 if isSignedIn {
-                    Button {
+                    LinkButton(title: String(localized: "Sign out", comment: "Agent Guide: sign-out link and confirm button"),
+                               size: 12) {
                         confirmingSignOut = true
-                    } label: {
-                        Text("Sign out", comment: "Agent Guide: sign-out link and confirm button")
-                            .sipFont(12)
-                            .underline()
-                            .foregroundStyle(hasRunningTurn ? Color.secondary : SipDesign.blue)
                     }
-                    .buttonStyle(.plain)
                     .disabled(isBusy || hasRunningTurn)
                     .help(hasRunningTurn
                           ? String(localized: "Finish the running turn before signing out.",
@@ -394,6 +406,10 @@ struct AgentGuideCard: View {
                               comment: "Agent Guide: claude runs on an API-billed account — a Console login, or an API key from its environment or settings")
             }
             if key == "kimi", let platform = actions.kimiAccountSite {
+                if actions.kimiAccountKeyProvider?.isKimiCodeKey == true {
+                    return String(localized: "Kimi Code key (\(platform))",
+                                  comment: "Agent Guide: kimi runs on a Kimi Code Console key; placeholder is the site")
+                }
                 return String(localized: "API key (\(platform))",
                               comment: "Agent Guide: kimi runs on an API key; placeholder is the platform the key is from, e.g. platform.moonshot.cn")
             }
@@ -404,11 +420,24 @@ struct AgentGuideCard: View {
                 if let name { return String(localized: "ChatGPT \(name)", comment: "Plan-usage card subtitle for a codex plan; placeholder is the plan type") }
                 return String(localized: "Subscription", comment: "Plan-usage card subtitle when the plan has no tier name")
             case "kimi":
-                if let site = actions.kimiAccountSite {
+                // The membership's name is kimi's own (`KimiMembership`),
+                // shown as kimi gives it.
+                switch (name, actions.kimiAccountSite) {
+                case let (name?, site?):
+                    return String(
+                        localized: "Membership · \(name) (\(site))",
+                        comment: "Agent Guide: a Kimi membership; placeholders are Kimi's name for it and the site")
+                case let (name?, nil):
+                    return String(
+                        localized: "Membership · \(name)",
+                        comment: "Plan-usage card subtitle for a Kimi membership; placeholder is Kimi's name for it")
+                case let (nil, site?):
                     return String(localized: "Membership (\(site))",
                                   comment: "Agent Guide: a Kimi Code membership; placeholder is the site it is signed in on, kimi.com or kimi.ai")
+                case (nil, nil):
+                    return String(localized: "Membership",
+                                  comment: "Plan-usage card subtitle for a Kimi Code membership")
                 }
-                return String(localized: "Membership", comment: "Plan-usage card subtitle for a Kimi Code membership")
             default:
                 if let name { return String(localized: "\(name) plan", comment: "Plan-usage card subtitle; placeholder is the plan tier") }
                 return String(localized: "Subscription", comment: "Plan-usage card subtitle when the plan has no tier name")
@@ -530,12 +559,21 @@ struct AgentGuideCard: View {
         }
         let store: String
         switch key {
+        case "claude_code": store = "~/.claude"
         case "codex": store = "~/.codex"
         case "kimi": store = "~/.kimi-code"
-        default: store = "~/.claude"
+        default:
+            // A tool whose data folder SipAI does not know: nothing is
+            // promised about where its sessions stay.
+            return String(localized: "This removes the \(label) command-line tool, the same as uninstalling it in Terminal — here, \(route). Nothing else on your Mac is changed.",
+                          comment: "Agent Guide: body of the delete confirmation for a tool whose data folder SipAI does not know; placeholders are the agent's name and the detected install route")
         }
-        return String(localized: "This removes the \(label) command-line tool, the same as uninstalling it in Terminal — here, \(route). Its sessions, settings and sign-in stay in \(store) and are back the moment you reinstall. Nothing else on your Mac is changed.",
-                      comment: "Agent Guide: body of the delete confirmation; placeholders are the agent's name, the detected install route, and the tool's own data folder")
+        if isSignedIn {
+            return String(localized: "This removes the \(label) command-line tool, the same as uninstalling it in Terminal — here, \(route). Its sessions, settings and sign-in stay in \(store) and are back the moment you reinstall. Nothing else on your Mac is changed.",
+                          comment: "Agent Guide: body of the delete confirmation; placeholders are the agent's name, the detected install route, and the tool's own data folder")
+        }
+        return String(localized: "This removes the \(label) command-line tool, the same as uninstalling it in Terminal — here, \(route). Its sessions and settings stay in \(store) and are back the moment you reinstall. Nothing else on your Mac is changed.",
+                      comment: "Agent Guide: body of the delete confirmation for a tool that is not signed in; placeholders are the agent's name, the detected install route, and the tool's own data folder")
     }
 
     private var signOutSentence: String {
@@ -602,6 +640,14 @@ struct AgentGuideCard: View {
                             text: $apiKey)
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 420)
+                if key == "kimi", kimiSite != nil {
+                    kimiModelPicker
+                    Text("A Kimi Code Console key belongs to your membership. Choose Kimi Code membership above.",
+                         comment: "Agent Guide: under the Kimi key fields; a Console key draws on the membership")
+                        .sipFont(12)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
             HStack {
@@ -616,14 +662,15 @@ struct AgentGuideCard: View {
                     showingSignIn = false
                     actions.signIn(agentKey: key, method: method, apiKey: apiKey,
                                    region: (kimiSite ?? .mainlandCN).rawValue,
-                                   kimiProviderId: kimiProviderId)
+                                   kimiProviderId: kimiProviderId, kimiModel: kimiModel ?? "")
                     apiKey = ""
                 } label: {
                     Text("Continue", comment: "Onboarding/setup: advance to the next step")
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled((method == .apiKey && apiKey.trimmingCharacters(in: .whitespaces).isEmpty)
-                          || (key == "kimi" && kimiSite == nil))
+                          || (key == "kimi" && kimiSite == nil)
+                          || (key == "kimi" && method == .apiKey && kimiModel == nil))
             }
         }
         .padding(20)
@@ -634,6 +681,63 @@ struct AgentGuideCard: View {
     private func methodRow(_ route: AgentSignIn.Route) -> some View {
         radioRow(text: methodDescription(route), selected: method == route.method) {
             method = route.method
+        }
+    }
+
+    /// The model a kimi key starts on: kimi's own catalog list for the
+    /// provider, read when the provider is picked, and a pick the user
+    /// makes — kimi's own key login asks the same. The catalog is
+    /// models.dev's, the same for every account in an order that is no
+    /// ranking, so its first entry is never taken for the user.
+    private var kimiModelPicker: some View {
+        Group {
+            switch kimiModels {
+            case nil:
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Reading the models…",
+                         comment: "Agent Guide: kimi's catalog list of a key provider's models is being read")
+                        .sipFont(12)
+                        .foregroundStyle(.secondary)
+                }
+            case .listed(let ids)?:
+                Picker(selection: $kimiModel) {
+                    Text("Choose a model",
+                         comment: "Agent Guide: the kimi key's model picker before a model is picked")
+                        .tag(String?.none)
+                    ForEach(ids, id: \.self) { id in
+                        Text(verbatim: id).tag(String?.some(id))
+                    }
+                } label: {
+                    Text("Model", comment: "Agent Guide: caption of the kimi key's model picker")
+                        .sipFont(12)
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: 420, alignment: .leading)
+            case .failed(let why)?:
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(verbatim: why)
+                        .sipFont(12)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    LinkButton(title: String(localized: "Try again",
+                                             comment: "Agent Guide: read the kimi key provider's models again"),
+                               size: 12) {
+                        kimiModelsAttempt += 1
+                    }
+                }
+            }
+        }
+        // A listing begun for a provider since replaced must not land on
+        // the picker of the one picked after it.
+        .task(id: "\(kimiProviderId)|\(kimiModelsAttempt)") {
+            let provider = kimiProviderId
+            kimiModels = nil
+            kimiModel = nil
+            let listed = await actions.kimiKeyModels(providerId: provider)
+            guard !Task.isCancelled, provider == kimiProviderId else { return }
+            kimiModels = listed
         }
     }
 

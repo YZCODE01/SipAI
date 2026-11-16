@@ -298,9 +298,10 @@ else
     fi
 
     # The load is the test — a signature can verify on an app that
-    # cannot launch (see CLAUDE.md on hardened runtime + the debug
-    # dylib). Adding an embedded framework is exactly the kind of
-    # change that can break it.
+    # cannot launch: under the hardened runtime, library validation
+    # refuses a dylib or framework whose Team ID differs from the app's,
+    # and a locally signed build has none on either side. Adding an
+    # embedded framework is exactly the kind of change that can break it.
     if [ "${SIPAI_SPARKLE_NO_LAUNCH:-0}" = "1" ]; then
         echo "  NOTE  launch check skipped (SIPAI_SPARKLE_NO_LAUNCH=1) — a second SipAI would share the running one's data folder"
     else
@@ -705,19 +706,20 @@ else
         "SipAI/Models/UpdateController.swift — a failed install would leave the next session unable to start a hold"
 fi
 
-# The hold is said the moment it starts (beside the sidebar's logo — the
-# window Sparkle leaves behind is inert and gets hidden), marked on the
-# Settings badge for as long as it lasts, and endable from Settings. No
+# The hold stands beside the sidebar's logo with Install Now from the
+# moment it starts (the window Sparkle leaves behind is inert and gets
+# hidden) — offered anew whatever was closed before — marked on the
+# Settings badge for as long as it lasts, and endable from either. No
 # banner over the main window any more.
-if grep -q 'UpdateAnnouncer.shared.announce(' "$UC" \
-   && awk '/private func beginHold\(\)/ {inside=1} inside && /UpdateAnnouncer.shared.announce\(/ {a=1} inside && /publishBadge\(\)/ {b=1} inside && /^    }/ {exit} END {exit (a && b) ? 0 : 1}' "$UC" \
+if awk '/private func beginHold\(\)/ {inside=1} inside && /SidebarNotices.shared.reopen\(key: UpdateBadgeItem.appInstallKey\)/ {a=1} inside && a && /publishBadge\(\)/ {b=1} inside && /^    }/ {exit} END {exit (a && b) ? 0 : 1}' "$UC" \
    && grep -q 'items.append(.appInstall(version: heldUpdateVersion))' "$UC" \
    && grep -q 'updates.installNow()' "$SV" \
+   && grep -q 'updateController?.installNow()' "$APP" \
    && ! grep -q 'UpdateHoldBanner' "$CV"; then
-    ok "the hold is said beside the logo, marked on the badge, and endable from Settings"
+    ok "the hold stands beside the logo with Install Now, is marked on the badge, and is endable from Settings"
 else
-    bad "the hold is said beside the logo, marked on the badge, and endable from Settings" \
-        "SipAI/Models/UpdateController.swift beginHold / Settings/SettingsView.swift — a hold nobody is told about reads as a dead Install button"
+    bad "the hold stands beside the logo with Install Now, is marked on the badge, and is endable from Settings" \
+        "SipAI/Models/UpdateController.swift beginHold / SipAIApp.swift / Settings/SettingsView.swift — a hold nobody is told about reads as a dead Install button"
 fi
 
 if grep -q 'updateController.config = configManager' "$APP" && grep -q 'appDelegate.updateController = updateController' "$APP"; then

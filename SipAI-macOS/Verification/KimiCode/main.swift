@@ -246,7 +246,7 @@ if let alpha = byId["sess-alpha"] {
         case .toolUse(_, let name, let input):
             tools.append((name, (input["command"] as? String) ?? ""))
         case .toolResult(let id, let c, let e): results.append((id, c, e))
-        case .interrupted, .compaction, .thinking: break
+        case .interrupted, .compaction, .thinking, .error, .shellOutput: break
         }
     }
     check("the request trace is NOT replayed as conversation",

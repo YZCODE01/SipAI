@@ -199,6 +199,25 @@ struct AgentSessionHistoryItem: Identifiable, Hashable {
     /// anything the user typed — see `AgentSessionScanner.isHarnessNotice`.
     var isSystemNotice: Bool = false
 
+    /// True for the user's words sent into a turn already running: a
+    /// message steered in mid-turn (claude's `queued_command` with
+    /// `commandMode: "prompt"`, codex's second user message of a turn), or
+    /// the answer to a question the agent asked without stopping (codex's
+    /// `request_user_input_async`). Drawn as the user's — the words are
+    /// theirs — but it opens no turn and is not a message to branch from:
+    /// a branch cuts at a turn, and editing this row would replace the
+    /// prompt of the turn it went into.
+    var sentIntoTurn: Bool = false
+
+    /// True on a row in the user column that is part of the agent's answer
+    /// rather than the user's own words: a background task reporting back
+    /// (claude's task notifications, its Monitor tool's events, kimi's
+    /// finished tasks) and the user's reply on a question's card (codex's
+    /// question asked without stopping). Compact view draws it inside the
+    /// answer's one line — everything between the user's message and the
+    /// final message is there.
+    var belongsToAnswer: Bool = false
+
     /// The files a user message carried as inlined attachments
     /// (`AttachmentInline`), for the paperclip line under the bubble.
     /// The row's text has the blocks STRIPPED; the names are read off
@@ -206,12 +225,35 @@ struct AgentSessionHistoryItem: Identifiable, Hashable {
     /// `files` key of its own. Empty on every other row.
     var attachedFiles: [String] = []
 
+    /// The skills SipAI loaded WITH this message (the composer's skill
+    /// chip, a scheduled task's skills), for the line under the bubble.
+    /// Read off the records the load left — claude's command records
+    /// above the message, codex's mention line inside it — so a reopen
+    /// draws what the live row drew. A skill the user typed is part of
+    /// the row's own text instead. Empty on every other row.
+    var loadedSkills: [String] = []
+
+    /// On a `.compaction` row: the agent's own record of the summary says
+    /// every message the user sent before it is still in the conversation
+    /// whole — so a skill the user started there is still held, and is
+    /// not sent again (`SkillEvidenceReader.evidence`). Kimi's, when it
+    /// did not have to trim them (`KimiSessionScanner
+    /// .compactionKeepsUserMessages`); false for every other agent.
+    var compactionKeepsUserMessages = false
+
+    /// True on the `.userText` row of a `!` command — the user's own shell
+    /// command (`ShellCommands`). Its output is the `.shellOutput` row after
+    /// it. A branch is never cut there: neither the terminal's record nor
+    /// SipAI's carries the words a fork writer matches on.
+    var shellCommand = false
+
     enum Kind {
         case userText(String)
         case assistantText(String)
-        /// A readable thought. The readers keep none unless asked, and
-        /// `keepingThoughts` then drops every one outside a turn that
-        /// ran in Chat only — the only turns that draw them.
+        /// A readable thought. The readers keep none unless asked: with
+        /// compact view on (`CompactTranscript`) they keep every one, and
+        /// otherwise `keepingThoughts` drops every one outside a turn
+        /// that ran in Chat only — the only turns that then draw them.
         case thinking(String)
         case toolUse(id: String, name: String, input: [String: Any])
         case toolResult(toolUseId: String, content: String, isError: Bool)
@@ -222,6 +264,13 @@ struct AgentSessionHistoryItem: Identifiable, Hashable {
         /// The agent summarised the conversation to make room. Figures
         /// are nil for an agent that records none.
         case compaction(preTokens: Int?, postTokens: Int?)
+        /// A turn the agent's own record says FAILED, and why, in its
+        /// words (kimi's `turn.ended reason: failed` — `KimiSessionScanner
+        /// .failedTurnReason`). Drawn as the live error row is, so a
+        /// failure reads the same live and reopened.
+        case error(message: String)
+        /// What a `!` command printed (`shellCommand`).
+        case shellOutput(ShellCommandOutput)
     }
 
     static func == (lhs: AgentSessionHistoryItem, rhs: AgentSessionHistoryItem) -> Bool {
@@ -232,12 +281,13 @@ struct AgentSessionHistoryItem: Identifiable, Hashable {
     /// `items` with every `.thinking` row dropped except inside a turn
     /// whose user row's handle is in `chatOnlyTurns`.
     ///
-    /// A thought is drawn only inside a Chat only turn's activity line,
-    /// and a row that draws nothing must not be in the list at all: the
-    /// transcript's display window, its "N older rows" count and the
-    /// find engine all count rows, so invisible ones would spend the
-    /// window on nothing. A turn opens at a message the user sent — a
-    /// notice in the user column opens none.
+    /// With compact view off a thought is drawn only inside a Chat only
+    /// turn's activity line, and a row that draws nothing must not be in
+    /// the list at all: the transcript's display window, its "N older
+    /// rows" count and the find engine all count rows, so invisible ones
+    /// would spend the window on nothing. A turn opens at a message the
+    /// user sent — a notice in the user column opens none, nor does an
+    /// answer steered into a turn already running.
     static func keepingThoughts(_ items: [AgentSessionHistoryItem],
                                 inTurns chatOnlyTurns: Set<String>)
     -> [AgentSessionHistoryItem] {
@@ -246,7 +296,7 @@ struct AgentSessionHistoryItem: Identifiable, Hashable {
         out.reserveCapacity(items.count)
         for item in items {
             switch item.kind {
-            case .userText where !item.isSystemNotice:
+            case .userText where !item.isSystemNotice && !item.sentIntoTurn:
                 keep = item.recordUuid.map(chatOnlyTurns.contains) ?? false
                 out.append(item)
             case .thinking:
@@ -256,6 +306,30 @@ struct AgentSessionHistoryItem: Identifiable, Hashable {
             }
         }
         return out
+    }
+}
+
+/// Whether agent sessions are drawn compact (Settings → Display, the
+/// toolbar's window, View → Agent Session Compact View), for the code that
+/// reads a turn: the live parsers, the readers of a turn run elsewhere and
+/// the agents' front ends keep a thought where compact view can draw it,
+/// and no thought where it cannot.
+///
+/// Set by `AgentManager` from the display setting, and read from the
+/// queues those readers run on, so it is guarded. A thought kept or left
+/// out here only decides what a turn's rows hold while it runs: a reopen
+/// reads the transcript again with the setting as it stands.
+enum CompactTranscript {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var on = false
+
+    static var isOn: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return on
+    }
+
+    static func set(_ value: Bool) {
+        lock.lock(); on = value; lock.unlock()
     }
 }
 
@@ -293,19 +367,181 @@ struct ClaudeSessionDraft: Identifiable, Hashable {
     /// and until a scan reads that, the row would otherwise sit among the
     /// ordinary sessions.
     var scheduledRun: ScheduledRunIdentity?
+    /// The skills chosen on the draft's chip — nil until the user
+    /// chooses, when what its place holds stands
+    /// (`AppState.newSessionSkillPicks`), else the agent's pinned skills
+    /// (`ConfigManager.agentSkillPreloads`). Filed under the session id in
+    /// `AgentManager.migrateRunner`, like `customGroup` and for the same
+    /// reason.
+    var skillPicks: [String]?
+    /// The + the draft was started from — what it is remembered by.
+    var place: NewSessionPlace
+    /// The chips once its first message has gone: what that message went
+    /// out with, and any change made since. Nil before — an unsent new
+    /// session's chips are what its place starts with, under what was
+    /// changed on it there (`AppState.newSessionChipEdits`).
+    /// Kept on the draft, as `skillPicks` is, because what its place
+    /// starts with may be another session's setup: a page built again
+    /// before the session is named (Settings keeps the draft, and the
+    /// switch to the session waits for the page) would show that, the
+    /// switch would save it as the session's own picks, and a first turn
+    /// that ends unnamed would put back the agent's Non-stop over its own.
+    /// The manager files them as the session's picks when its id arrives
+    /// (`AgentManager.noteSentDraft`, `migrateRunner`): the page may have
+    /// moved on by then, and opening anything else drops the draft.
+    var sentOptions: AgentLaunchOptions?
 
     struct ScheduledRunIdentity: Hashable {
         let taskName: String
         let title: String
     }
 
-    init(cwd: URL, name: String? = nil, agentKey: String = "claude_code",
-         customGroup: String? = nil) {
+    init(cwd: URL, name: String? = nil, agentKey: String,
+         customGroup: String? = nil, place: NewSessionPlace = .none) {
         self.id = UUID()
         self.cwd = cwd
         self.name = name
         self.agentKey = agentKey
         self.customGroup = customGroup
+        self.place = place
+    }
+}
+
+/// Where a new session was started from: a folder header's +, a custom
+/// group's +, Ungrouped's, or the section's own "+ New session", which is
+/// no group. Each place keeps its own unsent new session — the message,
+/// attached files, schedule and skills set on it, and the chips changed
+/// on it — the way each chat group keeps its own unsent new chat. Every
+/// other chip starts from the place's own memory (the group's newest
+/// session's; the agent's latest choices for no group); nothing starts
+/// with another session's skills or a schedule. Every place sits in one
+/// agent's section, so a place is per agent and nothing set up for one
+/// agent turns up under another's +.
+///
+/// The + clicked decides the place — a custom group's + is that group's
+/// place though its session also runs in a folder — and nothing moves it
+/// afterwards but a rename of its custom group. A branch started as a new
+/// session has a place of its own, so it neither takes nor leaves an
+/// unsent message where a + would find it.
+enum NewSessionPlace: Hashable {
+    case none
+    /// The folder's path, as the folder header keys it.
+    case folder(String)
+    /// The custom group's name. Groups are keyed by name.
+    case custom(String)
+    case ungrouped
+    case branch(UUID)
+
+    /// The key a new session started here files its unsent text, files,
+    /// schedule, chips and skills under (`AppState.agentDraftKey`'s
+    /// argument). The `new:` prefix keeps these apart from session ids.
+    func draftKey(agentKey: String) -> String {
+        switch self {
+        case .none: return "new:\(agentKey):none"
+        case .folder(let path): return "new:\(agentKey):folder:\(path)"
+        case .custom(let name): return Self.customKeyPrefix(agentKey: agentKey) + name
+        case .ungrouped: return "new:\(agentKey):ungrouped"
+        case .branch(let id): return "new:branch:\(id.uuidString)"
+        }
+    }
+
+    /// Every custom group's key for `agentKey` starts with this, the
+    /// group's name after it.
+    static func customKeyPrefix(agentKey: String) -> String {
+        "new:\(agentKey):custom:"
+    }
+
+    /// The place of a + that does not name one itself — every + but a
+    /// folder header's: its custom group, else Ungrouped while the
+    /// sessions are grouped by Custom (where a session filed nowhere is
+    /// listed), else no group at all.
+    static func of(customGroup: String?, groupedByCustom: Bool) -> NewSessionPlace {
+        if let group = customGroup { return .custom(group) }
+        return groupedByCustom ? .ungrouped : .none
+    }
+
+    /// The session a new session started here takes its chips from: the
+    /// newest one in this group — by its last user message, as the
+    /// sidebar dates its rows — whose setup SipAI has on record
+    /// (`hasSetup`). A session only ever run in a terminal has none, and
+    /// the next one answers. Nil for a place that is no group, and for a
+    /// group holding no such session: the caller falls back to the
+    /// agent's latest choices.
+    ///
+    /// Membership is the sidebar's own (`AgentSessionGrouping.buckets`): a
+    /// folder by its standardized path, a custom group by an assignment
+    /// naming a group that still exists, Ungrouped for every other
+    /// session. `sessions` are one agent's regular sessions (scheduled runs
+    /// are not); only the ones the user started count — a spawned subagent
+    /// or an automation is passed over.
+    func newestSession(among sessions: [AgentSession],
+                       customGroups: [String],
+                       assignments: [String: String],
+                       hasSetup: (String) -> Bool) -> AgentSession? {
+        func belongs(_ session: AgentSession) -> Bool {
+            switch self {
+            case .folder(let path):
+                return session.projectPath?.standardizedFileURL.path == path
+            case .custom(let name):
+                return assignments[session.id] == name && customGroups.contains(name)
+            case .ungrouped:
+                guard let name = assignments[session.id] else { return true }
+                return !customGroups.contains(name)
+            case .none, .branch:
+                return false
+            }
+        }
+        return sessions
+            .filter { $0.origin == .user && belongs($0) }
+            .sorted { $0.activityAt > $1.activityAt }
+            .first { hasSetup($0.id) }
+    }
+
+    /// The setup a new session started here starts its chips from: that
+    /// of the newest session in this group (`newestSession`), a new
+    /// session whose first message has gone counted from that moment
+    /// (`UnnamedNewSession`) — and the session it was read off, nil for
+    /// one with no session id yet. Its row and its picks come with its
+    /// id, seconds after the message went; a + clicked in between would
+    /// otherwise start from the session before it. Nil where nothing
+    /// answers: the caller falls back to the agent's latest choices.
+    func startingSetup(among sessions: [AgentSession],
+                       unnamed: [UnnamedNewSession],
+                       customGroups: [String],
+                       assignments: [String: String],
+                       setup: (String) -> AgentLaunchOptions?)
+    -> (options: AgentLaunchOptions, session: AgentSession?)? {
+        let waiting = Dictionary(unnamed.map { ($0.row.id, $0) }, uniquingKeysWith: { a, _ in a })
+        var filed = assignments
+        for new in unnamed { filed[new.row.id] = new.draft.customGroup }
+        guard let newest = newestSession(
+            among: sessions + unnamed.map(\.row), customGroups: customGroups,
+            assignments: filed,
+            hasSetup: { waiting[$0]?.draft.sentOptions != nil || setup($0) != nil })
+        else { return nil }
+        if let sent = waiting[newest.id]?.draft.sentOptions { return (sent, nil) }
+        return setup(newest.id).map { ($0, newest) }
+    }
+}
+
+/// A new session whose first message has gone and whose session id has
+/// not come yet (`AgentManager.unnamedNewSessions`), as the page that
+/// sent it last left it. It has no row and no picks on record until the
+/// id arrives — but it is its group's newest session from the moment its
+/// message went.
+struct UnnamedNewSession {
+    let draft: ClaudeSessionDraft
+    /// When its first message went.
+    let sentAt: Date
+
+    /// The row it will be: in the draft's folder, dated by its message,
+    /// and filed under the draft's custom group when the id arrives
+    /// (`AgentManager.migrateRunner`). Its id is the draft's runner key,
+    /// which no session id can be.
+    var row: AgentSession {
+        AgentSession(id: "draft:\(draft.id.uuidString)", fileURL: draft.cwd, title: "",
+                     modifiedAt: sentAt, lastUserMessageAt: sentAt, projectPath: draft.cwd,
+                     agentKey: draft.agentKey)
     }
 }
 
@@ -345,14 +581,14 @@ enum AgentSessionScanner {
     /// against the file's own (size, mtime). `size` and `mtime` come
     /// from the caller's own stat — the scan has already paid for it.
     ///
-    /// `read` is the per-format extractor (claude JSONL vs. codex
-    /// rollout); the two never name the same path, so one cache serves
-    /// both.
+    /// `read` is the per-format extractor (claude JSONL, codex rollout,
+    /// kimi wire), passed by every scanner: the formats never name the
+    /// same path, so one cache serves them all.
     static func cachedLastUserMessageDate(
         of url: URL,
         size: UInt64,
         mtime: Date,
-        read: (URL) -> Date? = { lastTurnStartDate(of: $0) }
+        read: (URL) -> Date?
     ) -> Date? {
         let key = url.path
         turnStartCacheLock.lock()
@@ -455,10 +691,11 @@ enum AgentSessionScanner {
                     // `cachedLastUserMessageDate`. An unchanged file
                     // costs a dictionary lookup here, not a read.
                     lastUserMessageAt: cachedLastUserMessageDate(
-                        of: url, size: size, mtime: mtime),
+                        of: url, size: size, mtime: mtime,
+                        read: { lastTurnStartDate(of: $0) }),
                     // The transcript's own `cwd` is authoritative — the
                     // encoded dirname can't distinguish "-" from "/",
-                    // space, or "." ("IB Native" decodes as "IB/Native").
+                    // space, or "." ("My App" decodes as "My/App").
                     // The decode walk stays as the fallback for files
                     // whose head carries no cwd.
                     projectPath: inspection.cwd ?? decoded,
@@ -511,6 +748,10 @@ enum AgentSessionScanner {
     /// disagree with what was actually read.
     static let historyByteBudget = 8 * 1024 * 1024
 
+    /// How claude's own record of a stopped turn begins — a user-role
+    /// record nobody typed.
+    static let interruptionPrefix = "[Request interrupted"
+
     /// `byteBudget` overrides the tail size for callers that need the
     /// WHOLE conversation rather than the newest slice — global search
     /// indexing, and the find bar's "search the whole session". It stays
@@ -518,23 +759,38 @@ enum AgentSessionScanner {
     /// pathological transcript from being pulled into memory entire.
     ///
     /// `includeThinking` keeps the thinking blocks that carry text, as
-    /// `.thinking` rows, for a session with Chat only turns in it; the
-    /// caller then applies `AgentSessionHistoryItem.keepingThoughts`.
-    /// Everything else reads without them.
+    /// `.thinking` rows: every one while compact view is on, and for a
+    /// session with Chat only turns in it, where the caller then applies
+    /// `AgentSessionHistoryItem.keepingThoughts`. Everything else reads
+    /// without them.
     static func readHistory(of url: URL, maxTurns: Int = 50,
                             byteBudget: Int? = nil,
                             includeThinking: Bool = false) -> [AgentSessionHistoryItem] {
+        readHistoryReaching(of: url, maxTurns: maxTurns, byteBudget: byteBudget,
+                            includeThinking: includeThinking).items
+    }
+
+    /// `readHistory`, and whether its window reached the file's start
+    /// (`conversationTail`): what "Show earlier" offers more on.
+    static func readHistoryReaching(of url: URL, maxTurns: Int = 50,
+                                    byteBudget: Int? = nil,
+                                    includeThinking: Bool = false)
+    -> (items: [AgentSessionHistoryItem], reachedStart: Bool) {
         // Lossy decode + bounded tail. STRICT decoding returns nil —
         // an EMPTY transcript for the whole session — whenever a
         // snapshot of a file another claude is MID-WRITING ends inside
         // a multibyte character. A partial edge line just fails JSON
         // parsing and is skipped, exactly like the stream readers.
-        guard let text = boundedTail(of: url,
-                                     budget: byteBudget ?? Self.historyByteBudget)
+        guard let tail = conversationTail(of: url,
+                                          budget: byteBudget ?? Self.historyByteBudget)
         else {
-            return []
+            return ([], true)
         }
+        let text = tail.text
         var items: [AgentSessionHistoryItem] = []
+        var skillLoads = ClaudeSkillLoadReader()
+        var seenRecords = Set<String>()
+        var conversation = ClaudeConversationLine()
 
         text.enumerateLines { line, _ in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -542,12 +798,19 @@ enum AgentSessionScanner {
                   let lineData = trimmed.data(using: .utf8),
                   let obj = (try? JSONSerialization.jsonObject(with: lineData)) as? [String: Any]
             else { return }
+            conversation.note(obj)
 
             // The record's own id, carried onto every item it produces —
             // the handle a transcript row needs to point back at its
             // line in the file (see `AgentSessionHistoryItem.recordUuid`
             // and `AgentSessionFork`).
             let recordUuid = obj["uuid"] as? String
+            // One record, one row. Claude writes a message's user record a
+            // second time, under the same uuid, when it compacts right
+            // before sending that message, as it does for a message sent
+            // again after "Prompt is too long". Drawn twice, the message
+            // would appear once more on reopen than it did live.
+            if let uuid = recordUuid, !seenRecords.insert(uuid).inserted { return }
 
             switch obj["type"] as? String ?? "" {
             case "user":
@@ -558,6 +821,7 @@ enum AgentSessionScanner {
                 // NSNull-safe: JSON null must read as absent.
                 if obj["toolUseResult"] != nil,
                    !(obj["toolUseResult"] is NSNull) {
+                    items.append(contentsOf: skillLoads.flush())
                     items.append(parseToolResult(
                         userContent: content,
                         fallback: obj["toolUseResult"],
@@ -567,7 +831,39 @@ enum AgentSessionScanner {
                 }
                 let raw = content ?? obj["content"] ?? ""
                 let rawText = extractText(fromContent: raw)
-                let cleaned = cleanUserText(rawText)
+                // A skill being loaded: the command record and the text
+                // claude expands it into. Neither is a row of its own —
+                // see `ClaudeSkillLoadReader`.
+                let step = skillLoads.consume(record: obj, rawText: rawText)
+                items.append(contentsOf: step.rows)
+                if step.absorbed { return }
+                // A `!` command, as claude's terminal keeps one and as SipAI
+                // hands it over: the input row is the user's row, the output
+                // row is drawn under it.
+                if let shell = ClaudeShellCommand.rows(fromContent: raw) {
+                    items.append(contentsOf: skillLoads.flush())
+                    for row in shell {
+                        switch row {
+                        case .command(let command):
+                            var item = AgentSessionHistoryItem(
+                                kind: .userText(ShellCommandInput.display(command)), recordUuid: recordUuid)
+                            item.shellCommand = true
+                            items.append(item)
+                        case .output(let output):
+                            items.append(AgentSessionHistoryItem(kind: .shellOutput(output),
+                                                                 recordUuid: recordUuid))
+                        }
+                    }
+                    return
+                }
+                // A background task's notification is drawn in the words
+                // the live feed drew it in, never as the tag-stripped
+                // inside of the record (ids, a temp path, a note to the
+                // model).
+                let taskNotice = ClaudeTaskNotice.saved(rawText) {
+                    Self.toolCallDescription($0, in: items)
+                }
+                let cleaned = taskNotice ?? cleanUserText(rawText)
                 // Inlined attachments: the names come off the RAW text,
                 // before the strip inside `cleanUserText` removes the
                 // blocks they ride in.
@@ -577,16 +873,39 @@ enum AgentSessionScanner {
                     // the user never wrote — labelled like a harness
                     // notice, and for the same reason.
                     let isSummary = (obj["isCompactSummary"] as? Bool) == true
+                    let isNotice = isHarnessNotice(rawText) || isSummary
                     var item = AgentSessionHistoryItem(
                         kind: .userText(cleaned), recordUuid: recordUuid,
-                        isSystemNotice: isHarnessNotice(rawText) || isSummary)
+                        isSystemNotice: isNotice)
                     item.attachedFiles = attached
+                    // A background task reporting back is part of the
+                    // agent's answer, not a message of the user's.
+                    item.belongsToAnswer = taskNotice != nil
+                    // Loads ride the user's next MESSAGE. A notice is not
+                    // one, and neither is claude's own record of a stop
+                    // ("[Request interrupted by user]") — a skill typed
+                    // alone and stopped keeps its own row.
+                    if isNotice || cleaned.hasPrefix(Self.interruptionPrefix) {
+                        items.append(contentsOf: skillLoads.flush())
+                    } else if (obj["isMeta"] as? Bool) != true {
+                        skillLoads.attach(to: &item)
+                    }
                     items.append(item)
                 }
 
             case "assistant":
+                items.append(contentsOf: skillLoads.flush())
                 let msg = obj["message"] as? [String: Any] ?? [:]
                 let content = msg["content"]
+                // A `!` command claude did not answer: its rows went in with
+                // no model request, and claude closed them with this line.
+                // Bookkeeping, not words of claude's.
+                if (msg["model"] as? String) == "<synthetic>",
+                   let last = items.last, case .shellOutput = last.kind,
+                   extractText(fromContent: content ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines) == ClaudeShellCommand.noResponseText {
+                    return
+                }
                 // `<synthetic>` marks text the HARNESS produced and no
                 // model ever said — a usage-limit notice, "No response
                 // requested.", a failed-auth line. The live feeds label
@@ -598,6 +917,7 @@ enum AgentSessionScanner {
                     includeThinking: includeThinking))
 
             case "system":
+                items.append(contentsOf: skillLoads.flush())
                 // A local slash command's answer — the one system record
                 // that renders. Dropping it left the command visible
                 // with its reply gone: the reply IS on screen while the
@@ -635,9 +955,48 @@ enum AgentSessionScanner {
                         recordUuid: recordUuid))
                 }
 
+            case "attachment":
+                // A message the user sent into the turn while it worked,
+                // handed to the model with the next step: claude keeps it
+                // as a queued command, not a user record. The user's
+                // words, opening no turn of its own.
+                if let prompt = queuedPrompt(obj) {
+                    let cleaned = cleanUserText(prompt)
+                    let attached = AttachmentInline.names(in: prompt)
+                    guard !cleaned.isEmpty || !attached.isEmpty else { return }
+                    items.append(contentsOf: skillLoads.flush())
+                    var item = AgentSessionHistoryItem(kind: .userText(cleaned),
+                                                       recordUuid: recordUuid)
+                    item.attachedFiles = attached
+                    item.sentIntoTurn = true
+                    items.append(item)
+                    return
+                }
+                // A background task's notification that reached the model
+                // mid-turn, carried by the next request: claude keeps it
+                // as a queued command, and the live feed drew it — in the
+                // turn, opening none.
+                guard let notice = queuedTaskNotice(obj, description: {
+                    Self.toolCallDescription($0, in: items)
+                }) else { return }
+                items.append(contentsOf: skillLoads.flush())
+                var item = AgentSessionHistoryItem(
+                    kind: .userText(notice), recordUuid: recordUuid,
+                    isSystemNotice: true)
+                item.sentIntoTurn = true
+                item.belongsToAnswer = true
+                items.append(item)
+
             default:
                 break  // "result", unknown types — silently skipped
             }
+        }
+        items.append(contentsOf: skillLoads.flush())
+        // Every row carries the record it came from, so a turn a rewind
+        // dropped leaves with its rows (`ClaudeConversationLine`).
+        let dropped = conversation.dropped()
+        if !dropped.isEmpty {
+            items.removeAll { $0.recordUuid.map(dropped.contains) ?? false }
         }
 
         // Turn-based cap: count only user-text items so a 50-turn limit
@@ -646,9 +1005,9 @@ enum AgentSessionScanner {
             if case .userText = it.kind { return i }
             return nil
         }
-        if userIndices.count <= maxTurns { return items }
+        if userIndices.count <= maxTurns { return (items, tail.reachedStart) }
         let startIdx = userIndices[userIndices.count - maxTurns]
-        return Array(items[startIdx...])
+        return (Array(items[startIdx...]), tail.reachedStart)
     }
 
     /// Read the last `budget` bytes of a file (or all of it when
@@ -657,9 +1016,23 @@ enum AgentSessionScanner {
     /// JSONLs grow into the hundreds of MB. Lossy on purpose: reads
     /// race live writers, and a strict decode fails WHOLE on a
     /// mid-character edge instead of losing one edge line.
+    ///
+    /// A compressed session file (`SessionFileCompression`) is read as
+    /// the text it holds: there is no seeking into a zstd frame, so the
+    /// whole file is decoded and only its last `budget` bytes are kept.
     static func boundedTail(of url: URL, budget: Int = 256 * 1024) -> String? {
+        if SessionFileCompression.isCompressed(url) {
+            // Codex unpacks a rollout the moment it loads the thread
+            // again, and the text is then the plain file's.
+            let unpacked = SessionFileCompression.unpacked(url)
+            if FileManager.default.fileExists(atPath: unpacked.path) {
+                return boundedTail(of: unpacked, budget: budget)
+            }
+            return compressedTail(of: url, budget: budget)
+        }
         guard let handle = try? FileHandle(forReadingFrom: url) else {
-            return nil
+            // Packed since the URL was read.
+            return compressedTail(of: url, budget: budget)
         }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
@@ -670,6 +1043,162 @@ enum AgentSessionScanner {
         }
         return String(decoding: data, as: UTF8.self)
     }
+
+    /// `boundedTail` of a file that is compressed, or that codex has
+    /// packed or unpacked since its URL was read (`SessionFileReader
+    /// .open` follows it). Nil when there is nothing to read.
+    private static func compressedTail(of url: URL, budget: Int) -> String? {
+        guard let reader = SessionFileReader.open(url) else { return nil }
+        defer { reader.close() }
+        let keep = max(budget, 0)
+        var tail = Data()
+        while true {
+            let chunk = reader.read(upToCount: 1 << 20)
+            if chunk.isEmpty { break }
+            tail.append(chunk)
+            // Trimmed in slices, never per chunk: dropping the front
+            // copies what stays.
+            if tail.count > keep * 2 + (1 << 20) {
+                tail.removeFirst(tail.count - keep)
+            }
+        }
+        if tail.count > keep { tail = Data(tail.suffix(keep)) }
+        return String(decoding: tail, as: UTF8.self)
+    }
+
+    /// The first `count` bytes of a session file's text (all of it when
+    /// smaller) — decoded, for a compressed one. Nil when the file
+    /// cannot be read.
+    static func head(of url: URL, count: Int) -> Data? {
+        guard let reader = SessionFileReader.open(url) else { return nil }
+        defer { reader.close() }
+        var data = Data()
+        while data.count < count {
+            let chunk = reader.read(upToCount: count - data.count)
+            if chunk.isEmpty { break }
+            data.append(chunk)
+        }
+        return data
+    }
+
+    /// How many bytes of text a session file holds: its size on disk,
+    /// or what a compressed one decodes to — the size its frame states
+    /// (codex's do), else counted by decoding it. What a bounded read is
+    /// judged against ("was the whole file read?") and what a byte offset
+    /// into the text is measured in.
+    static func contentSize(of url: URL) -> UInt64? {
+        if !SessionFileCompression.isCompressed(url),
+           let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size]
+            as? NSNumber {
+            return size.uint64Value
+        }
+        guard let reader = SessionFileReader.open(url) else { return nil }
+        defer { reader.close() }
+        if let size = reader.textSize { return size }
+        var total: UInt64 = 0
+        while true {
+            let chunk = reader.read(upToCount: 1 << 20)
+            if chunk.isEmpty { break }
+            total += UInt64(chunk.count)
+        }
+        return total
+    }
+    /// The newest `budget` bytes of a claude transcript's CONVERSATION,
+    /// lossy-decoded, and whether the walk reached the file's start.
+    ///
+    /// Claude also writes each API request it makes into the transcript —
+    /// its system prompt, tools and parameters, as `api-request`,
+    /// `api-request-blob` and `api-request-shape` records, each line
+    /// opening with `{"type":"api-request`. They are no part of the
+    /// conversation (no `uuid`, nothing hangs off them), and at the end of
+    /// a long session they can outweigh it nine to one: counted against a
+    /// window, they push the session's prompts, its newest
+    /// `permissionMode` and its newest usage out of every bounded read. So
+    /// this walk goes back from the end a chunk at a time, drops those
+    /// lines by their first bytes (no parse), keeps whole lines until
+    /// `budget` bytes of everything else are in hand, and reads at most
+    /// sixteen times the budget of the file — enough for that ratio, and
+    /// still a bound. The newest line may be a live writer's half line;
+    /// it fails JSON parsing downstream, as with `boundedTail`.
+    ///
+    /// `reachedStart` false means older conversation may sit above the
+    /// window: the partiality verdict a transcript's "Show earlier" needs,
+    /// which the file's size can no longer give (most of a long file may
+    /// be records the window never had to hold).
+    static func conversationTail(of url: URL, budget: Int)
+    -> (text: String, reachedStart: Bool)? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else {
+            return nil
+        }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        let ceiling = UInt64(max(budget, 1)) * 16
+        let chunkSize: UInt64 = 1 << 20
+        var position = size
+        var readBytes: UInt64 = 0
+        // The bytes of the oldest line seen so far, whose start lies
+        // before `position` (not read yet).
+        var pending = Data()
+        // Newest first; each a copy, so no chunk outlives its pass.
+        var kept: [Data] = []
+        var keptBytes = 0
+
+        /// Keeps a conversation line; false once the budget is in hand.
+        func take(_ line: Data) -> Bool {
+            if line.isEmpty || isRequestRecord(line) { return true }
+            kept.append(line.withUnsafeBytes { Data($0) })
+            keptBytes += line.count + 1
+            return keptBytes < budget
+        }
+
+        var full = false
+        while position > 0, !full, readBytes < ceiling {
+            let count = min(chunkSize, position)
+            position -= count
+            try? handle.seek(toOffset: position)
+            guard var chunk = try? handle.read(upToCount: Int(count)) else { return nil }
+            readBytes += UInt64(chunk.count)
+            chunk.append(pending)
+            // Whole lines newest first; the piece before the first
+            // newline starts further back and waits for the next chunk.
+            // The newline search is Foundation's own: a collection walk
+            // over `Data` goes through its representation per byte, and
+            // in a build without optimisation that cost the sidebar's
+            // whole-store scan nine times its old length.
+            var end = chunk.endIndex
+            while let found = chunk.range(of: Self.newlineByte, options: .backwards,
+                                          in: chunk.startIndex..<end) {
+                let newline = found.lowerBound
+                if !take(chunk[(newline + 1)..<end]) { full = true; break }
+                end = newline
+            }
+            pending = chunk[chunk.startIndex..<end].withUnsafeBytes { Data($0) }
+        }
+        var reachedStart = false
+        if !full, position == 0 {
+            // The file's first line, with no newline above it.
+            _ = take(pending)
+            reachedStart = true
+        }
+        // Appended, never a joined sequence read byte by byte.
+        var text = Data(capacity: keptBytes)
+        for (index, line) in kept.reversed().enumerated() {
+            if index > 0 { text.append(0x0A) }
+            text.append(line)
+        }
+        return (String(decoding: text, as: UTF8.self), reachedStart)
+    }
+
+    /// Whether a transcript line is one of claude's request records
+    /// (`conversationTail`): each opens `{"type":"api-request`, the
+    /// `-blob` and `-shape` kinds included. Read off the first bytes, so
+    /// the biggest lines claude writes are never parsed to be thrown away.
+    static func isRequestRecord(_ line: Data) -> Bool {
+        line.prefix(64).range(of: requestRecordMarker) != nil
+    }
+
+    private static let requestRecordMarker = Data(#"{"type":"api-request"#.utf8)
+    private static let newlineByte = Data([0x0A])
 
     /// The session's most recently recorded launch options, read from
     /// the JSONL every writer shares (this app, a terminal, the desktop
@@ -695,25 +1224,22 @@ enum AgentSessionScanner {
         // self-perpetuating: a nil mode drops the flag from the next
         // send, claude then records `default`, and every later read
         // agrees. Widen only when the narrow read found no mode, and
-        // stop at the file's own size; most sessions never pay for the
-        // second pass.
-        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        let size = (attributes?[.size] as? NSNumber)?.uint64Value
+        // stop once a window held the whole conversation; most sessions
+        // never pay for the second pass. The windows count conversation
+        // (`conversationTail`): claude's request records between a
+        // turn's opening record and EOF are what pushed it out of them.
         var found: (permissionMode: String?, model: String?, effort: String?,
                     fastMode: Bool?) = (nil, nil, nil, nil)
         for budget in [256 * 1024, 4 * 1024 * 1024] {
-            found = launchOptionsScan(of: url, budget: budget)
-            if found.permissionMode != nil { break }
-            if let size, size <= UInt64(budget) { break }
+            guard let tail = conversationTail(of: url, budget: budget) else { break }
+            found = launchOptionsScan(tail.text)
+            if found.permissionMode != nil || tail.reachedStart { break }
         }
         return found
     }
 
-    private static func launchOptionsScan(of url: URL, budget: Int)
+    private static func launchOptionsScan(_ text: String)
     -> (permissionMode: String?, model: String?, effort: String?, fastMode: Bool?) {
-        guard let text = boundedTail(of: url, budget: budget) else {
-            return (nil, nil, nil, nil)
-        }
         var mode: String? = nil
         var model: String? = nil
         var effort: String? = nil
@@ -775,7 +1301,9 @@ enum AgentSessionScanner {
     /// 0 / nil if the file is unreadable or no assistant record carries
     /// usage.
     static func lastContextTokens(of url: URL) -> (tokens: Int, model: String?, speed: String?) {
-        guard let text = boundedTail(of: url) else {
+        // Conversation bytes only: a call still in flight has written
+        // its request records after the newest answered call's usage.
+        guard let text = conversationTail(of: url, budget: 256 * 1024)?.text else {
             return (0, nil, nil)
         }
         var last = 0
@@ -859,19 +1387,17 @@ enum AgentSessionScanner {
         // needs them: the turn END is always near the tail, but the
         // PROMPT that opened it is however far back that turn's own
         // records reach, and a tool-heavy turn buries it well past the
-        // standard window.
-        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        let size = (attributes?[.size] as? NSNumber)?.uint64Value
+        // standard window. Counted in conversation bytes
+        // (`conversationTail`), as `lastLaunchOptions` counts them.
         for budget in [256 * 1024, 4 * 1024 * 1024] {
-            let seconds = turnDurationScan(of: url, budget: budget)
-            if seconds > 0 { return seconds }
-            if let size, size <= UInt64(budget) { break }
+            guard let tail = conversationTail(of: url, budget: budget) else { break }
+            let seconds = turnDurationScan(tail.text)
+            if seconds > 0 || tail.reachedStart { return seconds }
         }
         return 0
     }
 
-    private static func turnDurationScan(of url: URL, budget: Int) -> Double {
-        guard let text = boundedTail(of: url, budget: budget) else { return 0 }
+    private static func turnDurationScan(_ text: String) -> Double {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
 
         func object(_ line: Substring) -> [String: Any]? {
@@ -913,17 +1439,87 @@ enum AgentSessionScanner {
         // Back to the user prompt that opened it. A `tool_result`
         // round-trip is also `type: user` and must not count as the
         // turn's start — that is claude answering itself mid-turn.
+        //
+        // On the way, every wait on the user that the transcript can
+        // show is left out: the composer's clock held still through it
+        // while the turn ran. A question and a plan handed over for
+        // approval are calls that do nothing BUT wait for the user, so
+        // the whole gap between the call's tool_use record and the
+        // record carrying its result is the wait. Walking backwards, the
+        // result is met first.
+        //
+        // A permission card's wait is not recoverable this way: the gap
+        // around an ordinary tool call is the wait plus the tool's own
+        // run, and nothing in the transcript says where one ends.
+        var answeredAt: [String: Date] = [:]
+        var waits: [(from: Date, to: Date)] = []
         var back = endIdx - 1
         while back >= 0 {
-            if lines[back].contains("\"user\""),
-               let obj = object(lines[back]), isTurnStartUser(obj),
-               let start = isoDate(obj["timestamp"]) {
-                let seconds = end.timeIntervalSince(start)
-                return seconds > 0 ? seconds : 0
+            let line = lines[back]
+            let mayBeUser = line.contains("\"user\"")
+            let mayAsk = userWaitTools.contains { line.contains("\"\($0)\"") }
+            if mayBeUser || mayAsk, let obj = object(line) {
+                let type = obj["type"] as? String
+                if type == "user" {
+                    if isTurnStartUser(obj), let start = isoDate(obj["timestamp"]) {
+                        let seconds = end.timeIntervalSince(start) - unionLength(of: waits)
+                        return seconds > 0 ? seconds : 0
+                    }
+                    if let at = isoDate(obj["timestamp"]) {
+                        for id in toolResultIds(in: obj) { answeredAt[id] = at }
+                    }
+                } else if type == "assistant", mayAsk, let asked = isoDate(obj["timestamp"]) {
+                    for id in userWaitToolUseIds(in: obj) {
+                        if let at = answeredAt[id], at > asked {
+                            waits.append((asked, at))
+                        }
+                    }
+                }
             }
             back -= 1
         }
         return 0
+    }
+
+    /// The calls whose whole life is a wait on the user: claude's
+    /// question tool, and the call that hands a plan over for approval.
+    private static let userWaitTools: Set<String> = ["AskUserQuestion", "ExitPlanMode"]
+
+    /// How long the given waits cover between them. Two that overlap are
+    /// one stretch of waiting, not two — the live clock stops once while
+    /// any card is up.
+    private static func unionLength(of waits: [(from: Date, to: Date)]) -> TimeInterval {
+        var total: TimeInterval = 0
+        var covered: Date? = nil
+        for wait in waits.sorted(by: { $0.from < $1.from }) {
+            let from = max(wait.from, covered ?? wait.from)
+            if wait.to > from {
+                total += wait.to.timeIntervalSince(from)
+                covered = wait.to
+            }
+        }
+        return total
+    }
+
+    /// The tool calls a user record answers — its `tool_result` blocks.
+    private static func toolResultIds(in obj: [String: Any]) -> [String] {
+        guard let message = obj["message"] as? [String: Any],
+              let content = message["content"] as? [[String: Any]] else { return [] }
+        return content.compactMap { block in
+            block["type"] as? String == "tool_result" ? block["tool_use_id"] as? String : nil
+        }
+    }
+
+    /// The calls in an assistant record that only wait on the user
+    /// (`userWaitTools`).
+    private static func userWaitToolUseIds(in obj: [String: Any]) -> [String] {
+        guard let message = obj["message"] as? [String: Any],
+              let content = message["content"] as? [[String: Any]] else { return [] }
+        return content.compactMap { block in
+            guard block["type"] as? String == "tool_use",
+                  let name = block["name"] as? String, userWaitTools.contains(name) else { return nil }
+            return block["id"] as? String
+        }
     }
 
     /// A real user prompt: not a subagent record, not a `tool_result`
@@ -958,19 +1554,15 @@ enum AgentSessionScanner {
     ///
     /// Reads files; call off the main thread.
     static func lastTurnStartDate(of url: URL) -> Date? {
-        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        let size = (attributes?[.size] as? NSNumber)?.uint64Value
         for budget in [256 * 1024, 4 * 1024 * 1024] {
-            if let found = turnStartScan(of: url, budget: budget) {
-                return found
-            }
-            if let size, size <= UInt64(budget) { break }
+            guard let tail = conversationTail(of: url, budget: budget) else { break }
+            if let found = turnStartScan(tail.text) { return found }
+            if tail.reachedStart { break }
         }
         return nil
     }
 
-    private static func turnStartScan(of url: URL, budget: Int) -> Date? {
-        guard let text = boundedTail(of: url, budget: budget) else { return nil }
+    private static func turnStartScan(_ text: String) -> Date? {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: true)
         for line in lines.reversed() {
             // Cheap pre-filter; correctness comes from the parse.
@@ -983,11 +1575,12 @@ enum AgentSessionScanner {
             // Wrapper-only records (system-reminder injections) and the
             // synthetic interrupt record are claude bookkeeping, not
             // the user opening a turn — same rule as the tailer's
-            // liveness check.
+            // liveness check. A message of attached files alone is the
+            // user's, words or not.
             let msg = obj["message"] as? [String: Any] ?? [:]
             let rawText = extractText(fromContent: msg["content"] ?? "")
             let text = cleanSessionMetaText(rawText)
-            guard !text.isEmpty,
+            guard !text.isEmpty || !AttachmentInline.names(in: rawText).isEmpty,
                   !text.hasPrefix("[Request interrupted"),
                   !isHarnessNotice(rawText) else { continue }
             return isoDate(obj["timestamp"])
@@ -1005,7 +1598,7 @@ enum AgentSessionScanner {
     ///
     /// Reads files; call off the main thread.
     static func endsMidTurn(of url: URL) -> Bool {
-        guard let text = boundedTail(of: url) else { return false }
+        guard let text = conversationTail(of: url, budget: 256 * 1024)?.text else { return false }
         var state: Bool? = nil
         text.enumerateLines { line, _ in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -1205,7 +1798,17 @@ enum AgentSessionScanner {
     /// multi-hundred-MB session stores and allocate file-sized strings.
     private static let inspectByteBudget = 256 * 1024
 
-    private static func inspectSession(from url: URL, decodedProjectPath: URL?)
+    /// The head read again, wider, for a session whose first window ends
+    /// before its first message. A turn that loads skills opens with
+    /// them — each one's whole text, ahead of the prompt — and several
+    /// long ones fill the ordinary window: the prompt then sits past it,
+    /// and with it the marker that files a scheduled run under its task
+    /// and the words the session is named by.
+    private static let inspectWideBudget = 4 * 1024 * 1024
+
+    /// Internal, not private: the harness reads real transcripts through
+    /// it (`Verification/Skills`).
+    static func inspectSession(from url: URL, decodedProjectPath: URL?)
     -> (title: String, scheduledTaskName: String?, cwd: URL?,
         titleIsFallback: Bool, isEmptyShell: Bool) {
         // Everything this function needs lives at the edges of the
@@ -1225,10 +1828,9 @@ enum AgentSessionScanner {
         let text = String(decoding: headData, as: UTF8.self)
         var tailText = text
         if size > UInt64(Self.inspectByteBudget) {
-            try? handle.seek(toOffset: size - UInt64(Self.inspectByteBudget))
-            let tailData = (try? handle.read(upToCount: Self.inspectByteBudget))
-                ?? Data()
-            tailText = String(decoding: tailData, as: UTF8.self)
+            // Conversation bytes: the newest title can sit behind more
+            // request records than the window holds.
+            tailText = conversationTail(of: url, budget: Self.inspectByteBudget)?.text ?? ""
         }
         // Claude writes `{"type": "ai-title", "aiTitle": "…"}` records —
         // the name Claude Desktop shows. Prefer the newest one so
@@ -1243,92 +1845,142 @@ enum AgentSessionScanner {
         var sawConversation = false
         var checkedFirstUserRecord = false
         var firstCommandName: String? = nil
-        text.enumerateLines { line, stop in
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty,
-                  let lineData = trimmed.data(using: .utf8),
-                  let obj = (try? JSONSerialization.jsonObject(with: lineData)) as? [String: Any]
-            else { return }
-            // Read off the DECODED content, never the raw line: `\/` is
-            // a legal JSON spelling of "/", so `</command-name>` can
-            // reach the file as `<\/command-name>` and a raw-line match
-            // silently finds nothing. Claude files the command name on
-            // a user record for most commands and on a system record
-            // for others, so both shapes are tried. Last-resort title
-            // only.
-            if firstCommandName == nil {
-                let content = ((obj["message"] as? [String: Any])?["content"])
-                    ?? obj["content"] ?? ""
-                let decoded = extractText(fromContent: content)
-                if decoded.contains("<command-name>") {
-                    firstCommandName = extractCommandName(from: decoded)
+        // A typed skill command with arguments (`/review-pr the auth
+        // module`), held until the next record shows it WAS a skill —
+        // and the `promptId` of the command record just read, which the
+        // text it expands into carries too.
+        var heldSkillTitle: String? = nil
+        var heldCommandPrompt: String? = nil
+        func scan(_ text: String) {
+            text.enumerateLines { line, stop in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty,
+                      let lineData = trimmed.data(using: .utf8),
+                      let obj = (try? JSONSerialization.jsonObject(with: lineData)) as? [String: Any]
+                else { return }
+                // Read off the DECODED content, never the raw line: `\/` is
+                // a legal JSON spelling of "/", so `</command-name>` can
+                // reach the file as `<\/command-name>` and a raw-line match
+                // silently finds nothing. Claude files the command name on
+                // a user record for most commands and on a system record
+                // for others, so both shapes are tried. Last-resort title
+                // only.
+                if firstCommandName == nil {
+                    let content = ((obj["message"] as? [String: Any])?["content"])
+                        ?? obj["content"] ?? ""
+                    let decoded = extractText(fromContent: content)
+                    if decoded.contains("<command-name>") {
+                        firstCommandName = extractCommandName(from: decoded)
+                    }
                 }
-            }
-            // Nearly every record stamps the working directory; the
-            // first one settles the session's real project root.
-            if sessionCwd == nil, let c = obj["cwd"] as? String,
-               c.hasPrefix("/") {
-                sessionCwd = URL(fileURLWithPath: c, isDirectory: true)
-            }
-            // Any REAL assistant record or tool round-trip is
-            // conversation — the discriminator between a real session
-            // and a `/clear` shell that only ever logged local
-            // commands. "Real" excludes `model: "<synthetic>"`: claude
-            // writes a synthetic assistant record ("No response
-            // requested.") after every `/exit`-style command, so a
-            // pure command shell still carries assistant records and
-            // would otherwise dodge shell detection.
-            if !sawConversation, let t = obj["type"] as? String {
-                if t == "user", obj["toolUseResult"] != nil,
-                   !(obj["toolUseResult"] is NSNull) {
-                    sawConversation = true
-                } else if t == "assistant" {
-                    let model = ((obj["message"] as? [String: Any])?["model"]
-                                    as? String) ?? ""
-                    if model != "<synthetic>" { sawConversation = true }
-                } else if t == "system",
-                          localCommandOutput(fromRecord: obj) != nil {
-                    // A slash command that ANSWERED. The session holds
-                    // something the user asked for and can read back, so
-                    // hiding it loses the answer along with the row —
-                    // and `/mcp` in this app is exactly that session.
-                    //
-                    // Still judged on the answer's TEXT, which is what
-                    // keeps the shells this test exists for hidden: a
-                    // command that printed nothing writes an empty
-                    // wrapper, and `/clear` writes no transcript at all.
-                    sawConversation = true
+                // Nearly every record stamps the working directory; the
+                // first one settles the session's real project root.
+                if sessionCwd == nil, let c = obj["cwd"] as? String,
+                   c.hasPrefix("/") {
+                    sessionCwd = URL(fileURLWithPath: c, isDirectory: true)
                 }
+                // Any REAL assistant record or tool round-trip is
+                // conversation — the discriminator between a real session
+                // and a `/clear` shell that only ever logged local
+                // commands. "Real" excludes `model: "<synthetic>"`: claude
+                // writes a synthetic assistant record ("No response
+                // requested.") after every `/exit`-style command, so a
+                // pure command shell still carries assistant records and
+                // would otherwise dodge shell detection.
+                if !sawConversation, let t = obj["type"] as? String {
+                    if t == "user", obj["toolUseResult"] != nil,
+                       !(obj["toolUseResult"] is NSNull) {
+                        sawConversation = true
+                    } else if t == "assistant" {
+                        let model = ((obj["message"] as? [String: Any])?["model"]
+                                        as? String) ?? ""
+                        if model != "<synthetic>" { sawConversation = true }
+                    } else if t == "system",
+                              localCommandOutput(fromRecord: obj) != nil {
+                        // A slash command that ANSWERED. The session holds
+                        // something the user asked for and can read back, so
+                        // hiding it loses the answer along with the row —
+                        // and `/mcp` in this app is exactly that session.
+                        //
+                        // Still judged on the answer's TEXT, which is what
+                        // keeps the shells this test exists for hidden: a
+                        // command that printed nothing writes an empty
+                        // wrapper, and `/clear` writes no transcript at all.
+                        sawConversation = true
+                    }
+                }
+                if obj["type"] as? String != "user" { return }
+                if obj["toolUseResult"] != nil,
+                   !(obj["toolUseResult"] is NSNull) { return }
+                let msg = obj["message"] as? [String: Any] ?? [:]
+                let raw = msg["content"] ?? obj["content"] ?? ""
+                let pick = firstUserText(raw)
+                let isMeta = (obj["isMeta"] as? Bool) == true
+                // A skill's expanded text is the skill, not anything the
+                // user said: never a title, and it carries no marker. It
+                // does settle a held command: that one was a skill, typed
+                // with words the session can be named by.
+                if SkillRecords.isClaudeExpansion(obj, text: pick,
+                                                  afterCommandPrompt: heldCommandPrompt) {
+                    if let title = heldSkillTitle {
+                        result = title
+                        stop = true
+                    }
+                    return
+                }
+                heldSkillTitle = nil
+                let command = isMeta ? nil : SkillRecords.claudeCommand(in: pick)
+                heldCommandPrompt = command == nil ? nil : (obj["promptId"] as? String)
+                // The scheduled-task marker rides the prompt, which skills a
+                // run loads go AHEAD of — so a command record is not the
+                // record that answers whether this is a run.
+                if !checkedFirstUserRecord, !isMeta, command == nil {
+                    scheduledTaskName = extractScheduledTaskName(from: pick)
+                    checkedFirstUserRecord = true
+                }
+                // A session opened by a `!` command is named as its row
+                // reads (`!ls`) — what codex's and kimi's readers name it —
+                // never by what the command printed.
+                if let shell = ClaudeShellCommand.rows(fromContent: raw) {
+                    guard case .command(let line)? = shell.first else { return }
+                    result = Self.collapsedTitle(ShellCommandInput.display(line))
+                    stop = true
+                    return
+                }
+                guard !pick.isEmpty else { return }
+                if let command, !command.args.isEmpty {
+                    let typed = cleanSessionMetaText(command.args)
+                    if !typed.isEmpty {
+                        heldSkillTitle = Self.collapsedTitle("/" + command.name + " " + typed)
+                    }
+                }
+                // Title derivation uses the META cleaner: a session whose
+                // first record is a slash command must fall through to the
+                // next real message, not be named "/clear clear".
+                let cleaned = cleanSessionMetaText(pick)
+                guard !cleaned.isEmpty else { return }
+                result = Self.collapsedTitle(cleaned)
+                // With an ai-title in hand only the scheduled-task marker
+                // and cwd were still needed — both live in the first
+                // records, which have now been seen. Stopping here can
+                // leave cwd nil only if no head record carried one, and
+                // then the decode fallback covers it.
+                stop = true
             }
-            if obj["type"] as? String != "user" { return }
-            if obj["toolUseResult"] != nil,
-               !(obj["toolUseResult"] is NSNull) { return }
-            let msg = obj["message"] as? [String: Any] ?? [:]
-            let raw = msg["content"] ?? obj["content"] ?? ""
-            let pick = firstUserText(raw)
-            if !checkedFirstUserRecord {
-                scheduledTaskName = extractScheduledTaskName(from: pick)
-                checkedFirstUserRecord = true
-            }
-            guard !pick.isEmpty else { return }
-            // Title derivation uses the META cleaner: a session whose
-            // first record is a slash command must fall through to the
-            // next real message, not be named "/clear clear".
-            let cleaned = cleanSessionMetaText(pick)
-            guard !cleaned.isEmpty else { return }
-            let collapsed = cleaned.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
-                                   .joined(separator: " ")
-            if collapsed.count > 50 {
-                result = String(collapsed.prefix(47)) + "..."
-            } else {
-                result = collapsed
-            }
-            // With an ai-title in hand only the scheduled-task marker
-            // and cwd were still needed — both live in the first
-            // records, which have now been seen. Stopping here can
-            // leave cwd nil only if no head record carried one, and
-            // then the decode fallback covers it.
-            stop = true
+        }
+        scan(text)
+        // The window ended inside the commands a session opens with — no
+        // message of the user's reached yet, and more file to read: the
+        // head is read again, wider. Only a session that OPENS on
+        // commands pays for it, and only until its first message is in
+        // the ordinary window's reach.
+        if !checkedFirstUserRecord, result == nil, firstCommandName != nil,
+           size > UInt64(Self.inspectByteBudget) {
+            try? handle.seek(toOffset: 0)
+            let wide = (try? handle.read(upToCount: Self.inspectWideBudget)) ?? Data()
+            heldSkillTitle = nil
+            heldCommandPrompt = nil
+            scan(String(decoding: wide, as: UTF8.self))
         }
         if let aiTitle = aiTitle {
             return (aiTitle, scheduledTaskName, sessionCwd, false, false)
@@ -1372,10 +2024,16 @@ enum AgentSessionScanner {
     /// message. What a scheduled run is called from the instant it
     /// starts, so its row does not change name when the scan catches up.
     static func title(fromPrompt prompt: String) -> String? {
-        let collapsed = cleanUserText(prompt)
+        let collapsed = collapsedTitle(cleanUserText(prompt))
+        return collapsed.isEmpty ? nil : collapsed
+    }
+
+    /// Already-cleaned text as a title: whitespace collapsed, 50
+    /// characters at most.
+    private static func collapsedTitle(_ cleaned: String) -> String {
+        let collapsed = cleaned
             .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
             .joined(separator: " ")
-        guard !collapsed.isEmpty else { return nil }
         return collapsed.count > 50 ? String(collapsed.prefix(47)) + "..." : collapsed
     }
 
@@ -1471,7 +2129,7 @@ enum AgentSessionScanner {
         return strippingANSI(parts.joined(separator: "\n"))
     }
 
-    private static func strippingANSI(_ text: String) -> String {
+    fileprivate static func strippingANSI(_ text: String) -> String {
         guard text.contains("\u{1B}"), let regex = ansiEscapeRegex else {
             return text
         }
@@ -1609,6 +2267,46 @@ enum AgentSessionScanner {
     /// and must not count as the user opening a turn — a notification
     /// landing hours later would otherwise re-time the session's
     /// sidebar row.
+    /// The words of a message the user sent into a turn while it worked,
+    /// as claude keeps it once the next step carried it to the model: a
+    /// queued-command attachment in `prompt` mode (a background task's
+    /// notification rides the same record in `task-notification` mode).
+    /// nil for any other attachment.
+    static func queuedPrompt(_ record: [String: Any]) -> String? {
+        guard let attachment = record["attachment"] as? [String: Any],
+              attachment["type"] as? String == "queued_command",
+              attachment["commandMode"] as? String == "prompt",
+              let prompt = attachment["prompt"] as? String
+        else { return nil }
+        return prompt
+    }
+
+    /// The notice of a background task's notification claude kept as a
+    /// queued-command attachment — the one it handed the model with a
+    /// request mid-turn — or nil for any other attachment.
+    static func queuedTaskNotice(_ record: [String: Any],
+                                 description: (String) -> String?) -> String? {
+        guard let attachment = record["attachment"] as? [String: Any],
+              attachment["type"] as? String == "queued_command",
+              attachment["commandMode"] as? String == "task-notification",
+              let prompt = attachment["prompt"] as? String
+        else { return nil }
+        return ClaudeTaskNotice.saved(prompt, description: description)
+    }
+
+    /// The description the tool call `toolUseId` was given, newest first
+    /// among the rows read so far: what names a background task in its
+    /// notice.
+    static func toolCallDescription(_ toolUseId: String,
+                                    in items: [AgentSessionHistoryItem]) -> String? {
+        for item in items.reversed() {
+            if case .toolUse(let id, _, let input) = item.kind, id == toolUseId {
+                return input["description"] as? String
+            }
+        }
+        return nil
+    }
+
     static func isHarnessNotice(_ rawText: String) -> Bool {
         let t = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.hasPrefix("<task-notification>")
@@ -1620,7 +2318,10 @@ enum AgentSessionScanner {
     /// For TITLES (a `/clear`
     /// session must not be named "/clear clear") and for the tailer's
     /// turn-liveness text check (a record that is ONLY command/system
-    /// wrappers is claude bookkeeping, not the user starting a turn).
+    /// wrappers is claude bookkeeping, not the user starting a turn). A
+    /// `!` command's output goes with its tags the same way: a session is
+    /// titled by the command, never by what it printed, and the output
+    /// alone starts no turn.
     static func cleanSessionMetaText(_ text: String) -> String {
         // Same first step as `cleanUserText`: a session whose first
         // message carried an attachment must not be TITLED by the file.
@@ -1631,6 +2332,8 @@ enum AgentSessionScanner {
             "<command-args>[\\s\\S]*?</command-args>",
             "<local-command-stdout>[\\s\\S]*?</local-command-stdout>",
             "<local-command-stderr>[\\s\\S]*?</local-command-stderr>",
+            "<bash-stdout>[\\s\\S]*?</bash-stdout>",
+            "<bash-stderr>[\\s\\S]*?</bash-stderr>",
             "<system-reminder>[\\s\\S]*?</system-reminder>",
             "<local-command-caveat>[\\s\\S]*?</local-command-caveat>",
             "<[^>]+>",
@@ -1654,6 +2357,8 @@ enum AgentSessionScanner {
             "<command-args>[\\s\\S]*?</command-args>",
             "<local-command-stdout>[\\s\\S]*?</local-command-stdout>",
             "<local-command-stderr>[\\s\\S]*?</local-command-stderr>",
+            "<bash-stdout>[\\s\\S]*?</bash-stdout>",
+            "<bash-stderr>[\\s\\S]*?</bash-stderr>",
             "<[^>]+>",
         ]
         var map: [String: NSRegularExpression] = [:]
@@ -1721,6 +2426,358 @@ enum AgentSessionScanner {
         }
         // Naive fallback: treat dashes as slashes. Better than nothing.
         return URL(fileURLWithPath: "/" + parts.joined(separator: "/"))
+    }
+}
+
+/// The words a finished or stopped Claude Code background task is drawn
+/// with — one rule for the live feed (claude's `system/task_notification`
+/// on stdout, read by `ClaudeBackgroundTasks`) and for the transcript (the
+/// `<task-notification>` record claude saves, read by
+/// `AgentSessionScanner.readHistory` and the tailer), so a reopened session
+/// says what the running one said. Drawn as a system notice: claude wrote
+/// it, nobody typed it.
+enum ClaudeTaskNotice {
+
+    /// A command's notification carries claude's own sentence about the
+    /// task ("Background command "Run the tests" completed (exit code
+    /// 0)"), the same on stdout and in the saved record, and it is drawn
+    /// as claude said it. Any other kind is named by the description of
+    /// the tool call that started it, in SipAI's words: an agent's
+    /// notification carries the agent's ANSWER on stdout where its saved
+    /// record says `Agent "…" finished`, so neither is the same on both
+    /// feeds. A summary that is only the description says no more than
+    /// the description, and is put in a sentence too.
+    static func text(status: String, summary: String?, kind: String?, description: String?) -> String {
+        let said = (summary ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = (description ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if kind == "local_bash", !said.isEmpty, said != name { return said }
+        let subject = name.isEmpty && kind == "local_bash" ? said : name
+        switch status {
+        case "completed":
+            return subject.isEmpty
+                ? String(localized: "A background task finished.",
+                         comment: "Transcript notice: a background task the agent started has finished; its name is unknown")
+                : String(localized: "Background task finished: \(subject)",
+                         comment: "Transcript notice: a background task the agent started has finished; placeholder is the task's description")
+        case "failed":
+            return subject.isEmpty
+                ? String(localized: "A background task failed.",
+                         comment: "Transcript notice: a background task the agent started has failed; its name is unknown")
+                : String(localized: "Background task failed: \(subject)",
+                         comment: "Transcript notice: a background task the agent started has failed; placeholder is the task's description")
+        default:
+            return subject.isEmpty
+                ? String(localized: "A background task was stopped.",
+                         comment: "Transcript notice: a background task the agent started was stopped before it finished; its name is unknown")
+                : String(localized: "Background task stopped: \(subject)",
+                         comment: "Transcript notice: a background task the agent started was stopped before it finished; placeholder is the task's description")
+        }
+    }
+
+    /// The notice a saved `<task-notification>` is drawn as, or nil when
+    /// `raw` is not one. Claude saves it as a user record when it starts a
+    /// turn of its own for the notification, and as a queued-command
+    /// attachment when a request carried it mid-turn. A record holding the
+    /// task's `<result>` is an agent's; `description` looks up the tool
+    /// call that started the task (by its `<tool-use-id>`) where the
+    /// reader has read it, and without that claude's own summary stands.
+    ///
+    /// One event of claude's Monitor tool — a line the watched command
+    /// printed — reads as claude's own terminal draws it: the event's first
+    /// line that says something, then the watch's description (`Monitor
+    /// event: Build exit=0 12s · sweep results`). The description alone is
+    /// the same sentence for every event of a watch. Claude escapes `&`,
+    /// `<` and `>` in both, and the event is the command's own output,
+    /// colours included; an event with a bare `<` is not one claude wrote,
+    /// and claude's summary stands.
+    static func saved(_ raw: String, description: (String) -> String?) -> String? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.hasPrefix("<task-notification>") else { return nil }
+        let monitorPrefix = "Monitor event: \""
+        let collapsed: (Substring) -> String = { part in
+            let words = part.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            return words.count > 500 ? String(words.prefix(500)) + "…" : words
+        }
+        if let summary = element("summary", in: text).map(ClaudeShellCommand.unescape),
+           summary.hasPrefix(monitorPrefix), summary.hasSuffix("\""), summary.count > monitorPrefix.count,
+           let event = element("event", in: text), !event.contains("<"),
+           let headline = AgentSessionScanner.strippingANSI(ClaudeShellCommand.unescape(event))
+               .split(whereSeparator: \.isNewline).lazy.map(collapsed).first(where: { !$0.isEmpty }) {
+            let watch = collapsed(summary.dropFirst(monitorPrefix.count).dropLast())
+            return watch.isEmpty ? "Monitor event: \(headline)" : "Monitor event: \(headline) · \(watch)"
+        }
+        let status = element("status", in: text) ?? ""
+        let summary = element("summary", in: text)
+        guard !status.isEmpty || summary != nil else { return nil }
+        let name = element("tool-use-id", in: text).flatMap(description)
+        let isAgent = element("result", in: text) != nil
+        if isAgent, name == nil, let summary, !summary.isEmpty { return summary }
+        return Self.text(status: status, summary: summary,
+                         kind: isAgent ? "local_agent" : "local_bash", description: name)
+    }
+
+    /// The text of the first `<tag>…</tag>` in `text`, trimmed.
+    private static func element(_ tag: String, in text: String) -> String? {
+        guard let open = text.range(of: "<\(tag)>"),
+              let close = text.range(of: "</\(tag)>", range: open.upperBound..<text.endIndex)
+        else { return nil }
+        return text[open.upperBound..<close.lowerBound]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// Which records of a claude transcript belong to turns a rewind dropped.
+///
+/// Claude never removes a record. Its transcript is a tree through
+/// `parentUuid`, and a rewind — Esc Esc or `/rewind` in its terminal, or
+/// `-p --resume-session-at` — parents the next message at the entry above
+/// the edited one, leaving the replaced turns in the file as a branch
+/// claude does not load again: it rebuilds the conversation by walking
+/// back from its newest leaf. A reader that draws records in file order
+/// therefore draws turns the agent no longer has.
+///
+/// The current line is the walk back from the newest record — or from
+/// the leaf of a `last-prompt` marked `rewound` written after it, which
+/// claude's terminal records when a rewind has not yet been followed by a
+/// message — crossing a compaction through `logicalParentUuid`. A branch
+/// off that line is dropped only when it holds a real prompt: a rewind
+/// always cuts at a user message, and the line's other side branches
+/// hold none (a parallel tool call's result is parented at its call,
+/// beside the next call, and claude keeps it). A second ROOT holding a
+/// prompt is dropped when the line itself reaches a root — a rewind to
+/// before the first message. Within a bounded read, a branch whose fork
+/// point lies above the window cannot be told apart and is kept.
+struct ClaudeConversationLine {
+    private struct Entry {
+        let parent: String?
+        let isPrompt: Bool
+    }
+
+    private var entries: [String: Entry] = [:]
+    private var order: [String] = []
+    private var newest: String?
+    private var rewoundLeaf: String?
+
+    /// Feed one parsed record, in file order.
+    mutating func note(_ obj: [String: Any]) {
+        if obj["type"] as? String == "last-prompt" {
+            if (obj["rewound"] as? Bool) == true,
+               let leaf = obj["leafUuid"] as? String, !leaf.isEmpty {
+                rewoundLeaf = leaf
+            }
+            return
+        }
+        guard let uuid = obj["uuid"] as? String, !uuid.isEmpty,
+              (obj["isSidechain"] as? Bool) != true else { return }
+        // A record written twice under one uuid (claude does it when it
+        // compacts right before sending a message) keeps the links of its
+        // LAST copy — claude's own map does the same.
+        if entries[uuid] == nil { order.append(uuid) }
+        entries[uuid] = Entry(parent: Self.entryAbove(obj), isPrompt: Self.isPrompt(obj))
+        newest = uuid
+        rewoundLeaf = nil
+    }
+
+    /// The record a record hangs off: its `parentUuid`, or across a
+    /// compaction the `logicalParentUuid` the boundary keeps.
+    static func entryAbove(_ obj: [String: Any]) -> String? {
+        (obj["parentUuid"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            ?? (obj["logicalParentUuid"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// The uuids off the current line, ending at `leaf` (default: the
+    /// line claude would resume).
+    func dropped(endingAt leaf: String? = nil) -> Set<String> {
+        guard let start = leaf ?? rewoundLeaf.flatMap({ entries[$0] == nil ? nil : $0 }) ?? newest,
+              entries[start] != nil else { return [] }
+        var line = Set<String>()
+        var top = start
+        var cursor: String? = start
+        while let c = cursor, let entry = entries[c], line.insert(c).inserted {
+            top = c
+            cursor = entry.parent
+        }
+        var children: [String: [String]] = [:]
+        var roots: [String] = []
+        for uuid in order {
+            if let parent = entries[uuid]?.parent {
+                children[parent, default: []].append(uuid)
+            } else {
+                roots.append(uuid)
+            }
+        }
+        var dropped = Set<String>()
+        var visited = line
+        func dropIfPrompted(_ branch: String) {
+            var stack = [branch]
+            var members: [String] = []
+            var prompted = false
+            while let x = stack.popLast() {
+                guard visited.insert(x).inserted else { continue }
+                members.append(x)
+                if entries[x]?.isPrompt == true { prompted = true }
+                stack.append(contentsOf: children[x] ?? [])
+            }
+            if prompted { dropped.formUnion(members) }
+        }
+        for node in order where line.contains(node) {
+            for child in children[node] ?? [] where !line.contains(child) {
+                dropIfPrompted(child)
+            }
+        }
+        // Only for a line that followed a link: a transcript whose writer
+        // chains nothing has a root per record, and none of them is a
+        // beginning a rewind left behind.
+        if line.count > 1, entries[top]?.parent == nil {
+            for root in roots where !line.contains(root) {
+                dropIfPrompted(root)
+            }
+        }
+        return dropped
+    }
+
+    /// A message the user sent: a user record that opens a turn — words,
+    /// attached files, or a command they typed — and not a tool's result,
+    /// a skill's expansion, a summary, a harness notice or claude's own
+    /// record of a stop.
+    static func isPrompt(_ obj: [String: Any]) -> Bool {
+        guard obj["type"] as? String == "user",
+              (obj["isMeta"] as? Bool) != true,
+              (obj["isCompactSummary"] as? Bool) != true,
+              obj["toolUseResult"] == nil || obj["toolUseResult"] is NSNull
+        else { return false }
+        let message = obj["message"] as? [String: Any] ?? [:]
+        if let blocks = message["content"] as? [[String: Any]],
+           blocks.contains(where: { $0["type"] as? String == "tool_result" }) {
+            return false
+        }
+        let raw = AgentSessionScanner.extractText(fromContent: message["content"] ?? obj["content"] ?? "")
+        guard !AgentSessionScanner.isHarnessNotice(raw) else { return false }
+        let text = AgentSessionScanner.cleanSessionMetaText(raw)
+        if text.hasPrefix(AgentSessionScanner.interruptionPrefix) { return false }
+        return !text.isEmpty
+            || !AttachmentInline.names(in: raw).isEmpty
+            || SkillRecords.claudeCommand(in: raw) != nil
+    }
+}
+
+/// How a claude transcript's skill loads become rows, fed one user
+/// record at a time by `AgentSessionScanner.readHistory`.
+///
+/// A loaded skill leaves two user records: the COMMAND (`<command-name>
+/// /name</command-name>`, with `<command-args>` when it was given any)
+/// and the text claude expands it into (`isMeta`, carrying the command's
+/// own `promptId`; "Base directory for this skill: …" first when the
+/// skill has a folder — a skill claude ships itself, and a command file,
+/// expand into their text alone). The expanded text is never a row — it
+/// is the skill, not anything anybody said, and it is often pages long.
+/// The command's shape is only known once the NEXT user record is read:
+/// a built-in command (`/mcp`, `/model`) writes no expanded text, so a
+/// command record is HELD until then and, when it turns out not to have
+/// expanded into anything, drawn exactly as before.
+///
+/// * A skill command WITHOUT arguments waits for the message it rode
+///   in with. SipAI's skill chip sends each skill as its own message
+///   ahead of the user's text (`SkillWire.claudeStdinLines`), so the
+///   loads are followed by that text, which takes them as its
+///   `loadedSkills` — the same line the live row drew. Its handle is the
+///   FIRST load's record: a branch cut at the row takes the loads with
+///   it, as it takes the message.
+/// * Anything else ending the run of loads first — the model's answer,
+///   a tool round-trip, the end of the file — means the user typed the
+///   command alone, and it becomes a row of its own spelled as typed
+///   (`/name`), which is what the live row said.
+/// * A skill command WITH arguments is a message the user typed
+///   (`/name args`), drawn in those words.
+struct ClaudeSkillLoadReader {
+    struct Step {
+        var rows: [AgentSessionHistoryItem] = []
+        /// The record was part of a skill load and must not be read as
+        /// a message.
+        var absorbed = false
+    }
+
+    private struct Held {
+        let name: String
+        let args: String
+        let rawText: String
+        let recordUuid: String?
+        /// The command record's `promptId`, which the text it expands
+        /// into carries too (`SkillRecords.isClaudeExpansion`).
+        let promptId: String?
+    }
+
+    private var held: Held?
+    private var loads: [(name: String, recordUuid: String?)] = []
+
+    /// One user record that is not a tool result. `record` is the
+    /// decoded line: what makes a record an expansion is what it carries,
+    /// not how its text begins.
+    mutating func consume(record: [String: Any], rawText: String) -> Step {
+        let isMeta = (record["isMeta"] as? Bool) == true
+        let recordUuid = record["uuid"] as? String
+        if SkillRecords.isClaudeExpansion(record, text: rawText,
+                                          afterCommandPrompt: held?.promptId) {
+            guard let command = held else {
+                // The model's own Skill call: its expanded text follows
+                // the tool round-trip, which already drew the call.
+                return Step(absorbed: true)
+            }
+            held = nil
+            if command.args.isEmpty {
+                loads.append((command.name, command.recordUuid))
+                return Step(absorbed: true)
+            }
+            var step = Step(rows: flushLoads(), absorbed: true)
+            step.rows.append(AgentSessionHistoryItem(
+                kind: .userText("/" + command.name + " "
+                                + AgentSessionScanner.cleanUserText(command.args)),
+                recordUuid: command.recordUuid))
+            return step
+        }
+        var step = Step(rows: flushHeld())
+        if !isMeta, let command = SkillRecords.claudeCommand(in: rawText) {
+            held = Held(name: command.name, args: command.args,
+                        rawText: rawText, recordUuid: recordUuid,
+                        promptId: record["promptId"] as? String)
+            step.absorbed = true
+        }
+        return step
+    }
+
+    /// The pending loads go onto the message they rode in with.
+    mutating func attach(to item: inout AgentSessionHistoryItem) {
+        guard !loads.isEmpty else { return }
+        item.loadedSkills = loads.map(\.name)
+        if let first = loads.first?.recordUuid { item.recordUuid = first }
+        loads = []
+    }
+
+    /// Whatever is pending, as the rows it stands for. Called wherever a
+    /// run of loads can no longer be followed by its message.
+    mutating func flush() -> [AgentSessionHistoryItem] {
+        flushHeld() + flushLoads()
+    }
+
+    private mutating func flushHeld() -> [AgentSessionHistoryItem] {
+        guard let command = held else { return [] }
+        held = nil
+        var rows = flushLoads()
+        let cleaned = AgentSessionScanner.cleanUserText(command.rawText)
+        if !cleaned.isEmpty {
+            rows.append(AgentSessionHistoryItem(kind: .userText(cleaned),
+                                                recordUuid: command.recordUuid))
+        }
+        return rows
+    }
+
+    private mutating func flushLoads() -> [AgentSessionHistoryItem] {
+        guard !loads.isEmpty else { return [] }
+        let row = AgentSessionHistoryItem(
+            kind: .userText(loads.map { "/" + $0.name }.joined(separator: " ")),
+            recordUuid: loads.first?.recordUuid)
+        loads = []
+        return [row]
     }
 }
 
@@ -1937,5 +2994,125 @@ enum ScheduledAgentTaskScanner {
             }
         }
         return (sessions, tasks, held)
+    }
+}
+
+// MARK: - Compressed session files
+
+/// A decoder over one compressed file, handing out the decoded text a
+/// chunk at a time.
+protocol SessionFileDecoder: AnyObject {
+    /// Up to `count` decoded bytes; empty at the end — and from the first
+    /// byte that does not decode, which a reader takes as the end, the way
+    /// a plain reader takes a file cut off mid-record.
+    func read(upToCount count: Int) -> Data
+}
+
+/// Session files that lie on disk COMPRESSED. A codex rollout nobody has
+/// touched for a while is kept as `<name>.jsonl.zst` — one zstd frame,
+/// its decoded size stated in the frame's header, no checksum, the
+/// modification time kept — with the `.jsonl` removed. Codex unpacks it
+/// back to `<name>.jsonl`, byte for byte, the moment it loads the thread
+/// again (a resume, a fork, a listing of its turns), removes the `.zst`,
+/// and appends there. So a URL read earlier may name either form;
+/// `SessionFileReader.open` follows the file to whichever is on disk.
+enum SessionFileCompression {
+    static let suffix = ".zst"
+
+    /// Opens a compressed file for decoding. Installed by the app at
+    /// launch (`ZstdFileDecoder`, the bundled zstd decoder) before any
+    /// session is read; nil where it is not linked — a harness that does
+    /// not test this — and a compressed file then reads as unreadable,
+    /// which is how every reader treated one before.
+    nonisolated(unsafe) static var decoder: ((URL) -> SessionFileDecoder?)? = nil
+    /// The decoded size a compressed file's frame states, nil when it
+    /// states none. Installed with `decoder`.
+    nonisolated(unsafe) static var statedSize: ((URL) -> UInt64?)? = nil
+
+    /// What one read decodes at most. A real rollout decodes to well
+    /// under this; a file built to decode without end stops here.
+    static let decodedLimit: UInt64 = 1 << 32
+
+    static func isCompressed(_ url: URL) -> Bool {
+        url.lastPathComponent.hasSuffix(suffix)
+    }
+
+    /// `<name>.jsonl` for `<name>.jsonl.zst`; any other URL as it is.
+    static func unpacked(_ url: URL) -> URL {
+        guard isCompressed(url) else { return url }
+        let name = url.lastPathComponent
+        return url.deletingLastPathComponent()
+            .appendingPathComponent(String(name.dropLast(suffix.count)))
+    }
+
+    /// `<name>.zst` for `<name>`; a compressed URL as it is.
+    static func packed(_ url: URL) -> URL {
+        guard !isCompressed(url) else { return url }
+        return url.deletingLastPathComponent()
+            .appendingPathComponent(url.lastPathComponent + suffix)
+    }
+}
+
+/// A session file's text, a chunk at a time, whether the file lies on
+/// disk as written or compressed (`SessionFileCompression`).
+final class SessionFileReader {
+    private let handle: FileHandle?
+    private let decoder: SessionFileDecoder?
+    private var remaining: UInt64
+    /// How many bytes of text the file holds when that is known without
+    /// reading it: a plain file's size, or the size a compressed file's
+    /// frame states.
+    let textSize: UInt64?
+
+    private init(handle: FileHandle) {
+        self.handle = handle
+        decoder = nil
+        remaining = .max
+        var size: UInt64? = nil
+        if let end = try? handle.seekToEnd(), (try? handle.seek(toOffset: 0)) != nil {
+            size = end
+        }
+        textSize = size
+    }
+
+    private init(decoder: SessionFileDecoder, statedSize: UInt64?, limit: UInt64) {
+        handle = nil
+        self.decoder = decoder
+        remaining = limit
+        textSize = statedSize
+    }
+
+    /// The file `url` names, or the other form of it when codex has
+    /// packed or unpacked it since the URL was read. A plain file wins
+    /// while both are on disk: it is the one codex writes to. Nil when
+    /// neither can be read — a compressed one included, when no decoder
+    /// is installed. `limit` bounds what a compressed file decodes to.
+    static func open(_ url: URL,
+                     limit: UInt64 = SessionFileCompression.decodedLimit) -> SessionFileReader? {
+        let plain = SessionFileCompression.unpacked(url)
+        if let handle = try? FileHandle(forReadingFrom: plain) {
+            return SessionFileReader(handle: handle)
+        }
+        let packed = SessionFileCompression.packed(url)
+        guard let decoder = SessionFileCompression.decoder?(packed) else { return nil }
+        return SessionFileReader(decoder: decoder,
+                                 statedSize: SessionFileCompression.statedSize?(packed),
+                                 limit: limit)
+    }
+
+    /// Up to `count` bytes of text; empty at the end.
+    func read(upToCount count: Int) -> Data {
+        guard count > 0 else { return Data() }
+        if let handle {
+            return (try? handle.read(upToCount: count)) ?? Data()
+        }
+        guard remaining > 0, let decoder else { return Data() }
+        let chunk = decoder.read(upToCount: Int(min(UInt64(count), remaining)))
+        remaining -= UInt64(chunk.count)
+        return chunk
+    }
+
+    func close() {
+        try? handle?.close()
     }
 }

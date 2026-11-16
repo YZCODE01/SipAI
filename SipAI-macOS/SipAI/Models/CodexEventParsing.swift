@@ -50,12 +50,21 @@ enum CodexEventParser {
     ///   - fallbackCwd: cwd reported on `.systemInit` — codex's
     ///     `thread.started` carries no cwd of its own.
     ///   - includeThinking: emit `.thinking` for a `reasoning` item that
-    ///     carries a summary. Only a Chat only turn asks, so every other
-    ///     turn's events are what they always were.
+    ///     carries a summary. A Chat only turn asks, and any turn while
+    ///     compact view is on — the turns that draw thoughts — so every
+    ///     other turn's events are what they always were.
     static func parse(line: String, fallbackCwd: URL,
                       includeThinking: Bool = false) -> Parsed {
         guard let obj = decode(line) else { return Parsed() }
+        return parse(object: obj, fallbackCwd: fallbackCwd, includeThinking: includeThinking)
+    }
 
+    /// One event already decoded — what a stdout line decodes to, and
+    /// what a codex app-server item is translated into
+    /// (`CodexAppServer.execEvents`), so a turn in an asking mode is drawn
+    /// by exactly this code.
+    static func parse(object obj: [String: Any], fallbackCwd: URL,
+                      includeThinking: Bool = false) -> Parsed {
         switch (obj["type"] as? String) ?? "" {
         case "thread.started":
             // The thread id IS the session id: it names the rollout
@@ -135,8 +144,9 @@ enum CodexEventParser {
 
     /// JSON-decode one stdout line, tolerating what a PTY does to it.
     ///
-    /// The runner hands codex a PTY so its stdout line-flushes (same
-    /// reason as claude — see CLAUDE.md). The cost of that: lines
+    /// The runner hands codex a PTY so its stdout line-flushes — through
+    /// a pipe a child's output can sit in a block buffer until it exits,
+    /// and the turn arrives all at once. The cost of that: lines
     /// arrive CRLF-terminated, and the FIRST line is prefixed with
     /// terminal control bytes (`^D^H^H`) from the tty handshake.
     /// `JSONSerialization` rejects both, and the failure is silent —
@@ -155,8 +165,8 @@ enum CodexEventParser {
     // MARK: - Items
 
     /// Item types that are conversation or thinking, never a tool row.
-    /// `reasoning` becomes a thought only on a Chat only turn (see
-    /// `parse`), exactly as the claude parser treats `thinking` blocks.
+    /// `reasoning` becomes a thought only when asked (see `parse`),
+    /// exactly as the claude parser treats `thinking` blocks.
     private static let nonToolItemTypes: Set<String> = [
         "agent_message", "user_message", "reasoning",
         // Codex compacting itself. It carries none of the fields a
@@ -192,7 +202,7 @@ enum CodexEventParser {
                                                   postTokens: nil))]
         }
         // A user_message echo would double the bubble `send()` already
-        // drew, and reasoning outside a Chat only turn draws nothing.
+        // drew, and reasoning nobody asked for draws nothing.
         // Both are dropped.
         if nonToolItemTypes.contains(type) { return [] }
 
@@ -207,7 +217,19 @@ enum CodexEventParser {
     /// already look for, so codex tool rows summarize through the same
     /// `AgentRendering` path as claude's — `command` first, since that
     /// is what `CodexSessionScanner` puts in its history items too.
+    ///
+    /// A file change keeps its files under `changes`, and a command is
+    /// shown as codex ran it less the login shell around it — the shapes a
+    /// reopened row takes from codex's records (`CodexToolInput`), so the
+    /// row reads the same live and reopened.
     private static func toolInput(from item: [String: Any]) -> [String: Any] {
+        let type = item["type"] as? String ?? ""
+        if CodexToolInput.fileChangeNames.contains(type) {
+            return CodexToolInput.fileChange(fromItemChanges: item["changes"])
+        }
+        if type == "command_execution", let command = item["command"] as? String, !command.isEmpty {
+            return ["command": unwrappedShell(command)]
+        }
         var input: [String: Any] = [:]
         for key in ["command", "path", "file_path", "query", "url", "name"] {
             if let value = item[key] as? String, !value.isEmpty {
@@ -243,8 +265,13 @@ enum CodexEventParser {
                 return value
             }
         }
-        // A patch/file-change item reports what it touched rather than
-        // emitting text; name the change so the row isn't blank.
+        // A file change says nothing beyond the files its row already
+        // names; whether it failed rides the result's flag.
+        if CodexToolInput.fileChangeNames.contains(item["type"] as? String ?? "") {
+            return ""
+        }
+        // An item with no text of its own names its status, so its row
+        // isn't blank.
         if let status = item["status"] as? String, !status.isEmpty {
             return status
         }
@@ -304,5 +331,99 @@ enum CodexEventParser {
         if let i = value as? Int { return i }
         if let d = value as? Double { return Int(d) }
         return 0
+    }
+
+    /// `<shell> -lc '<command>'` → `<command>`, with the quoting undone;
+    /// anything else unchanged — the command as codex runs it, less the
+    /// login-shell wrapper it runs it in, on exec's items and the
+    /// app-server's alike. Codex wraps in single quotes, and in double
+    /// quotes when the command has a single quote of its own
+    /// (`/bin/zsh -lc "bash -lc 'make'"`); a double-quoted one is unwrapped
+    /// only when nothing inside it is escaped — otherwise the string stays
+    /// exactly as codex sent it, wrapper and all, rather than be un-escaped
+    /// on a guess.
+    static func unwrappedShell(_ raw: String) -> String {
+        let shells = ["/bin/zsh", "/bin/bash", "/bin/sh", "zsh", "bash", "sh"]
+        for shell in shells {
+            for flag in [" -lc ", " -c "] {
+                let head = shell + flag
+                guard raw.hasPrefix(head) else { continue }
+                let body = String(raw.dropFirst(head.count))
+                guard body.count >= 2 else { return raw }
+                let inner = String(body.dropFirst().dropLast())
+                if body.hasPrefix("'"), body.hasSuffix("'") {
+                    return inner.replacingOccurrences(of: "'\\''", with: "'")
+                }
+                if body.hasPrefix("\""), body.hasSuffix("\""),
+                   !inner.contains("\\"), !inner.contains("\"") {
+                    return inner
+                }
+                return raw
+            }
+        }
+        return raw
+    }
+}
+
+/// The commands a codex turn has running, as its items report them — one
+/// rule for both of codex's routes: `codex exec --json`'s stdout, and the
+/// app-server's items in exec's shape (`CodexAppServer.execEvents`).
+///
+/// Codex can return from a command while it still runs — in a background
+/// terminal, its words — and the model goes on to answer. Such a command
+/// is an item started and not yet completed when the answer lands. What
+/// becomes of it depends on the route, both measured: `codex exec` stops it
+/// when its turn ends, saying so nowhere on stdout; the app-server keeps it
+/// running for as long as its process lives, and either holds the turn
+/// open until it ends or ends the turn at the answer — one or the other,
+/// run to run.
+struct CodexBackgroundCommands {
+    /// Commands started and not yet completed, in the order they started.
+    private(set) var running: [BackgroundTaskEntry] = []
+
+    /// The newest item the turn reported is the model's answer: a finished
+    /// agent message that is not commentary between steps.
+    private(set) var answered = false
+
+    init() {}
+
+    /// The commands the turn waits on once the model has answered — the
+    /// transcript's line naming them.
+    var awaited: [BackgroundTaskEntry] { answered ? running : [] }
+
+    /// Read one event in exec's shape.
+    mutating func read(object obj: [String: Any]) {
+        guard let item = obj["item"] as? [String: Any] else { return }
+        let type = item["type"] as? String ?? ""
+        let id = item["id"] as? String ?? ""
+        switch obj["type"] as? String {
+        case "item.started":
+            answered = false
+            if type == "command_execution", !id.isEmpty, !running.contains(where: { $0.id == id }) {
+                running.append(BackgroundTaskEntry(
+                    id: id, kind: "command",
+                    description: CodexEventParser.unwrappedShell(item["command"] as? String ?? "")))
+            }
+        case "item.completed":
+            // A command finishing is not a step of the turn: the answer
+            // before it is still the answer.
+            if type == "command_execution" {
+                running.removeAll { $0.id == id }
+            } else {
+                answered = type == "agent_message" && (item["phase"] as? String) != "commentary"
+            }
+        default:
+            break
+        }
+    }
+
+    /// Read one line of `codex exec --json` stdout.
+    mutating func read(line: String) {
+        guard line.contains("\"item."),
+              let start = line.firstIndex(of: "{"),
+              let data = String(line[start...]).data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return }
+        read(object: obj)
     }
 }

@@ -67,6 +67,11 @@ enum AgentSessionScanner {
     -> (permissionMode: String?, model: String?, effort: String?, fastMode: Bool?) {
         (nil, nil, nil, nil)
     }
+
+    /// `CodexCatalog` reads a rollout's head through this. The codex
+    /// store below is a folder that does not exist, so no rollout is
+    /// ever handed here.
+    nonisolated static func head(of url: URL, count: Int) -> Data? { nil }
 }
 
 /// `KimiCatalog` reads kimi's own config through this. Pointed at a
@@ -88,6 +93,9 @@ enum CodexSessionScanner {
     static var sessionRoot: URL {
         SipaiPaths.dataDir.appendingPathComponent("no-codex-store", isDirectory: true)
     }
+
+    /// The walk over that missing store finds no file to name.
+    static func rolloutStem(_ name: String) -> String? { nil }
 }
 
 
@@ -114,7 +122,8 @@ enum CodexConfigWrite {
 
 /// The folder read `CodexCatalog.refreshSpeedSettings` sends — a spawn
 /// as well, and unreachable for the same reason. The request builder
-/// and the answer's parse are the real ones, in AgentLaunchOptions.swift.
+/// and the answers' parse are the real ones, in AgentLaunchOptions.swift.
 extension CodexConfigRead {
-    static func run(binary: String, cwd: String) async -> [String: Any]? { nil }
+    static func run(binary: String, cwd: String) async
+    -> (config: [String: Any]?, requirements: [String: Any]?) { (nil, nil) }
 }

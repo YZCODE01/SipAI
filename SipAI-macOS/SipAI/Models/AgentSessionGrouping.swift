@@ -8,7 +8,7 @@
 //
 // * There is no pinned "Active" section — liveness is an inline dot on
 //   the row itself — so a working session lands in a real state bucket
-//   (Waiting for approval / Working / …) rather than being lifted out
+//   (Waiting for you / Working / …) rather than being lifted out
 //   of the list.
 // * Folder headers show the immediate parent's name, not the full tilde
 //   path; a sidebar has room for one folder name (see `detail` below).
@@ -77,8 +77,8 @@ enum AgentGroupState: String {
     var groupLabel: String {
         switch self {
         case .awaitingApproval:
-            return String(localized: "Waiting for approval",
-                          comment: "State group — session has a pending MCP approval")
+            return String(localized: "Waiting for you",
+                          comment: "State group — the session waits on the user: an approval to give, or a question the agent asked")
         case .working:
             return String(localized: "Working",
                           comment: "State group — session is mid-turn in SipAI")
@@ -223,6 +223,16 @@ enum AgentListItem: Identifiable, Hashable {
     static func groupItemKey(forScheduledTaskName name: String) -> String {
         "sched:" + name
     }
+
+    /// The sessions this row stands for: a session itself, a scheduled
+    /// task its runs. A task row's steady dot is its runs' dot, so what
+    /// clears a row's unread mark clears these.
+    var sessionIds: [String] {
+        switch self {
+        case .scheduled(let task): return task.sessions.map(\.id)
+        case .regular(let session): return [session.id]
+        }
+    }
 }
 
 // MARK: - Groups
@@ -269,6 +279,23 @@ enum AgentSessionGrouping {
     static let ungroupedKey = "\u{0}ungrouped"
     static let noDirectoryKey = "\u{0}nodir"
 
+    /// The custom bucket a row is filed in: the group its filing names,
+    /// while that group still exists, else Ungrouped. A filing naming a
+    /// group that is gone (a hand-edited config) reads as unfiled rather
+    /// than conjuring the group back into being. One spelling for the
+    /// bucketer and for everything that acts on a bucket's rows — Ungrouped
+    /// is defined only by what the others are not, and a second test of
+    /// membership is how a header's + or delete comes to act on rows its
+    /// group does not draw.
+    static func customGroupKey(of item: AgentListItem,
+                               customGroups: [String],
+                               assignments: [String: String]) -> String {
+        if let name = assignments[item.groupItemKey], customGroups.contains(name) {
+            return name
+        }
+        return ungroupedKey
+    }
+
     /// Bucket `items` (already sorted — insertion order is preserved
     /// inside each group) into display groups.
     ///
@@ -296,14 +323,17 @@ enum AgentSessionGrouping {
     /// inside those, through the stream's own order.
     ///
     /// An empty bucket is dropped — deleting a group's last session
-    /// removes its header too — with ONE exception: a group the user
-    /// NAMED renders while empty. A folder or a date bucket describes
-    /// rows and means nothing without them, but a named group is a
-    /// thing the user made, and its header is the only route to its +,
-    /// its Rename and its Delete. Dropping it made "New group…" look
-    /// like it had done nothing, and left the group unreachable until
-    /// something was filed into it by hand. Ungrouped is not in the
-    /// exception: nobody made it, and an empty one says nothing.
+    /// removes its header too — with two exceptions, both in Custom. A
+    /// group the user NAMED renders while empty: a folder or a date
+    /// bucket describes rows and means nothing without them, but a named
+    /// group is a thing the user made, and its header is the only route
+    /// to its +, its Rename and its Delete. Dropping it made "New group"
+    /// look like it had done nothing, and left the group unreachable
+    /// until something was filed into it by hand. And Ungrouped renders
+    /// while empty: grouped by Custom, the section's first row makes a
+    /// group, so Ungrouped's + is the only way to start a session filed
+    /// nowhere — dropped whenever every session was filed, it took that
+    /// way with it.
     static func buckets(_ items: [AgentListItem],
                         mode: AgentGroupMode,
                         state: (AgentListItem) -> AgentGroupState = { _ in .idle },
@@ -336,12 +366,16 @@ enum AgentSessionGrouping {
             }
         }
 
+        var ungroupedLabel = ""
         if mode == .custom {
             for (index, name) in customGroups.enumerated() {
                 fixedOrder[name] = index
                 bucket(name, name, add: nil)
             }
             fixedOrder[ungroupedKey] = customGroups.count
+            ungroupedLabel = String(localized: "Ungrouped",
+                                    comment: "Custom-group bucket for rows the user has not filed")
+            bucket(ungroupedKey, ungroupedLabel, add: nil)
         }
 
         for item in items {
@@ -371,18 +405,9 @@ enum AgentSessionGrouping {
                 fixedOrder[rowState.rawValue] = rowState.order
                 bucket(rowState.rawValue, rowState.groupLabel, add: item)
             case .custom:
-                let assigned = assignments[item.groupItemKey]
-                if let name = assigned, customGroups.contains(name) {
-                    bucket(name, name, add: item)
-                } else {
-                    // An assignment naming a group that no longer exists
-                    // (hand-edited config) reads as unfiled rather than
-                    // conjuring a group back into being.
-                    bucket(ungroupedKey,
-                           String(localized: "Ungrouped",
-                                  comment: "Custom-group bucket for rows the user has not filed"),
-                           add: item)
-                }
+                let key = customGroupKey(of: item, customGroups: customGroups,
+                                         assignments: assignments)
+                bucket(key, key == ungroupedKey ? ungroupedLabel : key, add: item)
             }
         }
 
@@ -444,8 +469,9 @@ enum AgentSessionGrouping {
 
         return ordered.compactMap { key in
             guard let found = buckets[key] else { return nil }
-            let userNamed = mode == .custom && customGroups.contains(key)
-            guard !found.items.isEmpty || userNamed else { return nil }
+            let keptEmpty = mode == .custom
+                && (customGroups.contains(key) || key == ungroupedKey)
+            guard !found.items.isEmpty || keptEmpty else { return nil }
             let ranked = found.items.filter { !$0.isSpawnedSubagent }
                 + found.items.filter(\.isSpawnedSubagent)
             return AgentSessionGroup(key: key,
@@ -543,6 +569,76 @@ enum AgentSessionGrouping {
         return tiered + lifted + SidebarOrdering.apply(kept, order: dragged, id: id)
     }
 
+    // MARK: - What a group's header carries
+
+    /// What a group's header carries after its count: a ⋮ and a +.
+    struct HeaderActions: Equatable {
+        /// Which ⋮ the header draws; nil draws none.
+        enum Menu: Equatable {
+            /// A folder: its delete is "Delete all sessions", and the
+            /// folder itself, a directory on disk, is never touched.
+            case folder
+            /// Folder mode's rows with no known folder.
+            case noDirectory
+            /// A custom group the user named: its delete is "Delete the
+            /// group" — the group and its sessions — beside Rename and
+            /// Ungroup, which keeps them.
+            case namedGroup
+            /// The rows filed in no group: "Delete all sessions".
+            case ungrouped
+        }
+
+        let menu: Menu?
+        /// A + that starts a session belonging to the group. The caller
+        /// also needs the agent to be drivable.
+        let plus: Bool
+    }
+
+    /// The headers of the PLACES a session lives — Folder and Custom —
+    /// carry a ⋮: Mark all as read and a delete. Date and State headers
+    /// describe rows and carry nothing.
+    ///
+    /// The + starts a session already in the place: a folder runs it
+    /// there, a named group files it there, and Ungrouped starts one
+    /// filed nowhere — as every other custom group, so the + sits in the
+    /// same column on every header the user is grouping by. "No
+    /// directory" names no folder to start in, so it has the ⋮ alone.
+    ///
+    /// A group a user called "Ungrouped" is a named group: the bucket
+    /// that collects unfiled rows has a key no name can spell.
+    static func headerActions(mode: AgentGroupMode,
+                              key: String,
+                              customGroups: [String]) -> HeaderActions {
+        switch mode {
+        case .folder:
+            return key == noDirectoryKey
+                ? HeaderActions(menu: .noDirectory, plus: false)
+                : HeaderActions(menu: .folder, plus: true)
+        case .custom:
+            if customGroups.contains(key) {
+                return HeaderActions(menu: .namedGroup, plus: true)
+            }
+            if key == ungroupedKey {
+                return HeaderActions(menu: .ungrouped, plus: true)
+            }
+            return HeaderActions(menu: nil, plus: false)
+        case .none, .date, .state:
+            return HeaderActions(menu: nil, plus: false)
+        }
+    }
+
+    /// What a header's delete removes: the group's sessions, taken from
+    /// ALL its rows — the ones behind "Show all" included. Never a
+    /// scheduled task or one of its runs: a task is not a session, and
+    /// removing it stops its schedule, which the task's own menu asks
+    /// about in its own words.
+    static func sessionsDeleted(from members: [AgentListItem]) -> [AgentSession] {
+        members.compactMap {
+            if case .regular(let session) = $0 { return session }
+            return nil
+        }
+    }
+
     // MARK: - A group's folder
 
     /// Where a session started from `name`'s header should open: the
@@ -569,7 +665,26 @@ enum AgentSessionGrouping {
                              sortedItems: [AgentListItem],
                              assignments: [String: String],
                              usable: (URL) -> Bool) -> URL? {
-        for item in sortedItems where assignments[item.groupItemKey] == name {
+        firstUsableFolder(sortedItems.lazy.filter { assignments[$0.groupItemKey] == name },
+                          usable: usable)
+    }
+
+    /// The same for Ungrouped's +: the newest row filed in no group that
+    /// exists — membership by `customGroupKey`, the bucketer's own test.
+    static func latestUngroupedFolder(sortedItems: [AgentListItem],
+                                      customGroups: [String],
+                                      assignments: [String: String],
+                                      usable: (URL) -> Bool) -> URL? {
+        firstUsableFolder(sortedItems.lazy.filter {
+            customGroupKey(of: $0, customGroups: customGroups,
+                           assignments: assignments) == ungroupedKey
+        }, usable: usable)
+    }
+
+    private static func firstUsableFolder<Rows: Sequence>(
+        _ rows: Rows, usable: (URL) -> Bool
+    ) -> URL? where Rows.Element == AgentListItem {
+        for item in rows {
             guard let url = item.folderURL?.standardizedFileURL else { continue }
             if usable(url) { return url }
         }

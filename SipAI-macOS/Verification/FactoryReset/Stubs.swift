@@ -45,6 +45,13 @@ final class AgentCLIUpdateMonitor {
     func forgetSwitches() { CallLog.record("cliUpdates.forgetSwitches") }
 }
 
+/// The web cache macOS keeps for the app. The real one empties
+/// `URLCache.shared` and the cookie store; `Verification/ProviderCatalog`
+/// pins what it deletes.
+enum WebCache {
+    static func clear() { CallLog.record("webCache.clear") }
+}
+
 /// The badge's seen-versions key, and the call that drops the copy in
 /// memory.
 @MainActor
@@ -54,12 +61,34 @@ final class UpdateBadge {
     func forgetSeen() { CallLog.record("badge.forgetSeen") }
 }
 
+/// The closed-offers key of the notices beside the logo, and the call
+/// that drops the copy in memory.
+@MainActor
+final class SidebarNotices {
+    static let shared = SidebarNotices()
+    static let closedDefaultsKey = "sidebarNoticeClosed"
+    func forgetClosed() { CallLog.record("notices.forgetClosed") }
+}
+
 /// Only the key: the release the last SipAI check found. The build each
 /// copy last launched as is `CopyLaunchRecord`'s, compiled in from the
 /// real UpdaterAvailability.swift by run.sh.
 @MainActor
 enum UpdateController {
     static let availableUpdateDefaultsKey = "sipaiAvailableUpdate"
+}
+
+/// Only the key: the folders browsed in Settings → Agent Skills. The real
+/// type sits in SkillModel.swift, which this harness does not compile.
+enum SkillFolderHistory {
+    static let defaultsKey = "skillsBrowsedFolders"
+}
+
+/// Only the key: the Kimi models Moonshot refused for the plan, which the
+/// model menu marks. The real type sits in KimiPlanRefusals.swift, which
+/// this harness does not compile.
+enum KimiPlanRefusals {
+    static let defaultsKey = "kimiPlanRefusedModels"
 }
 
 @MainActor
@@ -187,6 +216,7 @@ class AppState {
     var leftSidebarVisible = true
     var draftsCleared = false
     var startedNewChat = false
+    var skillsPageForgotten = false
 
     func startNewChat() {
         startedNewChat = true
@@ -196,5 +226,10 @@ class AppState {
     func clearComposerDrafts() {
         draftsCleared = true
         CallLog.record("appState.clearComposerDrafts")
+    }
+
+    func forgetSkillsPage() {
+        skillsPageForgotten = true
+        CallLog.record("appState.forgetSkillsPage")
     }
 }

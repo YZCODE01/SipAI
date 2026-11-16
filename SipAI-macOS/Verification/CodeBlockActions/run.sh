@@ -56,6 +56,7 @@ swiftc -O -target arm64-apple-macos15.0 "${flags[@]}" -o "$out/codeblocks" \
   "$root/SipAI/Utilities/MathDelimiters.swift" \
   "$root/SipAI/Utilities/MathDisplayBlock.swift" \
   "$root/SipAI/Utilities/MarkdownRenderer.swift" \
+  "$root/SipAI/Utilities/FileLinks.swift" \
   "${extra[@]}" \
   "$here/main.swift"
 

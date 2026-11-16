@@ -22,10 +22,13 @@ trap 'rm -rf "$out"' EXIT
 if ! swiftc -O -o "$out/kimidiscovery" \
   "$here/../KimiCode/Stubs.swift" \
   "$root/SipAI/Models/AttachmentInline.swift" \
+  "$root/SipAI/Models/SkillModel.swift" \
+  "$root/SipAI/Models/ShellCommands.swift" \
   "$root/SipAI/Models/AgentSession.swift" \
   "$root/SipAI/Models/AgentSessionTailer.swift" \
   "$root/SipAI/Models/AgentEventParsing.swift" \
   "$root/SipAI/Models/CodexSessions.swift" \
+  "$root/SipAI/Models/CodexRecordedTools.swift" \
   "$root/SipAI/Models/AgentLaunchOptions.swift" \
   "$root/SipAI/Models/KimiSessions.swift" \
   "$root/SipAI/Models/KimiEventParsing.swift" \

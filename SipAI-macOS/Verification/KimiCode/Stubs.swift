@@ -16,11 +16,19 @@ import Foundation
 
 /// The runner's live event type. `KimiEventParser` builds these.
 struct StreamEvent: Identifiable {
+    /// The real one marks a `!` command's row; the readers pass it.
+    var shellCommand: Bool = false
     let id: UUID
     let timestamp: Date
     let kind: StreamEventKind
     let contextTokens: Int?
     var isSystemNotice: Bool = false
+    /// And the user's answer to a question the agent asked without
+    /// stopping, which the tailer hands through from the reader.
+    var sentIntoTurn: Bool = false
+    /// And whether a user-column row is part of the agent's answer, which
+    /// the readers and the tailer hand through.
+    var belongsToAnswer: Bool = false
     /// The real one carries claude's `fast_mode_state` and the reason
     /// beside it on every init/result event, and each main-loop call's
     /// `usage.speed` — the parser passes all three, so the stub must
@@ -31,24 +39,47 @@ struct StreamEvent: Identifiable {
     /// Likewise claude's own per-model context windows, which its
     /// `result` event carries.
     var modelContextWindows: [String: Int]? = nil
+    /// And, on a `result` event, the words of a turn the agent itself
+    /// says failed.
+    var turnFailure: String? = nil
+    /// And whether claude refused the turn as too long before sending it.
+    var refusedAsTooLong: Bool = false
     /// And the tailer hands a codex or kimi user row's attachment names
     /// through; the Chat only flag rides the same initializer.
     var attachedFiles: [String] = []
     var chatOnlyTurn: Bool = false
+    /// The skills a user row loaded, which the tailer hands through too.
+    var loadedSkills: [String] = []
+    /// And, on a compaction row, the agent's own word that the user's
+    /// earlier messages are still in the conversation whole.
+    var compactionKeepsUserMessages: Bool = false
 
     init(kind: StreamEventKind, contextTokens: Int? = nil,
-         isSystemNotice: Bool = false, fastModeState: String? = nil,
+         isSystemNotice: Bool = false, sentIntoTurn: Bool = false, belongsToAnswer: Bool = false,
+         fastModeState: String? = nil,
          fastModeDisabledReason: String? = nil, callSpeed: String? = nil,
          modelContextWindows: [String: Int]? = nil,
+         turnFailure: String? = nil,
+         refusedAsTooLong: Bool = false,
          attachedFiles: [String] = [],
-         chatOnlyTurn: Bool = false) {
+         chatOnlyTurn: Bool = false,
+         loadedSkills: [String] = [],
+         compactionKeepsUserMessages: Bool = false,
+         shellCommand: Bool = false) {
+        self.shellCommand = shellCommand
         self.attachedFiles = attachedFiles
         self.chatOnlyTurn = chatOnlyTurn
+        self.loadedSkills = loadedSkills
+        self.compactionKeepsUserMessages = compactionKeepsUserMessages
         self.isSystemNotice = isSystemNotice
+        self.sentIntoTurn = sentIntoTurn
+        self.belongsToAnswer = belongsToAnswer
         self.fastModeState = fastModeState
         self.fastModeDisabledReason = fastModeDisabledReason
         self.callSpeed = callSpeed
         self.modelContextWindows = modelContextWindows
+        self.turnFailure = turnFailure
+        self.refusedAsTooLong = refusedAsTooLong
         self.id = UUID()
         self.timestamp = Date()
         self.kind = kind
@@ -68,6 +99,7 @@ enum StreamEventKind {
     case error(message: String)
     case interrupted(message: String)
     case compaction(preTokens: Int?, postTokens: Int?)
+    case shellOutput(ShellCommandOutput)
 }
 
 // MARK: - From ScheduledTaskDefinition.swift
@@ -151,7 +183,8 @@ enum CodexConfigWrite {
 
 /// The folder read `CodexCatalog.refreshSpeedSettings` sends — a spawn
 /// as well, and unreachable for the same reason. The request builder
-/// and the answer's parse are the real ones, in AgentLaunchOptions.swift.
+/// and the answers' parse are the real ones, in AgentLaunchOptions.swift.
 extension CodexConfigRead {
-    static func run(binary: String, cwd: String) async -> [String: Any]? { nil }
+    static func run(binary: String, cwd: String) async
+    -> (config: [String: Any]?, requirements: [String: Any]?) { (nil, nil) }
 }

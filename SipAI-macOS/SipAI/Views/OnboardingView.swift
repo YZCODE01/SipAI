@@ -2,8 +2,8 @@
 // First launch: the welcome page, and nothing after it. Get started
 // records that onboarding is complete and lands in the main window —
 // the chat page explains how a model is added, and the sidebar's ADD
-// AGENTS row leads to Settings → Agent Guide for the command-line
-// tools. Shown by ContentView while `config.needsOnboarding` is true.
+// AGENTS row leads to Settings → Agent Initialization for the
+// command-line tools. Shown by ContentView while `config.needsOnboarding` is true.
 
 import SwiftUI
 
@@ -18,129 +18,9 @@ struct OnboardingView: View {
     /// to leave this page is this callback.
     var onComplete: () -> Void = {}
 
-    @State private var getStartedHovered: Bool = false
-
     var body: some View {
-        ZStack {
-            Color(nsColor: .windowBackgroundColor).ignoresSafeArea()
-            welcomeView
-        }
-        .onAppear { agents.reload(config: config) }
-    }
-
-    // MARK: - Welcome page (no dots, no traffic lights)
-
-    private var welcomeView: some View {
-        VStack(spacing: 0) {
-            Spacer()
-
-            // The 12pt spacer sits *above* the logo inside the centered content stack
-            Spacer().frame(height: 12)
-
-            // Logo — tight-cropped asset, drawn at 86pt.
-            // Size-matched rendition — see LeftSidebar's brand header.
-            Image("SipAI-Logo-86")
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
-                .frame(height: 86)
-
-            // Larger breathing room between logo and title
-            Spacer().frame(height: 12)
-
-            Text("Welcome to SipAI")
-                .font(.system(size: 26, weight: .medium))
-                .foregroundColor(SipDesign.textPrimary)
-                .tracking(-0.4)
-
-            Text("Your AI, your way.")
-                .font(.system(size: 14))
-                .foregroundColor(SipDesign.textSecondary)
-
-            Spacer().frame(height: 32)
-
-            // Feature bullets
-            VStack(alignment: .leading, spacing: 18) {
-                // `featureRow` takes plain `String`s, so a bare literal at the
-                // call site reaches SwiftUI's non-localizing `Text(_: String)`
-                // overload and ships in English whatever the language. These
-                // are localized HERE, where the literal still exists.
-                featureRow(
-                    icon: "globe",
-                    title: String(localized: "All providers, one app",
-                                  comment: "Onboarding welcome bullet title"),
-                    desc: String(localized: "Chat with GPT, Claude, and more with your API keys.",
-                                 comment: "Onboarding welcome bullet detail")
-                )
-                featureRow(
-                    icon: "terminal",
-                    title: String(localized: "Better local AI agent management",
-                                  comment: "Onboarding welcome bullet title"),
-                    // Labels through `agentLabel`, so a renamed agent is
-                    // renamed here too; a String expression, never an
-                    // interpolated Text literal.
-                    desc: String(localized: "Run \(agentNamesJoined) from one window, on your subscription or API key.",
-                                 comment: "Onboarding welcome bullet detail; placeholder is the joined list of agent names")
-                )
-                featureRow(
-                    icon: "checkmark.shield",
-                    title: String(localized: "Your data, your control",
-                                  comment: "Onboarding welcome bullet title"),
-                    desc: String(localized: "No sign-up required, no data collection, no tracking from the app. Your data is just between you and the AI.",
-                                 comment: "Onboarding welcome bullet detail")
-                )
-            }
-            .frame(maxWidth: 420, alignment: .leading)
-
-            Spacer().frame(height: 36)
-
-            // Get started button — 14pt font, 49/11 padding
-            Button {
-                finish()
-            } label: {
-                Text("Get started")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 49)
-                    .padding(.vertical, 11)
-                    .background(getStartedHovered ? SipDesign.blueHover : SipDesign.blue)
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut(.return, modifiers: [])
-            .onHover { getStartedHovered = $0 }
-
-            Spacer()
-        }
-        // Single flexible frame so top/bottom Spacer() actually expand in tall
-        // windows. Chaining a second .frame(maxWidth:) here would give the
-        // VStack an intrinsic height and collapse the Spacers.
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .ignoresSafeArea()
-    }
-
-    private func featureRow(icon: String, title: String, desc: String) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            ZStack {
-                Circle()
-                    .fill(SipDesign.iconCircleBg)
-                    .frame(width: 32, height: 32)
-                Image(systemName: icon)
-                    .font(.system(size: 14))
-                    .foregroundColor(SipDesign.blue)
-            }
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(SipDesign.textPrimary)
-                Text(desc)
-                    .font(.system(size: 12.5))
-                    .foregroundColor(SipDesign.textSecondary)
-                    .lineSpacing(3)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
+        WelcomePage(agentNames: agentNamesJoined, onGetStarted: finish)
+            .onAppear { agents.reload(config: config) }
     }
 
     /// "Claude Code, Codex and Kimi Code" through the labels and the
@@ -164,5 +44,119 @@ struct OnboardingView: View {
             appState.activeModel = config.defaultModel
         }
         onComplete()
+    }
+}
+
+/// The welcome page as drawn, from plain values. It is laid out the way
+/// macOS lays out a welcome: the system's own text styles at their own
+/// line heights, plain symbols in SipAI's blue, and the system's large
+/// button. Sizes stay fixed — the page runs before the Display font size
+/// exists.
+struct WelcomePage: View {
+    /// The agents' names, already joined into one phrase.
+    let agentNames: String
+    let onGetStarted: () -> Void
+
+    @State private var getStartedHovered = false
+
+    var body: some View {
+        ZStack {
+            Color(nsColor: .windowBackgroundColor).ignoresSafeArea()
+            VStack(spacing: 0) {
+                Spacer()
+
+                // Tight-cropped asset, drawn at its own size — see
+                // LeftSidebar's brand header.
+                Image("SipAI-Logo-86")
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(height: 86)
+
+                Spacer().frame(height: 14)
+
+                Text("Welcome to SipAI")
+                    .font(.largeTitle.weight(.bold))
+                    .foregroundColor(SipDesign.textPrimary)
+
+                Spacer().frame(height: 4)
+
+                Text("Your AI, your way.")
+                    .font(.title3)
+                    .foregroundColor(SipDesign.textSecondary)
+
+                Spacer().frame(height: 28)
+
+                VStack(alignment: .leading, spacing: 16) {
+                    // `featureRow` takes plain `String`s, so a bare literal at the
+                    // call site reaches SwiftUI's non-localizing `Text(_: String)`
+                    // overload and ships in English whatever the language. These
+                    // are localized HERE, where the literal still exists.
+                    featureRow(
+                        icon: "globe",
+                        title: String(localized: "All providers, one app",
+                                      comment: "Onboarding welcome bullet title"),
+                        desc: String(localized: "Chat with GPT, Claude, and more with your API keys.",
+                                     comment: "Onboarding welcome bullet detail")
+                    )
+                    featureRow(
+                        icon: "terminal",
+                        title: String(localized: "Better local AI agent management",
+                                      comment: "Onboarding welcome bullet title"),
+                        // A String expression, never an interpolated Text
+                        // literal: the names are the user's own labels.
+                        desc: String(localized: "Run \(agentNames) from one window, on your subscription or API key.",
+                                     comment: "Onboarding welcome bullet detail; placeholder is the joined list of agent names")
+                    )
+                    featureRow(
+                        icon: "checkmark.shield",
+                        title: String(localized: "Your data, your control",
+                                      comment: "Onboarding welcome bullet title"),
+                        desc: String(localized: "No sign-up required, no data collection, no tracking from the app. Your data is just between you and the AI.",
+                                     comment: "Onboarding welcome bullet detail")
+                    )
+                }
+                .frame(width: 400, alignment: .leading)
+
+                Spacer().frame(height: 30)
+
+                Button(action: onGetStarted) {
+                    Text("Get Started")
+                        .frame(minWidth: 180)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(getStartedHovered ? SipDesign.blueHover : SipDesign.blue)
+                .keyboardShortcut(.defaultAction)
+                .onHover { getStartedHovered = $0 }
+
+                Spacer()
+            }
+            // Single flexible frame so top/bottom Spacer() actually expand in tall
+            // windows. Chaining a second .frame(maxWidth:) here would give the
+            // VStack an intrinsic height and collapse the Spacers.
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea()
+        }
+    }
+
+    private func featureRow(icon: String, title: String, desc: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 20))
+                .foregroundColor(SipDesign.blue)
+                .frame(width: 28)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundColor(SipDesign.textPrimary)
+                Text(desc)
+                    .font(.body)
+                    .foregroundColor(SipDesign.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 }

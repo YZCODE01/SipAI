@@ -1,19 +1,21 @@
 # Third-party licences
 
 SipAI itself is MIT-licensed — see [LICENSE](LICENSE). It links and
-redistributes **two** third-party components, reproduced in full below.
-Nothing else in this repository is derived from third-party code.
+redistributes **three** third-party components, their licences reproduced
+in full below. Nothing else in this repository is derived from
+third-party code.
 
 | Component | Version | Licence | Source |
 |---|---|---|---|
-| Sparkle | 2.9.5 | MIT, plus the external licences noted in its own text | [sparkle-project/Sparkle](https://github.com/sparkle-project/Sparkle) |
+| Sparkle | 2.9.6 | MIT, plus the external licences noted in its own text | [sparkle-project/Sparkle](https://github.com/sparkle-project/Sparkle) |
 | KaTeX | 0.18.4 | MIT | [KaTeX/KaTeX](https://github.com/KaTeX/KaTeX) |
+| Zstandard (zstd), decoder only | 1.5.7 | BSD (3-clause) | [facebook/zstd](https://github.com/facebook/zstd) |
 
 Sparkle is the update framework behind **Settings → Updates**. It is
 pinned as a Swift package (`SipAI.xcodeproj/…/Package.resolved`) and
 embedded as `Sparkle.framework` inside the built app, so the notice has
-to travel with every copy that ships — a byte-identical plain-text copy
-lives at `SipAI-macOS/SipAI/Resources/THIRD-PARTY-LICENSES.txt`, which is
+to travel with every copy that ships — the same licences in plain text
+live at `SipAI-macOS/SipAI/Resources/THIRD-PARTY-LICENSES.txt`, which is
 bundled into `SipAI.app`.
 
 KaTeX lays out the mathematics in notes — both the Preview pane and
@@ -23,6 +25,13 @@ KaTeX lays out the mathematics in notes — both the Preview pane and
 Only the WOFF2 renditions of the KaTeX fonts are included; the WOFF and
 TrueType fallbacks are dropped because WebKit never requests them.
 
+Zstandard's decoder reads Codex sessions stored compressed
+(`.jsonl.zst`): macOS has no zstd of its own. Its source files
+are bundled unmodified in `SipAI-macOS/SipAI/Vendor/zstd/lib` (the
+decompression half only) with its licence beside them, and are compiled
+into the app through one file of SipAI's, `Vendor/zstd/sipai_zstd.c`.
+zstd is dual-licensed; SipAI takes it under the BSD licence below.
+
 Apple's system frameworks (SwiftUI, AppKit, Foundation, …) and SF Symbols
 are used under Apple's own terms and are not redistributed here. Aside
 from the KaTeX maths fonts above, no fonts, icons or artwork from third
@@ -30,9 +39,9 @@ parties are bundled.
 
 ---
 
-## Sparkle 2.9.5
+## Sparkle 2.9.6
 
-Retrieved from the Sparkle 2.9.5 distribution, unmodified.
+Retrieved from the Sparkle 2.9.6 distribution, unmodified.
 
 ```
 Copyright (c) 2006-2013 Andy Matuschak.
@@ -199,4 +208,43 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+---
+
+## Zstandard 1.5.7
+
+Retrieved from the zstd 1.5.7 release (`LICENSE`), unmodified.
+
+```
+BSD License
+
+For Zstandard software
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+ * Neither the name Facebook, nor Meta, nor the names of its contributors may
+   be used to endorse or promote products derived from this software without
+   specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```

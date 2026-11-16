@@ -77,10 +77,13 @@ done
 if ! swiftc -O -o "$out/forkharness" \
   "$here/Stubs.swift" "$out/Extracted.swift" "$here/main.swift" \
   "$src/SipAI/Models/AttachmentInline.swift" \
+  "$src/SipAI/Models/SkillModel.swift" \
+  "$src/SipAI/Models/ShellCommands.swift" \
   "$src/SipAI/Models/AgentSession.swift" \
   "$src/SipAI/Models/AgentEventParsing.swift" \
   "$src/SipAI/Models/AgentSessionFork.swift" \
   "$src/SipAI/Models/CodexSessions.swift" \
+  "$src/SipAI/Models/CodexRecordedTools.swift" \
   "$src/SipAI/Models/CodexEventParsing.swift" \
   "$src/SipAI/Models/CodexSessionFork.swift" \
   "$src/SipAI/Models/KimiSessions.swift" \

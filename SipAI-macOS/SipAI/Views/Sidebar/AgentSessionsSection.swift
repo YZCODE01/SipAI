@@ -16,7 +16,9 @@
 // "+ New session" routes the center column straight to a draft
 // AgentSessionView — folder, permission mode, model, effort and
 // scheduling all live in that view's composer, so there is no modal
-// in between.
+// in between. Grouped by Custom, that row is "+ New group" instead: a
+// session starts from its group's own + there (Ungrouped's for one in
+// no group).
 
 import SwiftUI
 import UniformTypeIdentifiers
@@ -33,7 +35,7 @@ struct AgentSessionsSection: View {
     /// Which agent this section lists. Every piece of section state —
     /// group mode, custom groups, collapsed headers, last cwd — is
     /// namespaced under this key, so two sections never share state.
-    var agentKey: String = "claude_code"
+    var agentKey: String
 
     /// The agent's label, under whatever name the user gave it in
     /// Settings → Labels. A hardcoded literal would ignore renames —
@@ -76,7 +78,25 @@ struct AgentSessionsSection: View {
 
     @State private var groupPrompt: GroupPrompt? = nil
     @State private var groupNameDraft: String = ""
-    @State private var deletingGroup: String? = nil
+    /// Custom group under the ⋮ Ungroup confirmation.
+    @State private var ungroupingGroup: String? = nil
+
+    /// A group header's delete — "Delete all sessions" or "Delete the
+    /// group" — waiting on its confirmation. What the alert says is
+    /// taken when the menu item is chosen; what is deleted is read again
+    /// when it is confirmed, so the delete matches the group as it is
+    /// then (`deleteGroupSessions`).
+    private struct GroupDeletion: Identifiable {
+        let key: String
+        let mode: AgentGroupMode
+        let menu: AgentSessionGrouping.HeaderActions.Menu
+        let label: String
+        /// The group holds scheduled tasks, which the delete keeps.
+        let keepsTasks: Bool
+
+        var id: String { mode.rawValue + ":" + key }
+    }
+    @State private var groupDeletion: GroupDeletion? = nil
 
     /// Row being renamed inline (⋮ → Rename swaps its title for a text
     /// field in place — no dialog). One at a time, keyed by id.
@@ -118,7 +138,7 @@ struct AgentSessionsSection: View {
     /// installed, signed in, not hidden. `LeftSidebar` appends it on
     /// that rule, so the body has one shape — the new-session row and
     /// the list — and no read-only, not-signed-in or not-installed
-    /// variant; those states live in Settings → Agent Guide.
+    /// variant; those states live in Settings → Agent Initialization.
     private var isReady: Bool {
         agents.isAgentReady(agentKey)
     }
@@ -169,7 +189,7 @@ struct AgentSessionsSection: View {
             unread: sectionUnread,
             accessory: { groupMenu }
         ) {
-            newSessionButton
+            firstRow
             sessionList
         }
         .alert(groupPromptTitle, isPresented: groupPromptPresented) {
@@ -190,30 +210,51 @@ struct AgentSessionsSection: View {
                 Text("Cancel", comment: "Dismiss the group name dialog")
             }
         }
+        // String(localized:) then the verbatim Text overload, for every
+        // title and message naming a group: the LocalizedStringKey form
+        // markdown-parses, so a name with _underscores_ or `backticks`
+        // rendered styled in the dialog. Same localization key either way.
         .alert(
-            String(localized: "Delete group?",
-                   comment: "Title of the confirmation for deleting a custom session group"),
+            String(localized: "Ungroup “\(ungroupingGroup ?? "")”?",
+                   comment: "Title of the confirmation for a custom session group's Ungroup — the group goes, its sessions stay; placeholder is the group's name"),
             isPresented: Binding(
-                get: { deletingGroup != nil },
-                set: { if !$0 { deletingGroup = nil } }
+                get: { ungroupingGroup != nil },
+                set: { if !$0 { ungroupingGroup = nil } }
             ),
-            presenting: deletingGroup
+            presenting: ungroupingGroup
         ) { name in
-            Button(role: .destructive) {
-                config.deleteAgentCustomGroup(name, for: agentKey)
+            Button {
+                config.deleteAgentCustomGroup(name, for: agentKey,
+                                              keeping: otherAgentsItemKeys)
             } label: {
-                Text("Delete", comment: "Confirm deleting a custom session group")
+                Text("Ungroup",
+                     comment: "Menu item on a custom session group's header, and the button confirming it: the group goes, its sessions and tasks stay and move to Ungrouped")
             }
             Button(role: .cancel) { } label: {
-                Text("Cancel", comment: "Dismiss the delete-group confirmation")
+                Text("Cancel", comment: "Dismiss the Ungroup confirmation")
             }
-        } message: { name in
-            // String(localized:) then the verbatim Text overload: the
-            // LocalizedStringKey form markdown-parses, so a name with
-            // _underscores_ or `backticks` rendered styled in the
-            // dialog. Same localization key either way.
-            Text(String(localized: "“\(name)” goes away. Its sessions are kept and move to Ungrouped.",
-                        comment: "Explains that deleting a group never deletes sessions"))
+        } message: { _ in
+            Text(String(localized: "The group goes away. Everything in it is kept and moves to Ungrouped.",
+                        comment: "Body of the confirmation for a custom session group's Ungroup"))
+        }
+        .alert(
+            groupDeletion.map(groupDeletionTitle) ?? "",
+            isPresented: Binding(
+                get: { groupDeletion != nil },
+                set: { if !$0 { groupDeletion = nil } }
+            ),
+            presenting: groupDeletion
+        ) { deletion in
+            Button(role: .destructive) {
+                deleteGroupSessions(deletion)
+            } label: {
+                Text("Delete", comment: "Confirm a session group's delete — its sessions, or the group and its sessions")
+            }
+            Button(role: .cancel) { } label: {
+                Text("Cancel", comment: "Dismiss the session delete confirmation")
+            }
+        } message: { deletion in
+            Text(groupDeletionMessage(deletion))
         }
         .alert(
             String(localized: "Delete session from this computer?",
@@ -352,18 +393,34 @@ struct AgentSessionsSection: View {
         )
     }
 
-    // MARK: - New session action row
+    // MARK: - The first row: New session, or New group
 
-    private var newSessionButton: some View {
-        Button {
-            startNewSession()
-        } label: {
+    /// The section's first row. Grouped by Custom it makes a GROUP — the
+    /// same name prompt as the Group menu's "New group…" — and a session
+    /// starts from its group's own +, Ungrouped's for one filed nowhere
+    /// (which is why Ungrouped is drawn there even while empty). Every
+    /// other mode has no + for a session in no particular place, so it
+    /// keeps "+ New session".
+    @ViewBuilder
+    private var firstRow: some View {
+        if groupMode == .custom {
+            actionRow(Text("New group",
+                           comment: "Sidebar action row while an agent's sessions are grouped by Custom — create a custom session group"),
+                      action: { promptForGroup(.create(nil)) })
+        } else {
+            actionRow(Text("New session",
+                           comment: "Sidebar action row — start a new agent session"),
+                      action: { startNewSession() })
+        }
+    }
+
+    private func actionRow(_ title: Text, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
             HStack(spacing: 6) {
                 Image(systemName: "plus")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
-                Text("New session",
-                     comment: "Sidebar action row — start a new agent session")
+                title
                     .font(.system(size: SipFont.sidebarRow(fontScale), weight: .medium))
                 Spacer()
             }
@@ -377,13 +434,17 @@ struct AgentSessionsSection: View {
 
     /// Every ready agent opens as an in-app draft — the composer drives
     /// the whole flow, and the runner picks the CLI off the draft's
-    /// `agentKey`.
-    private func startNewSession(cwd cwdURL: URL, inGroup group: String? = nil) {
+    /// `agentKey`. Its place — what it is remembered by — is the + that
+    /// started it: a folder header's names itself (`place`), every other
+    /// + is its custom group, Ungrouped, or no group (`NewSessionPlace.of`).
+    private func startNewSession(cwd cwdURL: URL, inGroup group: String? = nil,
+                                 place: NewSessionPlace? = nil) {
         appState.pendingClaudeSessionDraft = ClaudeSessionDraft(
             cwd: cwdURL,
             name: nil,
             agentKey: agentKey,
-            customGroup: group
+            customGroup: group,
+            place: place ?? .of(customGroup: group, groupedByCustom: groupMode == .custom)
         )
     }
 
@@ -450,7 +511,8 @@ struct AgentSessionsSection: View {
     /// nothing.
     private func startNewSession(inFolder path: String) {
         if Self.isOpenableDirectory(path) {
-            startNewSession(cwd: URL(fileURLWithPath: path, isDirectory: true))
+            startNewSession(cwd: URL(fileURLWithPath: path, isDirectory: true),
+                            place: .folder(path))
             return
         }
         let panel = NSOpenPanel()
@@ -468,7 +530,7 @@ struct AgentSessionsSection: View {
         // Cancel creates nothing. Starting somewhere arbitrary is what
         // this whole branch exists to prevent.
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        startNewSession(cwd: url)
+        startNewSession(cwd: url, place: .folder(path))
     }
 
     /// The custom-group header's +. The group's own most recently used
@@ -493,6 +555,18 @@ struct AgentSessionsSection: View {
             usable: { Self.isOpenableDirectory($0.path) }
         )
         startNewSession(cwd: folder ?? defaultNewSessionCwd(), inGroup: group)
+    }
+
+    /// Ungrouped's +: the same, for a session filed nowhere — in the
+    /// folder Ungrouped's newest row was worked in.
+    private func startNewSessionInUngrouped() {
+        let folder = AgentSessionGrouping.latestUngroupedFolder(
+            sortedItems: sortedListItems,
+            customGroups: customGroups,
+            assignments: config.agentSessionGroupAssignments,
+            usable: { Self.isOpenableDirectory($0.path) }
+        )
+        startNewSession(cwd: folder ?? defaultNewSessionCwd())
     }
 
     /// Closest existing ancestor directory of `path`, or home.
@@ -525,6 +599,9 @@ struct AgentSessionsSection: View {
         /// counts: a header reading "10" above a "Show all (24 more)"
         /// contradicts the button directly underneath it.
         let total: Int
+        /// Those rows themselves — what the header's ⋮ acts on, the rows
+        /// behind "Show all" and inside a folded group included.
+        let members: [AgentListItem]
         /// Some row in the group — ALL of them, taken before the cap —
         /// is running (`isActive`). A folded header draws the dot for
         /// it, since none of its rows are on screen to draw their own.
@@ -711,6 +788,7 @@ struct AgentSessionsSection: View {
                 guard !folded.contains(group.key) else {
                     groups.append(ListGroup(group: group, overflow: 0,
                                             revealed: false, total: total,
+                                            members: group.items,
                                             live: live, unread: unread))
                     continue
                 }
@@ -746,6 +824,7 @@ struct AgentSessionsSection: View {
                     overflow: overflow,
                     revealed: revealed,
                     total: total,
+                    members: group.items,
                     live: live,
                     unread: unread
                 ))
@@ -778,12 +857,14 @@ struct AgentSessionsSection: View {
                     overflow: 0,
                     revealed: false,
                     total: total,
+                    members: group.items,
                     live: live,
                     unread: unread
                 ))
             } else {
                 groups.append(ListGroup(group: group, overflow: 0,
                                         revealed: sectionRevealed, total: total,
+                                        members: group.items,
                                         live: live, unread: unread))
             }
         }
@@ -794,12 +875,13 @@ struct AgentSessionsSection: View {
 
     @ViewBuilder
     private var sessionList: some View {
-        // A named group renders while empty, so under Custom the list
-        // has something to draw even before the first session exists —
-        // otherwise "New group…" on a fresh agent produces a group the
-        // empty-state row hides, which is the bug the header + is here
-        // to end. `hasAnyRows` itself is left alone: a row means
-        // something to READ, and a group the user named is not that.
+        // Under Custom the list always has something to draw — the named
+        // groups and Ungrouped render while empty — even before the first
+        // session exists: there the first row makes a group, and a
+        // session starts from a group's own +, so an empty-state row in
+        // their place would leave no way to start one. `hasAnyRows`
+        // itself is left alone: a row means something to READ, and an
+        // empty group is not that.
         //
         // The scan still wins while it runs. `sessions` is empty until
         // the FIRST scan lands, so without that clause a user grouped
@@ -807,8 +889,7 @@ struct AgentSessionsSection: View {
         // launch scan instead of reading "Scanning…". Later rescans
         // keep the old list, so this only ever costs a machine with no
         // sessions at all a brief "Scanning…" on activation.
-        let namedGroupsToDraw = groupMode == .custom && !customGroups.isEmpty
-        if !hasAnyRows && (agents.isScanning || !namedGroupsToDraw) {
+        if !hasAnyRows && (agents.isScanning || groupMode != .custom) {
             emptyRow
         } else {
             let mode = groupMode
@@ -839,6 +920,7 @@ struct AgentSessionsSection: View {
                     if mode != .none {
                         groupHeaderRow(group,
                                        count: entry.total,
+                                       members: entry.members,
                                        folded: folded.contains(group.key),
                                        live: entry.live,
                                        unread: entry.unread,
@@ -918,24 +1000,20 @@ struct AgentSessionsSection: View {
     /// exact look they have when grouping is off, so switching modes
     /// rearranges without restyling.
     ///
-    /// A ready agent's folder and custom-group headers carry a trailing
-    /// + — sharing the 18-pt column the session rows' ⋮ sits in — that
-    /// starts a new session already belonging to that group; the count
-    /// sits directly left of it. The + is OUTSIDE the fold button
-    /// (nested SwiftUI buttons both fire), so everything on the row
-    /// except the + itself folds the group.
-    ///
-    /// Both are places a session can be PUT: a folder is where it runs,
-    /// a custom group is where the user filed it. Ungrouped is neither
-    /// — it is the absence of a filing, and the section's own
-    /// "+ New session" row already makes an unfiled session — so it
-    /// carries none, and neither do the buckets that merely describe
-    /// rows (date, state, "No directory").
+    /// The headers of the places a session lives — Folder and Custom,
+    /// Ungrouped included — carry, after the count, a ⋮ and a +
+    /// (`AgentSessionGrouping.headerActions`). The + starts a new session
+    /// already in the group and shares the 18-pt column the session rows'
+    /// ⋮ sits in; a header with no + ("No directory") puts its ⋮ in that
+    /// column instead. Both sit OUTSIDE the fold button (nested SwiftUI
+    /// buttons both fire), so everything on the row except them folds
+    /// the group. A header has no right-click menu: every action on the
+    /// group — Rename included — is in its ⋮, the one place to look.
     ///
     /// `count` is the group's size BEFORE the cap, never `group.items
     /// .count`: a trimmed group renders fewer rows than it holds, and a
     /// header saying "10" directly above "Show all (24 more)" contradicts
-    /// the button it is sitting on top of.
+    /// the button it is sitting on top of. `members` are those rows.
     ///
     /// `live` says a row inside is running. While the group is FOLDED
     /// the header draws the activity dot after its name (see
@@ -946,25 +1024,16 @@ struct AgentSessionsSection: View {
     @ViewBuilder
     private func groupHeaderRow(_ group: AgentSessionGroup,
                                 count: Int,
+                                members: [AgentListItem],
                                 folded: Bool,
                                 live: Bool,
                                 unread: Bool,
                                 mode: AgentGroupMode) -> some View {
-        let showsPlus = isReady && {
-            switch mode {
-            case .folder:
-                return group.key != AgentSessionGrouping.noDirectoryKey
-            case .custom:
-                // Named groups only. `customGroups` is also what tells
-                // Ungrouped apart from a group a user happens to have
-                // called "Ungrouped", and it is the same test the
-                // header's Rename / Delete menu already makes.
-                return customGroups.contains(group.key)
-            case .none, .date, .state:
-                return false
-            }
-        }()
-        let header = HStack(spacing: 0) {
+        let actions = AgentSessionGrouping.headerActions(mode: mode,
+                                                         key: group.key,
+                                                         customGroups: customGroups)
+        let showsPlus = isReady && actions.plus
+        HStack(spacing: 0) {
             Button {
                 withAnimation(.easeInOut(duration: 0.16)) {
                     config.setAgentGroupCollapsed(!folded,
@@ -981,7 +1050,7 @@ struct AgentSessionsSection: View {
                                       unread: unread,
                                       titleSize: SipFont.sidebarRow(fontScale))
                     .padding(.leading, 8)
-                    .padding(.trailing, showsPlus ? 2 : 8)
+                    .padding(.trailing, actions.menu != nil || showsPlus ? 2 : 8)
                     .padding(.top, 4)
                     .padding(.bottom, 2)
                     .contentShape(Rectangle())
@@ -1000,17 +1069,27 @@ struct AgentSessionsSection: View {
                 : String(localized: "Collapse group",
                          comment: "Accessibility hint for an expanded session group"))
 
+            if let menu = actions.menu {
+                RowEllipsisMenu {
+                    groupMenuItems(group, menu: menu, members: members,
+                                   unread: unread, mode: mode)
+                }
+                .padding(.trailing, showsPlus ? 2 : 4)
+            }
             if showsPlus {
                 RowPlusButton(
                     label: String(localized: "New session in \(group.label)",
                                   comment: "Tooltip and accessibility label for the + on a folder or custom group header"),
                     action: {
                         // In folder mode the group key IS the directory
-                        // path; in custom mode it is the group's name.
-                        if mode == .custom {
-                            startNewSession(inGroup: group.key)
-                        } else {
+                        // path; in custom mode it is the group's name,
+                        // or Ungrouped's key.
+                        if mode != .custom {
                             startNewSession(inFolder: group.key)
+                        } else if group.key == AgentSessionGrouping.ungroupedKey {
+                            startNewSessionInUngrouped()
+                        } else {
+                            startNewSession(inGroup: group.key)
                         }
                     }
                 )
@@ -1020,28 +1099,152 @@ struct AgentSessionsSection: View {
         .sidebarRowBackground()
         // Folder headers carry the full path here; other modes fall back to
         // the label so a truncated header can still be read on hover, and
-        // so no header ever shows an empty tooltip. The + supplies its own
-        // help locally, which wins over this one inside its bounds.
+        // so no header ever shows an empty tooltip. The ⋮ and the + supply
+        // their own help locally, which wins over this one inside them.
         .help(group.tooltip.isEmpty ? group.label : group.tooltip)
+    }
 
-        if mode == .custom && customGroups.contains(group.key) {
-            header.contextMenu {
-                Button {
-                    promptForGroup(.rename(group.key))
-                } label: {
-                    Text("Rename group…",
-                         comment: "Context menu item on a custom group header")
-                }
-                Button(role: .destructive) {
-                    deletingGroup = group.key
-                } label: {
-                    Text("Delete group",
-                         comment: "Context menu item on a custom group header")
-                }
+    /// The group header's ⋮ menu — the header's only menu. Mark all as
+    /// read for every header that has one; then what the group is decides
+    /// the delete. A folder is a directory on disk and a delete never
+    /// touches it, so its menu says "Delete all sessions"; so does
+    /// Ungrouped's, and "No directory"'s. A named group is the user's own,
+    /// so its delete takes the group with its sessions — "Delete the
+    /// group" — beside Rename and Ungroup, the delete that keeps them.
+    /// Each delete asks first, saying what goes and what stays
+    /// (`groupDeletionMessage`).
+    @ViewBuilder
+    private func groupMenuItems(_ group: AgentSessionGroup,
+                                menu: AgentSessionGrouping.HeaderActions.Menu,
+                                members: [AgentListItem],
+                                unread: Bool,
+                                mode: AgentGroupMode) -> some View {
+        Button {
+            markAllRead(members)
+        } label: {
+            Text("Mark all as read",
+                 comment: "Menu item on a session group's header, and on a scheduled task's row: clears the steady dot of every session in it")
+        }
+        .disabled(!unread)
+        if menu == .namedGroup {
+            Button {
+                promptForGroup(.rename(group.key))
+            } label: {
+                Text("Rename group…",
+                     comment: "Menu item on a custom session group's header: opens the rename dialog")
+            }
+            Button {
+                ungroupingGroup = group.key
+            } label: {
+                Text("Ungroup",
+                     comment: "Menu item on a custom session group's header, and the button confirming it: the group goes, its sessions and tasks stay and move to Ungrouped")
+            }
+        }
+        Divider()
+        let keepsTasks = members.contains {
+            if case .scheduled = $0 { return true }
+            return false
+        }
+        if menu == .namedGroup {
+            Button(role: .destructive) {
+                groupDeletion = GroupDeletion(key: group.key, mode: mode, menu: menu,
+                                              label: group.label, keepsTasks: keepsTasks)
+            } label: {
+                Text("Delete the group",
+                     comment: "Menu item on a custom session group's header: the group and every session in it go")
             }
         } else {
-            header
+            Button(role: .destructive) {
+                groupDeletion = GroupDeletion(key: group.key, mode: mode, menu: menu,
+                                              label: group.label, keepsTasks: keepsTasks)
+            } label: {
+                Text("Delete all sessions",
+                     comment: "Menu item on a folder group's header, and on Ungrouped's: every session in it goes; the folder and scheduled tasks stay")
+            }
+            .disabled(AgentSessionGrouping.sessionsDeleted(from: members).isEmpty)
         }
+    }
+
+    /// Clears the steady dot of every session the rows stand for — a
+    /// scheduled task's runs included, since a task row's dot is theirs.
+    /// No confirmation: nothing is lost but the dots.
+    private func markAllRead(_ members: [AgentListItem]) {
+        config.clearAgentSessionUnread(members.flatMap(\.sessionIds))
+    }
+
+    private func groupDeletionTitle(_ deletion: GroupDeletion) -> String {
+        switch deletion.menu {
+        case .namedGroup:
+            return String(localized: "Delete the group “\(deletion.label)”?",
+                          comment: "Title of the confirmation for a custom session group's Delete the group; placeholder is the group's name")
+        case .folder, .noDirectory, .ungrouped:
+            return String(localized: "Delete all sessions in “\(deletion.label)”?",
+                          comment: "Title of the confirmation for Delete all sessions on a folder group's header, or on Ungrouped's; placeholder is the folder's or group's name")
+        }
+    }
+
+    /// What goes, what stays, and that it cannot be undone. The sessions
+    /// go the way one session's Delete takes it — out of the agent's own
+    /// store, for every app that reads it.
+    private func groupDeletionMessage(_ deletion: GroupDeletion) -> String {
+        switch (deletion.menu, deletion.keepsTasks) {
+        case (.folder, false):
+            return String(localized: "Every session in this folder is removed for every app that reads it — SipAI, the CLI, and the desktop app. The folder and its files stay on your Mac. This cannot be undone.",
+                          comment: "Body of the confirmation for Delete all sessions on a folder group's header")
+        case (.folder, true):
+            return String(localized: "Every session in this folder is removed for every app that reads it — SipAI, the CLI, and the desktop app. The folder and its files stay on your Mac, and its scheduled tasks and their runs are kept. This cannot be undone.",
+                          comment: "Body of the confirmation for Delete all sessions on a folder group's header that also holds scheduled tasks")
+        case (.noDirectory, false), (.ungrouped, false):
+            return String(localized: "Every session in this group is removed for every app that reads it — SipAI, the CLI, and the desktop app. This cannot be undone.",
+                          comment: "Body of the confirmation for Delete all sessions on Ungrouped's header, or on No directory's")
+        case (.noDirectory, true), (.ungrouped, true):
+            return String(localized: "Every session in this group is removed for every app that reads it — SipAI, the CLI, and the desktop app. Its scheduled tasks and their runs are kept. This cannot be undone.",
+                          comment: "Body of the confirmation for Delete all sessions on Ungrouped's header, or on No directory's, when it also holds scheduled tasks")
+        case (.namedGroup, false):
+            return String(localized: "The group goes away, and every session in it is removed for every app that reads it — SipAI, the CLI, and the desktop app. This cannot be undone.",
+                          comment: "Body of the confirmation for a custom session group's Delete the group")
+        case (.namedGroup, true):
+            return String(localized: "The group goes away, and every session in it is removed for every app that reads it — SipAI, the CLI, and the desktop app. Its scheduled tasks and their runs are kept and move to Ungrouped. This cannot be undone.",
+                          comment: "Body of the confirmation for a custom session group's Delete the group, when it also holds scheduled tasks")
+        }
+    }
+
+    /// The confirmed delete. The group is read again here rather than
+    /// taken from the alert: a session that joined it while the alert was
+    /// up is in it now, and the confirmation said every session goes.
+    private func deleteGroupSessions(_ deletion: GroupDeletion) {
+        groupDeletion = nil
+        let members = AgentSessionGrouping.buckets(
+            sortedListItems,
+            mode: deletion.mode,
+            state: groupState(for:),
+            tier: tier(_:),
+            customGroups: customGroups,
+            assignments: config.agentSessionGroupAssignments
+        ).first { $0.key == deletion.key }?.items ?? []
+        let doomed = AgentSessionGrouping.sessionsDeleted(from: members)
+        if let open = appState.openAgentSessionId,
+           doomed.contains(where: { $0.id == open }) {
+            appState.openAgentSessionId = nil
+            appState.openAgentSessionPath = nil
+        }
+        agents.deleteSessions(doomed)
+        if deletion.menu == .namedGroup {
+            config.deleteAgentCustomGroup(deletion.key, for: agentKey,
+                                          keeping: otherAgentsItemKeys)
+        }
+    }
+
+    /// Every row key that belongs to ANOTHER agent — the filings a custom
+    /// group's Ungroup, Delete and Rename must leave alone. Filings are
+    /// one map for every agent, and another agent may have a group of the
+    /// same name. Read only when one of those is confirmed.
+    private var otherAgentsItemKeys: Set<String> {
+        var keys = Set(agents.sessions.lazy.filter { $0.agentKey != agentKey }.map(\.id))
+        for task in agents.scheduledTasks where task.agent != agentKey {
+            keys.insert(AgentListItem.scheduled(task).groupItemKey)
+        }
+        return keys
     }
 
     // MARK: - Empty state
@@ -1080,6 +1283,7 @@ struct AgentSessionsSection: View {
         let hasActivity = isActive(.scheduled(task))
         let hasUnread = isUnread(.scheduled(task))
         let hasApproval = task.sessions.contains { isAwaitingApproval($0.id) }
+        let hasQuestion = task.sessions.contains { isAwaitingAnswer($0.id) }
 
         return VStack(alignment: .leading, spacing: 0) {
             if renamingTaskId == task.id {
@@ -1126,7 +1330,7 @@ struct AgentSessionsSection: View {
                                 .fixedSize()
                         }
                         if hasApproval {
-                            ApprovalBadge()
+                            ApprovalBadge(forQuestion: hasQuestion)
                         }
                         Spacer(minLength: 4)
                         // Same rule as a session row, and the same
@@ -1280,7 +1484,7 @@ struct AgentSessionsSection: View {
                             .lineLimit(1)
                             .truncationMode(.tail)
                         if isAwaitingApproval(session.id) {
-                            ApprovalBadge()
+                            ApprovalBadge(forQuestion: isAwaitingAnswer(session.id))
                         }
                         Spacer(minLength: 4)
                         // Nothing while the turn is in flight — ours or
@@ -1693,13 +1897,22 @@ struct AgentSessionsSection: View {
         appState.openScheduledTaskName = task.name
     }
 
-    /// Rename (rewrites the SKILL.md description Claude Desktop and the
-    /// CLI both read), Delete definition (the definition and its schedule;
-    /// the runs are kept) and Delete all (the definition and every run).
-    /// A task whose definition is gone — its runs are all it is — offers
-    /// neither of the first two, which would have nothing to act on.
+    /// Mark all as read (every run's steady dot — the row's own dot is
+    /// theirs, and clicking the row reads none of them), Rename (rewrites
+    /// the SKILL.md description Claude Desktop and the CLI both read),
+    /// Delete definition (the definition and its schedule; the runs are
+    /// kept) and Delete all (the definition and every run). A task whose
+    /// definition is gone — its runs are all it is — offers neither
+    /// Rename nor Delete definition, which would have nothing to act on.
     @ViewBuilder
     private func taskMenuItems(for task: ScheduledAgentTask) -> some View {
+        Button {
+            markAllRead([.scheduled(task)])
+        } label: {
+            Text("Mark all as read",
+                 comment: "Menu item on a session group's header, and on a scheduled task's row: clears the steady dot of every session in it")
+        }
+        .disabled(!isUnread(.scheduled(task)))
         if task.definition != nil {
             Button {
                 taskNameDraft = task.description
@@ -1851,15 +2064,17 @@ struct AgentSessionsSection: View {
             config.setAgentSessionGroup(stored, for: item.groupItemKey)
             // Filing is only visible under Custom, so a group created from
             // a row switches the list over rather than appearing to do
-            // nothing. Creating one from the section menu doesn't need to:
-            // that item is only offered while Custom is already on.
+            // nothing. Creating one from the section menu or the "+ New
+            // group" row doesn't need to: both are offered only while
+            // Custom is already on.
             if config.agentGroupMode(for: agentKey) != .custom {
                 withAnimation(.easeInOut(duration: 0.18)) {
                     config.setAgentGroupMode(.custom, for: agentKey)
                 }
             }
         case .rename(let old):
-            guard config.renameAgentCustomGroup(old, to: name, for: agentKey)
+            guard config.renameAgentCustomGroup(old, to: name, for: agentKey,
+                                                keeping: otherAgentsItemKeys)
             else { return }
             // A draft started from this group's + and not yet sent
             // carries the OLD name, and the first send hands that draft
@@ -1871,6 +2086,9 @@ struct AgentSessionsSection: View {
                appState.pendingClaudeSessionDraft?.agentKey == agentKey {
                 appState.pendingClaudeSessionDraft?.customGroup = name
             }
+            // So does what the group's + keeps waiting: the group's
+            // unsent new session is filed by the group's name.
+            appState.renameNewSessionGroup(old, to: name, agentKey: agentKey)
         }
     }
 
@@ -1936,13 +2154,25 @@ struct AgentSessionsSection: View {
         }
     }
 
+    /// Whether a card of this session — an approval or a question — is
+    /// waiting on the user. Matched through the bridge's ownership rule:
+    /// a new session's FIRST turn asks under its draft's uuid for the
+    /// whole turn, and that is exactly where an agent's clarifying
+    /// questions arrive.
     private func isAwaitingApproval(_ sessionId: String) -> Bool {
-        mcpBridge.pending.contains(where: { $0.sessionId == sessionId })
+        mcpBridge.pending.contains(where: { mcpBridge.owningSessionId(of: $0) == sessionId })
+    }
+
+    /// The same, for a question card only — what the badge names.
+    private func isAwaitingAnswer(_ sessionId: String) -> Bool {
+        mcpBridge.pending.contains(where: {
+            $0.isQuestion && mcpBridge.owningSessionId(of: $0) == sessionId
+        })
     }
 
     /// Which state bucket a row belongs in. Reads the same signals the row
     /// itself renders, so a row with an approval badge lands under "Waiting
-    /// for approval" and one with an activity dot under "Working".
+    /// for you" and one with an activity dot under "Working".
     ///
     /// "Unread" asks the PLACED tier, so an unread session opened a moment
     /// ago stays under it until the user moves on, as it does in every
@@ -1978,17 +2208,22 @@ struct AgentSessionsSection: View {
 }
 
 /// A small yellow warning badge indicating a session has one or more
-/// unresolved MCP approvals. Distinct from `ActivityDot` (orange,
-/// running) — the two can both appear on the same row when a session
-/// is mid-send AND waiting on a permission.
+/// unresolved MCP approvals — or a question the agent asked. Distinct
+/// from `ActivityDot` (orange, running) — the two can both appear on the
+/// same row when a session is mid-send AND waiting on the user.
 private struct ApprovalBadge: View {
+    /// The card waiting is a question, not a permission.
+    var forQuestion = false
+
     var body: some View {
         Image(systemName: "exclamationmark.circle.fill")
             .font(.system(size: 11, weight: .semibold))
             .foregroundColor(.yellow)
-            .accessibilityLabel(String(
-                localized: "Session is waiting for approval",
-                comment: "Accessibility label for the sidebar approval badge"))
+            .accessibilityLabel(forQuestion
+                ? String(localized: "Session is waiting for your answer",
+                         comment: "Accessibility label for the sidebar badge while the agent waits for the user to answer its question")
+                : String(localized: "Session is waiting for approval",
+                         comment: "Accessibility label for the sidebar approval badge"))
     }
 }
 

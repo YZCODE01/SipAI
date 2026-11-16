@@ -7,7 +7,7 @@ import Foundation
 /// The URLSession behind every request that carries a provider API key
 /// (chat calls, model-list fetches, model verification).
 ///
-/// It exists for one rule: a redirect may not carry the key to another
+/// It exists for two rules. A redirect may not carry the key to another
 /// host. `URLSession` strips the standard `Authorization` header when a
 /// redirect crosses origins, but NOT custom headers — and most providers
 /// here authenticate through a custom header (`x-api-key`, or whatever
@@ -16,11 +16,38 @@ import Foundation
 /// key at the new host. Same-host redirects (path moves, http→https)
 /// follow normally; a cross-host one is refused, so the 3xx itself
 /// surfaces as the request's result.
+///
+/// And nothing a request carries may be kept on disk. The default
+/// configuration saves a cacheable answer together with the request it
+/// answered — its headers and its body — in the app's web cache
+/// (`~/Library/Caches/<bundle id>/Cache.db`): the key in its header, the
+/// chat in its body, outside the data folder, where deleting a chat,
+/// Factory reset and a key given as an environment variable never
+/// reach. Ephemeral, with no cache at all, a session keeps nothing past
+/// the request.
 enum ProviderHTTP {
+    /// The `anthropic-version` every request to Anthropic's API carries —
+    /// a chat, a model's maximum, the model list, the key check — spelled
+    /// once. Anthropic's newest (its versioning page: "Anthropic recommends
+    /// using the latest API version whenever possible"). It answers 400 to
+    /// `temperature`, `top_p` or `top_k`, to a `document` block in an
+    /// `assistant` message and to a user `text` block with citations;
+    /// SipAI sends none of them (`APIClient.anthropicMessages`).
+    static let anthropicVersion = "2026-10-21"
+
     static let session: URLSession = URLSession(
-        configuration: .default,
+        configuration: configuration(),
         delegate: SameHostRedirectPolicy(),
         delegateQueue: nil)
+
+    /// No cookies, credentials or cache on disk, and no cache in memory
+    /// either: a provider's answer is never served twice.
+    static func configuration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return configuration
+    }
 
     private final class SameHostRedirectPolicy: NSObject, URLSessionTaskDelegate {
         func urlSession(_ session: URLSession, task: URLSessionTask,
@@ -31,6 +58,47 @@ enum ProviderHTTP {
             let target = request.url?.host?.lowercased()
             completionHandler(original == target ? request : nil)
         }
+    }
+}
+
+/// The web cache macOS keeps for SipAI — `URLCache.shared`, in
+/// `~/Library/Caches/<bundle id>/`. Provider requests no longer reach it
+/// (`ProviderHTTP`), but an earlier SipAI's did, keys and chat text
+/// included, and what else lands there (the update checks' public
+/// answers) is worth nothing past the launch. So its files are deleted
+/// at every launch, before anything in the process opens the cache:
+/// deleting its rows instead would leave their bytes in the database's
+/// free pages until SQLite happens to reuse them.
+enum WebCache {
+    /// What `URLCache` keeps for an app: its database, the database's
+    /// log and index, and the folder of answers too big for a row.
+    static let leftovers = ["Cache.db", "Cache.db-wal", "Cache.db-shm", "fsCachedData"]
+
+    /// The app's own cache folder. nil without a bundle identifier,
+    /// where the folder would be `~/Library/Caches` itself.
+    static var folder: URL? {
+        guard let id = Bundle.main.bundleIdentifier, !id.isEmpty,
+              let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        else { return nil }
+        return caches.appendingPathComponent(id, isDirectory: true)
+    }
+
+    /// Deletes what the cache keeps, and nothing else in the folder.
+    /// Must run before the launch's first request: a cache already open
+    /// would go on writing into the files it holds.
+    static func removeLeftovers(in folder: URL? = WebCache.folder) {
+        guard let folder else { return }
+        for name in leftovers {
+            try? FileManager.default.removeItem(at: folder.appendingPathComponent(name))
+        }
+    }
+
+    /// Factory reset: the cache is open by then, so it is emptied
+    /// through its own API — the next launch deletes the files — and the
+    /// cookies the update checks were handed go with it.
+    static func clear() {
+        URLCache.shared.removeAllCachedResponses()
+        HTTPCookieStorage.shared.removeCookies(since: .distantPast)
     }
 }
 
@@ -419,7 +487,7 @@ enum ModelFetcher {
             req.setValue(provider.authPrefix + apiKey, forHTTPHeaderField: provider.authHeader)
         }
         if provider.apiStyle == "anthropic" {
-            req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            req.setValue(ProviderHTTP.anthropicVersion, forHTTPHeaderField: "anthropic-version")
         }
         do {
             let (data, resp) = try await ProviderHTTP.session.data(for: req)
@@ -521,7 +589,7 @@ enum ModelVerifier {
         // which is also why that reply counts as OK below.
         if apiStyle == "anthropic" {
             endpoint = base + "/messages"
-            headers["anthropic-version"] = "2023-06-01"
+            headers["anthropic-version"] = ProviderHTTP.anthropicVersion
             bodies = [
                 ["model": modelId, "max_tokens": 16,
                  "messages": [["role": "user", "content": "hi"]]],

@@ -17,14 +17,14 @@
 //
 // Codex. A model advertises service tiers in codex's catalog (`Fast`,
 // `Ultrafast`) and may name one its default. Codex's own pickers run
-// the config's `service_tier`, else that default; `codex exec` — the
-// command every SipAI turn runs — applies the config alone, and a
-// resumed thread re-resolves it on every turn. A composer send follows
-// codex's own pickers and pins the tier the way codex's picker pins it
-// for its core (`CodexSpeed.override`); `default` is codex's explicit
-// standard. "The config" is codex's MERGED config for the session's
-// folder, asked of codex (`config/read`): a trusted project's
-// `.codex/config.toml` sits above the user's file.
+// the config's `service_tier`, else that default; `codex exec` and
+// codex's app-server — the two ways a SipAI turn runs — apply the config
+// alone, and `codex exec resume` re-resolves it on every turn. A composer
+// send follows codex's own pickers and pins the tier the way codex's
+// picker pins it for its core (`CodexSpeed.override`); `default` is
+// codex's explicit standard. "The config" is codex's MERGED config for
+// the session's folder, asked of codex (`config/read`): a trusted
+// project's `.codex/config.toml` sits above the user's file.
 //
 // Scheduled tasks. A task carries its own speed (`fast_mode`,
 // `service_tier` in SKILL.md). Its run passes the pick verbatim and,
@@ -36,11 +36,16 @@
 // transcript — but a refused call records standard, so only a fast
 // record may move the switch (`ClaudeFastMode.seededSwitch`).
 //
-// One switch. Both agents draw a single Fast mode switch, in the composer
-// and on the task card. Codex's turns on the model's Fast tier
-// (`CodexSpeed.fastTier`) and, off, pins standard; until it is flipped it
-// shows what codex itself would run. Claude's always says what fast mode
-// costs — on a Claude plan, usage credits alone.
+// The switches. Claude draws one Fast mode switch, in the composer and on
+// the task card, and always says what fast mode costs — on a Claude plan,
+// usage credits alone. Codex draws one switch per speed, as its terminal
+// offers one command per speed (`/fast`, `/ultrafast`): Fast mode, then
+// every other speed any model in the catalog lists, each greyed out where
+// the selected model does not list it (`CodexSpeed.switches`). A switch
+// turns its speed on and, off, pins standard; until one is flipped they
+// show what codex itself would run. Codex gates Ultrafast under its own
+// `ultrafast_mode` feature and every other speed under `fast_mode`, and an
+// administrator's requirement (`configRequirements/read`) pins either.
 //
 // Sections 6 and 7 RUN the installed claude and codex against the
 // local fake endpoint in ../ChatOnlyMode, each under a throwaway home
@@ -283,18 +288,23 @@ check("the transcript's newest MAIN call names the speed (a newer subagent call 
 
 // ─────────────────────────────────────── 4. codex's speed rule
 
-section("4. Codex: the interactive rule, exec's rule, and the one flag between them")
+section("4. Codex: the interactive rule, exec's rule, and the speed switches")
 
 let fastTier = CodexServiceTier(id: "priority", name: "Fast", description: "1.5x speed")
 let ultra = CodexServiceTier(id: "ultrafast", name: "Ultrafast", description: "The fastest")
 let sol = CodexSpeed.ModelTiers(tiers: [fastTier], defaultTier: "priority")
 let astra = CodexSpeed.ModelTiers(tiers: [fastTier], defaultTier: nil)
 let twoTiers = CodexSpeed.ModelTiers(tiers: [fastTier, ultra], defaultTier: nil)
-func speed(pick: String?, config: String?, model: CodexSpeed.ModelTiers?, feature: Bool = true)
+/// Codex's two speed switches. `allOn` is a codex that gates them apart
+/// with nothing turned off; a Gates() with `independent` false is an
+/// older codex, where Fast's switch holds both.
+typealias Gates = CodexSpeed.Gates
+let allOn = Gates(independent: true)
+func speed(pick: String?, config: String?, model: CodexSpeed.ModelTiers?, gates: Gates = allOn)
 -> (effective: String?, exec: String?, flag: String?) {
-    let e = CodexSpeed.effective(pick: pick, configured: config, model: model, featureEnabled: feature)
-    let x = CodexSpeed.execWould(configured: config, model: model, featureEnabled: feature)
-    return (e, x, CodexSpeed.override(pick: pick, effective: e, model: model, featureEnabled: feature))
+    let e = CodexSpeed.effective(pick: pick, configured: config, model: model, gates: gates)
+    let x = CodexSpeed.execWould(configured: config, model: model, gates: gates)
+    return (e, x, CodexSpeed.override(pick: pick, effective: e, model: model, gates: gates))
 }
 func same(_ a: (String?, String?, String?), _ b: (String?, String?, String?)) -> Bool {
     a.0 == b.0 && a.1 == b.1 && a.2 == b.2
@@ -313,11 +323,12 @@ check("a second tier picked: passed as itself",
       same(speed(pick: "ultrafast", config: nil, model: twoTiers), ("ultrafast", nil, "ultrafast")))
 check("a picked tier the model does not advertise is standard, and passed as such",
       same(speed(pick: "ultrafast", config: nil, model: astra), (nil, nil, "default")))
-check("codex's fast_mode feature off: no tier, and nothing pinned unless a speed was picked",
-      same(speed(pick: "priority", config: "priority", model: astra, feature: false), (nil, nil, "default"))
-      && same(speed(pick: nil, config: "priority", model: astra, feature: false), (nil, nil, nil)))
-check("flex passes even then", speed(pick: "flex", config: nil, model: astra, feature: false).effective == "flex"
-      && speed(pick: nil, config: "flex", model: astra, feature: false).flag == "flex")
+check("codex's fast_mode feature off (one shared switch): no tier, and nothing pinned unless a speed was picked",
+      same(speed(pick: "priority", config: "priority", model: astra, gates: Gates(fastMode: false)), (nil, nil, "default"))
+      && same(speed(pick: nil, config: "priority", model: astra, gates: Gates(fastMode: false)), (nil, nil, nil)))
+check("flex passes even then",
+      speed(pick: "flex", config: nil, model: astra, gates: Gates(fastMode: false)).effective == "flex"
+      && speed(pick: nil, config: "flex", model: astra, gates: Gates(fastMode: false)).flag == "flex")
 check("`fast` is codex's other spelling of `priority`",
       same(speed(pick: nil, config: "fast", model: astra), ("priority", "priority", "priority")))
 check("an opted-out default (`default` in config) keeps a Fast-default model standard",
@@ -333,23 +344,81 @@ check("a pick equal to what exec would run anyway is still passed",
 check("an unadvertised configured tier: standard, pinned — nothing unadvertised reaches codex",
       same(speed(pick: nil, config: "ultrafast", model: astra), (nil, nil, "default")))
 
-// Codex's merged config, as `config/read` answers it for a folder.
+// Two speeds, two switches. A current codex gates Ultrafast under its
+// own `ultrafast_mode` feature and every other speed under `fast_mode`;
+// an older codex gates both under `fast_mode`; an administrator's pin
+// outranks the user's config either way.
+let fastOff = Gates(fastMode: false, independent: true)
+let ultraOff = Gates(ultrafastMode: false, independent: true)
+let sharedFastOff = Gates(fastMode: false)
+check("Fast's switch off on a codex that gates the two apart: Ultrafast still runs, configured or picked",
+      same(speed(pick: nil, config: "ultrafast", model: twoTiers, gates: fastOff), ("ultrafast", "ultrafast", "ultrafast"))
+      && same(speed(pick: "ultrafast", config: nil, model: twoTiers, gates: fastOff), ("ultrafast", nil, "ultrafast")))
+check("… while Fast does not",
+      same(speed(pick: "priority", config: nil, model: twoTiers, gates: fastOff), (nil, nil, "default")))
+check("Ultrafast's own switch off: Ultrafast is standard and pinned so, and Fast still runs",
+      same(speed(pick: "ultrafast", config: nil, model: twoTiers, gates: ultraOff), (nil, nil, "default"))
+      && same(speed(pick: nil, config: "ultrafast", model: twoTiers, gates: ultraOff), (nil, nil, "default"))
+      && same(speed(pick: "priority", config: nil, model: twoTiers, gates: ultraOff), ("priority", nil, "priority")))
+check("an older codex: Fast's switch off holds Ultrafast off too, and nothing is pinned unless picked",
+      same(speed(pick: nil, config: "ultrafast", model: twoTiers, gates: sharedFastOff), (nil, nil, nil))
+      && same(speed(pick: "ultrafast", config: nil, model: twoTiers, gates: sharedFastOff), (nil, nil, "default")))
+check("… and has no ultrafast_mode of its own to turn off",
+      same(speed(pick: "ultrafast", config: nil, model: twoTiers, gates: Gates(ultrafastMode: false)),
+           ("ultrafast", nil, "ultrafast")))
+check("an administrator's pin outranks the user's config, off and on",
+      same(speed(pick: "ultrafast", config: nil, model: twoTiers,
+                 gates: Gates(requiredUltrafastMode: false, independent: true)), (nil, nil, "default"))
+      && same(speed(pick: "priority", config: nil, model: twoTiers,
+                    gates: Gates(fastMode: false, requiredFastMode: true, independent: true)),
+              ("priority", nil, "priority"))
+      && same(speed(pick: "ultrafast", config: nil, model: twoTiers,
+                    gates: Gates(ultrafastMode: false, requiredUltrafastMode: true, independent: true)),
+              ("ultrafast", nil, "ultrafast")))
+check("both switches off: nothing pinned unless a speed was picked",
+      same(speed(pick: nil, config: "priority", model: twoTiers,
+                 gates: Gates(fastMode: false, ultrafastMode: false, independent: true)), (nil, nil, nil)))
+check("why a speed is off: the config's feature or an administrator — Fast's reason for Ultrafast on an older codex",
+      fastOff.off("priority") == .config(feature: "fast_mode") && fastOff.off("ultrafast") == nil
+      && ultraOff.off("ultrafast") == .config(feature: "ultrafast_mode") && ultraOff.off("fast") == nil
+      && Gates(requiredUltrafastMode: false, independent: true).off("ultrafast") == .administrator
+      && Gates(requiredFastMode: false).off("ultrafast") == .administrator
+      && sharedFastOff.off("ultrafast") == .config(feature: "fast_mode")
+      && sharedFastOff.off("flex") == nil && allOn.off("priority") == nil)
+
+// Codex's merged config, as `config/read` answers it for a folder, and
+// its requirements, as `configRequirements/read` answers them.
 let readAll = CodexSpeed.settings(fromEffectiveConfig: [
     "service_tier": "fast", "model": "gpt-6-astra",
     "features": ["fast_mode": false, "memories": true],
     "notice": ["fast_default_opt_out": true],
 ])
 check("config/read: the tier, the feature and the model are read off codex's merged config",
-      readAll == CodexSpeed.Settings(configured: "fast", featureEnabled: false, model: "gpt-6-astra"))
+      readAll == CodexSpeed.Settings(configured: "fast", gates: Gates(fastMode: false), model: "gpt-6-astra"))
 check("… an opt-out with no tier reads as `default`, codex's own configured tier",
       CodexSpeed.settings(fromEffectiveConfig: ["notice": ["fast_default_opt_out": true]]).configured == "default")
-check("… JSON null and absent keys read as unset, the feature as on",
+check("… JSON null and absent keys read as unset, the features as on",
       CodexSpeed.settings(fromEffectiveConfig: ["service_tier": NSNull(), "model": NSNull(),
-                                                "features": ["fast_mode": NSNull()], "notice": NSNull()])
-      == CodexSpeed.Settings(configured: nil, featureEnabled: true, model: nil)
+                                                "features": ["fast_mode": NSNull(), "ultrafast_mode": NSNull()],
+                                                "notice": NSNull()])
+      == CodexSpeed.Settings(configured: nil, model: nil)
       && CodexSpeed.settings(fromEffectiveConfig: [:]) == CodexSpeed.Settings())
 check("… a blank tier or model is unset",
       CodexSpeed.settings(fromEffectiveConfig: ["service_tier": " ", "model": ""]) == CodexSpeed.Settings())
+let readGates = CodexSpeed.settings(
+    fromEffectiveConfig: ["features": ["fast_mode": false, "ultrafast_mode": true]],
+    requirements: ["supportsIndependentSpeedModes": true,
+                   "requirements": ["featureRequirements": ["ultrafast_mode": false, "memories": true]]]).gates
+check("… with the requirements: both switches, an administrator's pins, and whether codex gates them apart",
+      readGates == Gates(fastMode: false, ultrafastMode: true, requiredFastMode: nil,
+                         requiredUltrafastMode: false, independent: true))
+check("… no requirements answer, or none configured: no pins, and one shared switch unless codex says otherwise",
+      CodexSpeed.settings(fromEffectiveConfig: [:], requirements: nil).gates == Gates()
+      && CodexSpeed.settings(fromEffectiveConfig: [:],
+                             requirements: ["supportsIndependentSpeedModes": true, "requirements": NSNull()])
+        .gates == Gates(independent: true)
+      && CodexSpeed.settings(fromEffectiveConfig: [:],
+                             requirements: ["requirements": ["featureRequirements": NSNull()]]).gates == Gates())
 let oddFolder = "/Users/a b/\"quoted\" \\ back/ünï"
 let readLine = CodexConfigRead.request(cwd: oddFolder, id: 2) ?? ""
 let readObj = (try? JSONSerialization.jsonObject(with: Data(readLine.utf8))) as? [String: Any]
@@ -361,6 +430,17 @@ check("the answer's config is read out of result, and an error is no answer",
       CodexConfigRead.config(fromAnswer: ["id": 2, "result": ["config": ["model": "m"]]])?["model"] as? String == "m"
       && CodexConfigRead.config(fromAnswer: ["id": 2, "error": ["message": "x"]]) == nil
       && CodexConfigRead.config(fromAnswer: nil) == nil)
+let requirementsLine = CodexConfigRead.requirementsRequest(id: 3)
+let requirementsObj = (try? JSONSerialization.jsonObject(with: Data(requirementsLine.utf8))) as? [String: Any]
+check("the requirements are asked as codex's configRequirements/read, with no parameters, as codex spells it",
+      requirementsObj?["method"] as? String == "configRequirements/read" && (requirementsObj?["id"] as? Int) == 3
+      && requirementsObj?["params"] == nil && requirementsObj?["jsonrpc"] as? String == "2.0")
+check("… its result is read, and an error — a codex without the method — is none",
+      CodexConfigRead.requirements(
+          fromAnswer: ["id": 3, "result": ["supportsIndependentSpeedModes": true]])?["supportsIndependentSpeedModes"]
+        as? Bool == true
+      && CodexConfigRead.requirements(fromAnswer: ["id": 3, "error": ["code": -32601, "message": "x"]]) == nil
+      && CodexConfigRead.requirements(fromAnswer: nil) == nil)
 let linked = scratch.appendingPathComponent("linked-folder")
 try? fm.createSymbolicLink(at: linked, withDestinationURL: scratch)
 check("the folder is asked about by its physical path, as a turn spawned there sees it",
@@ -390,8 +470,8 @@ check("claude and kimi never see a tier",
 // no pick passes nothing, so the run gets exec's own resolution, which
 // never applies a model's catalog default — the task's Default.
 func scheduled(_ pick: String?, config: String?, model: CodexSpeed.ModelTiers?,
-               feature: Bool = true) -> String? {
-    CodexSpeed.scheduled(pick: pick, configured: config, model: model, featureEnabled: feature)
+               gates: Gates = allOn) -> String? {
+    CodexSpeed.scheduled(pick: pick, configured: config, model: model, gates: gates)
 }
 check("task, no pick: exec's own resolution — a model's catalog default is not applied",
       scheduled(nil, config: nil, model: sol) == nil
@@ -403,21 +483,86 @@ check("task, a pick: the pick, judged as exec judges a configured tier",
       && scheduled("default", config: "priority", model: astra) == nil
       && scheduled("ultrafast", config: nil, model: astra) == nil
       && scheduled("ultrafast", config: nil, model: twoTiers) == "ultrafast")
-check("task, the feature off: no tier but flex",
-      scheduled("priority", config: nil, model: astra, feature: false) == nil
-      && scheduled("flex", config: nil, model: astra, feature: false) == "flex")
+check("task, Fast's switch off: no tier but flex — and Ultrafast where codex gates it apart",
+      scheduled("priority", config: nil, model: astra, gates: Gates(fastMode: false)) == nil
+      && scheduled("flex", config: nil, model: astra, gates: Gates(fastMode: false)) == "flex"
+      && scheduled(nil, config: "ultrafast", model: twoTiers, gates: fastOff) == "ultrafast"
+      && scheduled(nil, config: "ultrafast", model: twoTiers, gates: sharedFastOff) == nil
+      && scheduled("ultrafast", config: nil, model: twoTiers, gates: ultraOff) == nil)
 
-// One Fast mode switch per agent: codex's turns on the model's Fast tier.
+// The speed switches: Fast mode, then every other speed the catalog
+// lists anywhere — greyed out where the model does not list it, as
+// codex's terminal offers one toggle per speed (`/fast`, `/ultrafast`).
 let fastByName = CodexServiceTier(id: "turbo", name: "Fast", description: "")
-check("the switch's tier is the one codex sends as priority, first",
+let catalog = [astra, twoTiers, sol]
+func ids(_ list: [CodexSpeed.SpeedSwitch]) -> [String] { list.map(\.tier.id) }
+/// The switch at `index`, nil past the end — a list that came back short
+/// fails the check rather than ending the run.
+func at(_ list: [CodexSpeed.SpeedSwitch], _ index: Int) -> CodexSpeed.SpeedSwitch? {
+    list.indices.contains(index) ? list[index] : nil
+}
+let onTwo = CodexSpeed.switches(model: twoTiers, catalog: catalog, gates: allOn)
+check("a model listing Fast and Ultrafast: two switches, Fast mode first, both on offer",
+      ids(onTwo) == ["priority", "ultrafast"] && onTwo.map(\.isFast) == [true, false]
+      && onTwo.allSatisfy(\.enabled))
+let onFastOnly = CodexSpeed.switches(model: astra, catalog: catalog, gates: allOn)
+check("a model listing Fast alone, where another lists Ultrafast: the Ultrafast switch is there, greyed out",
+      ids(onFastOnly) == ["priority", "ultrafast"] && onFastOnly.map(\.enabled) == [true, false]
+      && at(onFastOnly, 1).map { !$0.offered && $0.off == nil } == true)
+check("… in the same order on every model",
+      ids(CodexSpeed.switches(model: sol, catalog: catalog, gates: allOn)) == ids(onTwo)
+      && ids(CodexSpeed.switches(model: nil, catalog: catalog.reversed(), gates: allOn)) == ids(onTwo))
+check("an account whose catalog lists Ultrafast nowhere: Fast mode alone",
+      ids(CodexSpeed.switches(model: astra, catalog: [astra, sol], gates: allOn)) == ["priority"])
+check("a model listing no speed: Fast mode greyed out, as before",
+      CodexSpeed.switches(model: CodexSpeed.ModelTiers(tiers: [], defaultTier: nil), catalog: [], gates: allOn)
+        .map(\.enabled) == [false]
+      && ids(CodexSpeed.switches(model: nil, catalog: [], gates: allOn)) == ["priority"])
+check("a switch codex holds off is greyed out, and says which feature",
+      CodexSpeed.switches(model: twoTiers, catalog: catalog, gates: ultraOff).map(\.enabled) == [true, false]
+      && at(CodexSpeed.switches(model: twoTiers, catalog: catalog, gates: ultraOff), 1)?.off
+        == .config(feature: "ultrafast_mode")
+      && CodexSpeed.switches(model: twoTiers, catalog: catalog, gates: fastOff).map(\.enabled) == [false, true])
+check("flex and standard get no switch",
+      ids(CodexSpeed.switches(model: CodexSpeed.ModelTiers(
+          tiers: [fastTier, CodexServiceTier(id: "flex", name: "Flex", description: ""),
+                  CodexServiceTier(id: "default", name: "Standard", description: "")],
+          defaultTier: nil), catalog: [], gates: allOn)) == ["priority"])
+check("a switch carries the selected model's own words for its speed",
+      at(CodexSpeed.switches(model: CodexSpeed.ModelTiers(
+          tiers: [fastTier, CodexServiceTier(id: "ultrafast", name: "Ultrafast", description: "own words")],
+          defaultTier: nil), catalog: catalog, gates: allOn), 1)?.tier.description == "own words")
+check("Fast mode's tier is the one codex sends as priority, else the one it names Fast — never another speed",
       CodexSpeed.fastTier(twoTiers)?.id == "priority"
-      && CodexSpeed.fastTier(CodexSpeed.ModelTiers(tiers: [ultra, fastTier], defaultTier: nil))?.id == "priority")
-check("… else the one codex names Fast, else the first advertised",
-      CodexSpeed.fastTier(CodexSpeed.ModelTiers(tiers: [ultra, fastByName], defaultTier: nil))?.id == "turbo"
-      && CodexSpeed.fastTier(CodexSpeed.ModelTiers(tiers: [ultra], defaultTier: nil))?.id == "ultrafast")
-check("… and a model with no tier offers no switch",
-      CodexSpeed.fastTier(CodexSpeed.ModelTiers(tiers: [], defaultTier: nil)) == nil
+      && CodexSpeed.fastTier(CodexSpeed.ModelTiers(tiers: [ultra, fastTier], defaultTier: nil))?.id == "priority"
+      && CodexSpeed.fastTier(CodexSpeed.ModelTiers(tiers: [ultra, fastByName], defaultTier: nil))?.id == "turbo"
+      && CodexSpeed.fastTier(CodexSpeed.ModelTiers(tiers: [ultra], defaultTier: nil)) == nil
       && CodexSpeed.fastTier(nil) == nil)
+let ultraOnly = CodexSpeed.switches(model: CodexSpeed.ModelTiers(tiers: [ultra], defaultTier: nil),
+                                    catalog: catalog, gates: allOn)
+check("… so on a model listing Ultrafast alone, Fast mode is greyed out and Ultrafast is on offer",
+      ids(ultraOnly) == ["priority", "ultrafast"] && ultraOnly.map(\.enabled) == [false, true])
+
+// The words under each switch, spelled once for the menu and the card.
+let agentName = "Codex"
+func words(_ speed: CodexSpeed.SpeedSwitch?, on: Bool = false, picked: Bool = false) -> [String]? {
+    speed.map { CodexSpeedWords.lines($0, on: on, picked: picked, agentName: agentName) }
+}
+check("each switch's line is its own speed's description",
+      words(at(onTwo, 0)) == ["1.5x speed"] && words(at(onTwo, 1)) == ["The fastest"])
+check("… and says codex turned it on only while it is on unpicked",
+      words(at(onTwo, 1), on: true) == ["The fastest", "On by default in Codex"]
+      && words(at(onTwo, 1), on: true, picked: true) == ["The fastest"])
+check("a speed the selected model does not list says so",
+      words(at(onFastOnly, 1)) == ["Not offered for this model"])
+check("a speed codex holds off says why, first",
+      words(at(CodexSpeed.switches(model: twoTiers, catalog: catalog, gates: ultraOff), 1))
+        == ["Turned off in Codex's config (features.ultrafast_mode)"]
+      && words(at(CodexSpeed.switches(model: astra, catalog: catalog, gates: fastOff), 0))
+        == ["Turned off in Codex's config (features.fast_mode)"]
+      && words(at(CodexSpeed.switches(model: astra, catalog: catalog,
+                                      gates: Gates(requiredUltrafastMode: false, independent: true)), 1))
+        == ["Turned off by your organization"])
 check("a task scheduled from a composer keeps the composer's pick",
       CodexSpeed.carriedToTask(pick: "default", effective: nil) == "default"
       && CodexSpeed.carriedToTask(pick: "fast", effective: "priority") == "priority")
@@ -457,12 +602,199 @@ check("… Default passes nothing — exec's own resolution",
 let kimiTask = taskRun("kimi", model: "k", fast: true, tier: "priority")
 check("kimi takes neither", !kimiTask.fastMode && kimiTask.codexServiceTierOverride == nil
       && kimiTask.flags(for: "kimi") == ["--model", "k"])
-check("mode, model and effort ride as they did",
+check("mode, model and effort ride as they did — and a run is Non-stop only when its task says so",
       AgentLaunchOptions.scheduledRun(agent: "claude_code", mode: "bypassPermissions", model: "opus",
                                       effort: "max", fastMode: false, serviceTier: nil)
-        == AgentLaunchOptions(permissionMode: "bypassPermissions", model: "opus", effort: "max"))
+        == AgentLaunchOptions(permissionMode: "bypassPermissions", model: "opus", effort: "max")
+        && AgentLaunchOptions.scheduledRun(agent: "claude_code", mode: "bypassPermissions", model: "opus",
+                                           effort: "max", fastMode: false, serviceTier: nil, nonStop: true)
+            == AgentLaunchOptions(permissionMode: "bypassPermissions", model: "opus", effort: "max",
+                                  nonStop: true))
+
+// ───────────────────── 4b. codex keeps a session's speed (CodexKeptSpeed)
+
+section("4b. Codex keeps a thread's saved speed on the exec route: the switches say so")
+
+check("kept on the exec route from the floor, never on the app-server's",
+      CodexKeptSpeed.applies(codexVersion: CodexKeptSpeed.floor, driver: .codexExec)
+        && CodexKeptSpeed.applies(codexVersion: "0.170.2", driver: .codexExec)
+        && !CodexKeptSpeed.applies(codexVersion: "0.170.2", driver: .codexAppServer)
+        && !CodexKeptSpeed.applies(codexVersion: "0.163.9", driver: .codexExec)
+        && !CodexKeptSpeed.applies(codexVersion: nil, driver: .codexExec))
+// The route each mode takes on a codex that keeps a thread's speed — and so
+// has the app-server: only Chat only is left on codex exec.
+func keptOn(_ mode: String?, chatOnly: Bool = false) -> Bool {
+    var o = AgentLaunchOptions()
+    o.permissionMode = mode
+    o.chatOnly = chatOnly
+    return CodexKeptSpeed.applies(codexVersion: "0.170.2",
+                                  driver: AgentTurnDriver.pick(agentKey: "codex", options: o, isNewSession: false,
+                                                               frontEndOffered: true))
+}
+check("Read Only, Workspace Write and Full Access take a speed per message, as Default and Plan do; Chat only keeps the session's",
+      !keptOn("read-only") && !keptOn("workspace-write") && !keptOn("full-access") && !keptOn(nil)
+        && keptOn(nil, chatOnly: true) && keptOn("workspace-write", chatOnly: true))
+check("a saved `default`, a null tier and nothing at all all run standard; a faster tier runs as saved",
+      CodexKeptSpeed.runningTier(.tier("default")) == nil && CodexKeptSpeed.runningTier(.tier(nil)) == nil
+        && CodexKeptSpeed.runningTier(.unknown) == nil
+        && CodexKeptSpeed.runningTier(.tier("priority")) == "priority"
+        && CodexKeptSpeed.runningTier(.tier("fast")) == "priority")
+check("a branch is forked at the parent's saved speed, `default` for standard, nothing when none is recorded",
+      CodexKeptSpeed.forkTier(.tier("ultrafast")) == "ultrafast"
+        && CodexKeptSpeed.forkTier(.tier(nil)) == "default"
+        && CodexKeptSpeed.forkTier(.tier("default")) == "default"
+        && CodexKeptSpeed.forkTier(.unknown) == nil)
+let keptBefore = CodexSpeedWords.keptNote(started: false, mode: "Read Only", agentName: "Codex")
+let keptAfter = CodexSpeedWords.keptNote(started: true, mode: "Workspace Write", agentName: "Codex")
+check("the line names the agent and the mode chip's title, before and after the first message",
+      keptBefore == "Codex keeps this speed for the whole session in Read Only."
+        && keptAfter == "Codex keeps this session's speed in Workspace Write. Start a new session to use another.",
+      "\(keptBefore) | \(keptAfter)")
+
+// The reader, over rollout lines in codex's own shape: codex writes the
+// record on every turn, and the newest one is what it resumes with.
+func settingsLine(_ tier: String?) -> String {
+    var settings: [String: Any] = ["model": "gpt-6-astra", "model_provider_id": "openai",
+                                   "approval_policy": "never"]
+    if let tier { settings["service_tier"] = tier }
+    return line(["timestamp": "2026-10-01T10:00:00.000Z", "type": "event_msg",
+                 "payload": ["type": "thread_settings_applied",
+                             "thread_id": "01a10000-0000-7000-8000-00000000aaaa",
+                             "thread_settings": settings] as [String: Any]])
+}
+func rollout(_ name: String, _ lines: [String]) -> URL {
+    let url = scratch.appendingPathComponent(name)
+    try? (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+    return url
+}
+let meta = line(["timestamp": "2026-10-01T10:00:00.000Z", "type": "session_meta",
+                 "payload": ["id": "01a10000-0000-7000-8000-00000000aaaa", "cwd": "/tmp/x"] as [String: Any]])
+let twoRecords = CodexSessionScanner.savedServiceTier(
+    of: rollout("kept-two.jsonl", [meta, settingsLine("default"), settingsLine("priority")]))
+check("the newest record's tier is the saved one",
+      twoRecords.found && twoRecords.tier == "priority", "\(twoRecords)")
+let noTier = CodexSessionScanner.savedServiceTier(
+    of: rollout("kept-none.jsonl", [meta, settingsLine("priority"), settingsLine(nil)]))
+check("a record naming no tier is a saved standard, not \"nothing known\"",
+      noTier.found && noTier.tier == nil, "\(noTier)")
+let noRecord = CodexSessionScanner.savedServiceTier(of: rollout("kept-unknown.jsonl", [meta]))
+check("a rollout with no record says nothing is known (the next send's pick still applies)",
+      !noRecord.found, "\(noRecord)")
 
 // ─────────────────────────────────── 5. codex's own files and answers
+
+section("4c. Codex: the list codex saved for the account speaks, not its built-in backup; and what codex said it ran")
+
+// Codex's SAVED list — the newest one it downloaded for the account: Ultrafast
+// beside Fast on two models, no default speed, the account's default efforts.
+let savedList = Data("""
+{"client_version":"0.165.0","fetched_at":"2026-01-01T00:00:00Z","models":[
+{"slug":"m-sol","display_name":"Sol","priority":1,"visibility":"list","default_reasoning_level":"low",
+ "service_tiers":[{"id":"priority","name":"Fast","description":"2x speed, increased usage"},
+                  {"id":"ultrafast","name":"Ultrafast","description":"The fastest available responses for latency-sensitive work."}]},
+{"slug":"m-astra","display_name":"Astra","priority":2,"visibility":"list","default_reasoning_level":"medium",
+ "service_tiers":[{"id":"priority","name":"Fast","description":"2x speed, increased usage"},
+                  {"id":"ultrafast","name":"Ultrafast","description":"The fastest available responses for latency-sensitive work."}]},
+{"slug":"m-luna","display_name":"Luna","priority":3,"visibility":"list","default_reasoning_level":"medium",
+ "service_tiers":[{"id":"priority","name":"Fast","description":"1.5x speed"}]}
+]}
+""".utf8)
+// What codex answers `model/list` with when its saved copy is stale and the
+// download does not finish in time: its BUILT-IN list — Fast alone, a default
+// speed the account's list does not have, another default effort.
+let backupAnswer: [String: Any] = ["id": 2, "result": ["data": [
+    ["model": "m-sol", "serviceTiers": [["id": "priority", "name": "Fast", "description": "2x speed, increased usage"]],
+     "defaultServiceTier": NSNull(), "defaultReasoningEffort": "low"],
+    ["model": "m-astra", "serviceTiers": [["id": "priority", "name": "Fast", "description": "2x speed, increased usage"]],
+     "defaultServiceTier": NSNull(), "defaultReasoningEffort": "low"],
+    ["model": "m-luna", "serviceTiers": [["id": "priority", "name": "Fast", "description": "1.5x speed"]],
+     "defaultServiceTier": "priority", "defaultReasoningEffort": "medium"],
+    ["model": "m-only-listed", "serviceTiers": [["id": "priority", "name": "Fast", "description": "x"]],
+     "defaultServiceTier": NSNull()],
+] as [Any]]]
+let savedModels = CodexCatalog.parseModelsCache(savedList, contextWindowOverride: nil).visible
+let backupTiers = CodexCatalog.listedTiers(fromAnswer: backupAnswer)
+let backupDefaults = CodexCatalog.listedDefaults(fromAnswer: backupAnswer)
+/// A model's tiers the way `CodexCatalog.speedTiers` takes them.
+func tiersFor(_ slug: String, chatGPT: Bool) -> CodexSpeed.ModelTiers? {
+    let entry = savedModels.first { $0.slug == slug }
+    let saved = entry.map { CodexSpeed.ModelTiers(tiers: $0.serviceTiers, defaultTier: $0.defaultServiceTier) }
+    return CodexCatalog.preferred(saved: entry?.inSavedList == true ? saved : nil,
+                                  listed: backupTiers[slug], chatGPTSignIn: chatGPT) ?? saved
+}
+func switchesOver(chatGPT: Bool, model: String) -> [CodexSpeed.SpeedSwitch] {
+    let slugs = savedModels.map(\.slug) + backupTiers.keys.filter { slug in !savedModels.contains { $0.slug == slug } }.sorted()
+    return CodexSpeed.switches(model: tiersFor(model, chatGPT: chatGPT),
+                               catalog: slugs.compactMap { tiersFor($0, chatGPT: chatGPT) },
+                               gates: CodexSpeed.Gates(independent: true))
+}
+func shown(_ switches: [CodexSpeed.SpeedSwitch]) -> String {
+    switches.map { "\($0.tier.id)\($0.enabled ? "" : " (greyed)")" }.joined(separator: ", ")
+}
+check("the saved list's entries are marked as the saved list's", !savedModels.isEmpty && savedModels.allSatisfy(\.inSavedList))
+let signedIn = switchesOver(chatGPT: true, model: "m-astra")
+check("signed in with ChatGPT, the account's Ultrafast keeps its switch after codex answered from its built-in list",
+      signedIn.map(\.tier.id) == ["priority", "ultrafast"] && signedIn.allSatisfy(\.enabled), shown(signedIn))
+let apiKey = switchesOver(chatGPT: false, model: "m-astra")
+check("with an API key codex's own answer speaks: its built-in list, Fast alone", apiKey.map(\.tier.id) == ["priority"],
+      shown(apiKey))
+check("… on a model the saved list gives Fast alone, Ultrafast is there greyed out, as on any model without it",
+      switchesOver(chatGPT: true, model: "m-luna").map { "\($0.tier.id):\($0.enabled)" } == ["priority:true", "ultrafast:false"])
+check("a model the built-in list starts on Fast stays on Standard where the account's list names no default",
+      CodexSpeed.effective(pick: nil, configured: nil, model: tiersFor("m-luna", chatGPT: true), gates: CodexSpeed.Gates()) == nil
+        && CodexSpeed.effective(pick: nil, configured: nil, model: tiersFor("m-luna", chatGPT: false),
+                                gates: CodexSpeed.Gates()) == "priority")
+check("a Default-effort turn states the account's default effort, not the built-in list's",
+      CodexCatalog.preferred(saved: savedModels.first { $0.slug == "m-astra" }?.defaultEffort,
+                             listed: backupDefaults.efforts["m-astra"], chatGPTSignIn: true) == "medium"
+        && CodexCatalog.preferred(saved: savedModels.first { $0.slug == "m-astra" }?.defaultEffort,
+                                  listed: backupDefaults.efforts["m-astra"], chatGPTSignIn: false) == "low")
+check("a model only one side names is that side's, whatever the sign-in",
+      tiersFor("m-only-listed", chatGPT: true)?.tiers.map(\.id) == ["priority"]
+        && CodexCatalog.preferred(saved: "s", listed: nil as String?, chatGPTSignIn: false) == "s"
+        && CodexCatalog.preferred(saved: nil as String?, listed: "l", chatGPTSignIn: true) == "l")
+
+// What codex answers when it opens the session for a message that names a
+// speed: the speed it will send, or none (JSON null) when its list for the
+// model lacks it. Another codex may answer no such field at all.
+check("served: the speed asked for, answered back", CodexSpeed.served(asked: "ultrafast", openAnswer: ["serviceTier": "ultrafast"]) == true)
+check("served: none answered — dropped", CodexSpeed.served(asked: "ultrafast", openAnswer: ["serviceTier": NSNull()]) == false)
+check("served: another speed answered — dropped", CodexSpeed.served(asked: "ultrafast", openAnswer: ["serviceTier": "priority"]) == false)
+check("served: `fast` and `priority` are one speed", CodexSpeed.served(asked: "fast", openAnswer: ["serviceTier": "priority"]) == true)
+check("served: an answer with no speed field, or none, says nothing",
+      CodexSpeed.served(asked: "ultrafast", openAnswer: ["model": "m-astra"]) == nil
+        && CodexSpeed.served(asked: "ultrafast", openAnswer: nil) == nil)
+check("served: standard, flex and no pin are never judged",
+      CodexSpeed.served(asked: "default", openAnswer: ["serviceTier": NSNull()]) == nil
+        && CodexSpeed.served(asked: "flex", openAnswer: ["serviceTier": NSNull()]) == nil
+        && CodexSpeed.served(asked: nil, openAnswer: ["serviceTier": NSNull()]) == nil)
+let codexWarning = "Configured service tier `ultrafast` is not advertised as supported for model `gpt-6-astra` and will be omitted from requests."
+check("codex's warning names the speed it drops", CodexSpeed.droppedTier(warning: codexWarning) == "ultrafast")
+check("… `fast` read as `priority`, as codex reads it",
+      CodexSpeed.droppedTier(warning: codexWarning.replacingOccurrences(of: "`ultrafast`", with: "`fast`")) == "priority")
+check("… and nothing else codex says is taken for it",
+      CodexSpeed.droppedTier(warning: "Falling back from WebSockets to HTTPS transport. stream disconnected") == nil
+        && CodexSpeed.droppedTier(warning: "Reconnecting… 2/5") == nil
+        && CodexSpeed.droppedTier(warning: "This session was recorded with model `a` but is resuming with `b`.") == nil)
+let asking = CodexSpeedReport.asking("ultrafast")
+var droppedReport = asking
+droppedReport.dropped = true
+check("a message's report starts on what it asks for, nothing heard",
+      asking.asked == "ultrafast" && !asking.dropped && CodexSpeedReport.asking(CodexSpeed.standard).asked == nil
+        && CodexSpeedReport.asking(nil).asked == nil)
+check("only the speed codex dropped reads as dropped",
+      droppedReport.drops("ultrafast") && !droppedReport.drops("priority") && !droppedReport.drops(nil)
+        && !asking.drops("ultrafast"))
+// The Ultrafast switch — the Fast one when the rule above has failed and
+// left no other, so a run on the old rule reports rather than traps.
+let ultraSwitch = signedIn.first { !$0.isFast } ?? signedIn[0]
+let droppedLines = CodexSpeedWords.lines(ultraSwitch, on: true, picked: true, agentName: "Codex", dropped: true)
+check("the switch codex ran without says so, in claude's fast-mode words, with codex's reason",
+      droppedLines.contains("Not running · Codex couldn't load your account's speeds in time")
+        && droppedLines.contains("The last reply ran at standard speed"), "\(droppedLines)")
+check("… and says nothing of it while off, or when codex ran it",
+      CodexSpeedWords.lines(ultraSwitch, on: false, picked: true, agentName: "Codex", dropped: true).count == 1
+        && CodexSpeedWords.lines(ultraSwitch, on: true, picked: true, agentName: "Codex").count == 1)
 
 section("5. Codex: the config, the cache and model/list are read as codex spells them")
 
@@ -503,6 +835,19 @@ check("config: a trailing comment after the value is not part of it",
       CodexCatalog.parseConfigDefaults("service_tier = \"priority\" # the fast one\n").serviceTier == "priority")
 check("config: a header carrying a comment still opens its table",
       CodexCatalog.parseConfigDefaults("[features] # flags\nfast_mode = false\n").fastModeFeature == false)
+let cfgUltra = CodexCatalog.parseConfigDefaults("""
+model = "gpt-6-astra"
+[features]
+fast_mode = true
+ultrafast_mode = false
+""")
+check("config: [features] ultrafast_mode is read beside fast_mode",
+      cfgUltra.ultrafastModeFeature == false && cfgUltra.fastModeFeature == true)
+check("config: … its dotted spelling too, and nothing said is nil (on)",
+      CodexCatalog.parseConfigDefaults("features.ultrafast_mode = false\n").ultrafastModeFeature == false
+      && cfgPlain.ultrafastModeFeature == nil && cfgOff.ultrafastModeFeature == nil)
+check("config: an ultrafast_mode under [profiles.x] is not the global one",
+      CodexCatalog.parseConfigDefaults("[profiles.x]\nultrafast_mode = false\n").ultrafastModeFeature == nil)
 check("toml: a basic string unescapes \\\" and \\\\, a literal keeps backslashes",
       TomlScalar.string(#"k = "a\"b\\c""#, key: "k") == #"a"b\c"#
       && TomlScalar.string(#"k = 'C:\x'"#, key: "k") == #"C:\x"#)
@@ -774,13 +1119,14 @@ section("7. The installed codex runs exactly the tier the composer names (fake e
 let realCodex = ["/opt/homebrew/bin/codex", "/usr/local/bin/codex", realHome + "/.local/bin/codex"]
     .first { fm.isExecutableFile(atPath: $0) }
 
-/// One app-server request, answered by the installed binary under a
+/// App-server requests, answered by the installed binary under a
 /// throwaway home — `model/list` from its bundled catalog, since
-/// nothing there is signed in; `config/read` from disk. stdin stays
-/// open until the answer arrives: codex exits at EOF before answering
+/// nothing there is signed in; `config/read` and
+/// `configRequirements/read` from disk. stdin stays open until every
+/// awaited answer has arrived: codex exits at EOF before answering
 /// anything still queued.
-func appServerAnswer(codex: String, home: URL, environment: [String: String],
-                     request: String) -> [String: Any]? {
+func appServerAnswers(codex: String, home: URL, environment: [String: String],
+                      requests: [String], awaiting: Set<Int>) -> [Int: [String: Any]] {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: codex)
     p.arguments = ["app-server"]
@@ -791,8 +1137,8 @@ func appServerAnswer(codex: String, home: URL, environment: [String: String],
     p.standardInput = input
     p.standardOutput = output
     p.standardError = FileHandle.nullDevice
-    do { try p.run() } catch { return nil }
-    let lines = CodexAppServerHandshake.lines + [request]
+    do { try p.run() } catch { return [:] }
+    let lines = CodexAppServerHandshake.lines + requests
     input.fileHandleForWriting.write(Data((lines.joined(separator: "\n") + "\n").utf8))
     let lock = NSLock()
     var buffer = Data()
@@ -800,14 +1146,14 @@ func appServerAnswer(codex: String, home: URL, environment: [String: String],
         let chunk = h.availableData
         lock.lock(); buffer.append(chunk); lock.unlock()
     }
-    var found: [String: Any]? = nil
+    var found: [Int: [String: Any]] = [:]
     let deadline = Date().addingTimeInterval(40)
-    while found == nil && Date() < deadline {
+    while !awaiting.isSubset(of: found.keys) && Date() < deadline {
         Thread.sleep(forTimeInterval: 0.1)
         lock.lock(); let data = buffer; lock.unlock()
         for raw in data.split(separator: UInt8(ascii: "\n")) {
             if let obj = (try? JSONSerialization.jsonObject(with: Data(raw))) as? [String: Any],
-               (obj["id"] as? NSNumber)?.intValue == 2 { found = obj }
+               let id = (obj["id"] as? NSNumber)?.intValue, awaiting.contains(id) { found[id] = obj }
         }
     }
     output.fileHandleForReading.readabilityHandler = nil
@@ -815,6 +1161,13 @@ func appServerAnswer(codex: String, home: URL, environment: [String: String],
     p.terminate()
     p.waitUntilExit()
     return found
+}
+
+/// One request, answered under id 2.
+func appServerAnswer(codex: String, home: URL, environment: [String: String],
+                     request: String) -> [String: Any]? {
+    appServerAnswers(codex: codex, home: home, environment: environment,
+                     requests: [request], awaiting: [2])[2]
 }
 
 enum CodexAppServerHandshake {
@@ -826,8 +1179,13 @@ enum CodexAppServerHandshake {
 
 if let codex = realCodex, fm.fileExists(atPath: fakeServerScript) {
     let linkDir = URL(fileURLWithPath: codex).deletingLastPathComponent().path
+    // With no proxy variable set, codex reads the system's proxy settings
+    // and does not apply their exceptions: a request to the fake endpoint
+    // on the loopback is handed to a configured HTTP proxy and never
+    // arrives. NO_PROXY keeps it local.
     let baseEnv = ["PATH": "\(linkDir):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-                   "HOME": scratch.path]
+                   "HOME": scratch.path,
+                   "NO_PROXY": "127.0.0.1,localhost", "no_proxy": "127.0.0.1,localhost"]
     let listHome = scratch.appendingPathComponent("codex-list", isDirectory: true)
     try? fm.createDirectory(at: listHome, withIntermediateDirectories: true)
     let tiers = CodexCatalog.listedTiers(fromAnswer: appServerAnswer(
@@ -840,15 +1198,79 @@ if let codex = realCodex, fm.fileExists(atPath: fakeServerScript) {
     let multi = tiers.first { $0.value.tiers.count >= 2 }
     note("a model with a default tier: \(withDefault ?? "none"); without: \(noDefault ?? "none"); two or more: \(multi?.key ?? "none")")
 
+    // Whether this codex gates Ultrafast apart from Fast — whether it has
+    // an `ultrafast_mode` feature at all, which is what SipAI's stand-in
+    // reads before codex has answered for a folder.
+    let listEnv = baseEnv.merging(["CODEX_HOME": listHome.path]) { $1 }
+    let independentCodex = run(codex, ["features", "list"], environment: listEnv, cwd: scratch).out
+        .split(separator: "\n").contains { $0.split(separator: " ").first == "ultrafast_mode" }
+    note(independentCodex
+         ? "the installed codex gates Ultrafast under its own ultrafast_mode feature"
+         : "the installed codex has no ultrafast_mode feature — Fast's switch gates every speed")
+    // `codex-cli 0.164.0` → "0.164.0": whether it keeps a thread's speed.
+    let codexVersion = run(codex, ["--version"], environment: listEnv, cwd: scratch).out
+        .split(separator: " ").last.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    let keepsSpeed = CodexKeptSpeed.keeps(codexVersion: codexVersion)
+    note("the installed codex \(codexVersion ?? "?") \(keepsSpeed ? "keeps" : "does not keep") a thread's saved speed")
+
+    // A model with two speeds, for the cases no bundled model offers:
+    // which speeds a catalog lists is OpenAI's to decide per account, and
+    // the catalog bundled in codex lists Fast alone. So codex's own bundled
+    // entry for a model with Fast is given Ultrafast as well, under a name
+    // of its own, and handed to codex through its `model_catalog_json`.
+    var allTiers = tiers
+    var twoSpeed: String? = nil
+    var catalogLine = ""
+    let dump = run(codex, ["debug", "models", "--bundled"], environment: listEnv, cwd: scratch)
+    if dump.status == 0,
+       var bundled = (try? JSONSerialization.jsonObject(with: Data(dump.out.utf8))) as? [String: Any],
+       let entries = bundled["models"] as? [[String: Any]],
+       var entry = entries.first(where: { entry in
+           entry["visibility"] as? String == "list"
+               && ((entry["service_tiers"] as? [[String: Any]]) ?? []).contains { $0["id"] as? String == "priority" }
+       }) {
+        let slug = "sipai-two-speed"
+        entry["slug"] = slug
+        entry["display_name"] = "SipAI Two Speed"
+        entry["service_tiers"] = [
+            ["id": "priority", "name": "Fast", "description": "2x speed, increased usage"],
+            ["id": "ultrafast", "name": "Ultrafast",
+             "description": "The fastest available responses for latency-sensitive work."],
+        ]
+        entry["additional_speed_tiers"] = ["fast", "ultrafast"]
+        entry.removeValue(forKey: "default_service_tier")
+        bundled["models"] = [entry]
+        let file = scratch.appendingPathComponent("two-speed-catalog.json")
+        if let data = try? JSONSerialization.data(withJSONObject: bundled) { try? data.write(to: file) }
+        let line = "model_catalog_json = \"\(file.path)\"\n"
+        let home = scratch.appendingPathComponent("codex-two-speed-list", isDirectory: true)
+        try? fm.createDirectory(at: home, withIntermediateDirectories: true)
+        try? line.write(to: home.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+        let listed = CodexCatalog.listedTiers(fromAnswer: appServerAnswer(
+            codex: codex, home: home, environment: baseEnv,
+            request: #"{"jsonrpc":"2.0","id":2,"method":"model/list","params":{}}"#))
+        check("model/list passes a catalog's Ultrafast through, beside Fast",
+              listed[slug]?.tiers.map(\.id) == ["priority", "ultrafast"],
+              "\(listed[slug]?.tiers.map(\.id) ?? [])")
+        if listed[slug]?.tiers.map(\.id) == ["priority", "ultrafast"] {
+            twoSpeed = slug
+            catalogLine = line
+            allTiers[slug] = listed[slug]
+        }
+    } else {
+        note("codex debug models --bundled gave no catalog — the two-speed cases are skipped")
+    }
+
     let rec = scratch.appendingPathComponent("recX", isDirectory: true)
     try? fm.createDirectory(at: rec, withIntermediateDirectories: true)
     if let server = startFakeServer(recordDir: rec) {
         /// One exec turn under a fresh throwaway CODEX_HOME — its own
         /// `config.toml` naming `userModel`, and optionally a project
         /// `.codex/config.toml` in the working folder, trusted or not.
-        /// With `read`, codex is first asked for its merged config there
-        /// through the REAL request and parse (`CodexConfigRead`), and
-        /// the argv is built from that answer, as a composer send is.
+        /// With `read`, codex is first asked for its merged config and its
+        /// requirements there through the REAL requests and parse
+        /// (`CodexConfigRead`), and the argv is built from that answer, as
+        /// a composer send is.
         func probe(userModel: String, config extra: String, project: String? = nil,
                    trusted: Bool = false, read: Bool = false,
                    argvFor makeArgv: (CodexSpeed.Settings?) -> [String])
@@ -879,10 +1301,15 @@ if let codex = realCodex, fm.fileExists(atPath: fakeServerScript) {
             """
             try? config.write(to: home.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
             var settings: CodexSpeed.Settings? = nil
-            if read, let line = CodexConfigRead.request(cwd: CodexConfigRead.physicalPath(work.path), id: 2),
-               let merged = CodexConfigRead.config(fromAnswer: appServerAnswer(
-                   codex: codex, home: home, environment: baseEnv, request: line)) {
-                settings = CodexSpeed.settings(fromEffectiveConfig: merged)
+            if read, let line = CodexConfigRead.request(cwd: CodexConfigRead.physicalPath(work.path), id: 2) {
+                let answers = appServerAnswers(
+                    codex: codex, home: home, environment: baseEnv,
+                    requests: [line, CodexConfigRead.requirementsRequest(id: 3)], awaiting: [2, 3])
+                if let merged = CodexConfigRead.config(fromAnswer: answers[2]) {
+                    settings = CodexSpeed.settings(
+                        fromEffectiveConfig: merged,
+                        requirements: CodexConfigRead.requirements(fromAnswer: answers[3]))
+                }
             }
             clear(rec)
             var env = baseEnv
@@ -910,13 +1337,13 @@ if let codex = realCodex, fm.fileExists(atPath: fakeServerScript) {
             let r = probe(userModel: userModel, config: configLine, project: project,
                           trusted: trusted, read: true) { settings in
                 let s = settings ?? CodexSpeed.Settings()
-                let modelTiers = (pickModel ?? s.model).flatMap { tiers[$0] }
+                let modelTiers = (pickModel ?? s.model).flatMap { allTiers[$0] }
                 var options = AgentLaunchOptions(model: pickModel)
                 options.serviceTier = pick
                 stated = CodexSpeed.effective(pick: pick, configured: s.configured,
-                                              model: modelTiers, featureEnabled: s.featureEnabled)
+                                              model: modelTiers, gates: s.gates)
                 options.codexServiceTierOverride = CodexSpeed.override(
-                    pick: pick, effective: stated, model: modelTiers, featureEnabled: s.featureEnabled)
+                    pick: pick, effective: stated, model: modelTiers, gates: s.gates)
                 return options.flags(for: "codex")
             }
             check("\(label): the composer says \(stated ?? "standard"), the request carries \(r.tier ?? "none")",
@@ -970,7 +1397,7 @@ if let codex = realCodex, fm.fileExists(atPath: fakeServerScript) {
             check("… the user's file alone would have stated standard there",
                   CodexSpeed.effective(pick: nil,
                                        configured: CodexCatalog.parseConfigDefaults("model = \"\(astra)\"\n").serviceTier,
-                                       model: tiers[astra], featureEnabled: true) == nil)
+                                       model: tiers[astra], gates: Gates()) == nil)
             composerSend("\(astra), Default in a trusted project asking for priority", userModel: astra,
                          pickModel: astra, pick: nil, project: projectTier, trusted: true,
                          expect: "priority")
@@ -984,14 +1411,14 @@ if let codex = realCodex, fm.fileExists(atPath: fakeServerScript) {
             // rule once did when exec seemed to agree, would have let the
             // project's new tier run under a chip saying Standard (the
             // trusted read above: nothing passed, priority sent).
-            let before = CodexSpeed.Settings(configured: nil, featureEnabled: true, model: astra)
+            let before = CodexSpeed.Settings(configured: nil, model: astra)
             var pinned: String? = nil
             let stale = probe(userModel: astra, config: "", project: projectTier, trusted: true) { _ in
                 var options = AgentLaunchOptions(model: astra)
                 let stated = CodexSpeed.effective(pick: nil, configured: before.configured,
-                                                  model: tiers[astra], featureEnabled: before.featureEnabled)
+                                                  model: tiers[astra], gates: before.gates)
                 options.codexServiceTierOverride = CodexSpeed.override(
-                    pick: nil, effective: stated, model: tiers[astra], featureEnabled: before.featureEnabled)
+                    pick: nil, effective: stated, model: tiers[astra], gates: before.gates)
                 pinned = options.codexServiceTierOverride
                 return options.flags(for: "codex")
             }
@@ -1014,9 +1441,10 @@ if let codex = realCodex, fm.fileExists(atPath: fakeServerScript) {
             }
         } else { note("no listed model offers priority without a default — those cases skipped") }
 
-        // Resumed turns — every SipAI send after a thread's first — re-resolve
-        // the tier on their own; what one send passed is not remembered.
-        // The override rule depends on it.
+        // Resumed turns — every SipAI send after a thread's first. A codex
+        // that keeps a thread's speed (`CodexKeptSpeed`) runs the tier the
+        // thread was born with whatever the turn pins, and records it; one
+        // below the floor re-resolves the tier on every turn.
         if let astra = noDefault {
             let home = scratch.appendingPathComponent("codex-resume", isDirectory: true)
             let work = home.appendingPathComponent("cwd", isDirectory: true)
@@ -1047,10 +1475,28 @@ if let codex = realCodex, fm.fileExists(atPath: fakeServerScript) {
                 clear(rec)
                 _ = run(codex, ["exec", "resume", "--json", "--skip-git-repo-check", thread, "two"],
                         environment: env, cwd: work)
-                let resumed = requests(in: rec, pathSuffix: "/responses").last
-                check("a resumed thread does not remember its tier: priority, then nothing passed, then none",
-                      firstTier == "priority" && resumed != nil && resumed?["service_tier"] == nil,
-                      "\(firstTier ?? "none") → \(resumed?["service_tier"] ?? "none")")
+                let resumed = requests(in: rec, pathSuffix: "/responses").last?["service_tier"] as? String
+                clear(rec)
+                _ = run(codex, ["exec", "resume", "--json", "--skip-git-repo-check",
+                                "-c", "service_tier=\"default\"", thread, "three"],
+                        environment: env, cwd: work)
+                let pinnedDefault = requests(in: rec, pathSuffix: "/responses").last?["service_tier"] as? String
+                if keepsSpeed {
+                    check("a resumed thread keeps the tier it was born with: priority, then nothing passed, then `default` pinned — priority both times",
+                          firstTier == "priority" && resumed == "priority" && pinnedDefault == "priority",
+                          "\(firstTier ?? "none") → \(resumed ?? "none") → \(pinnedDefault ?? "none")")
+                    let rolloutFile = (fm.enumerator(at: home.appendingPathComponent("sessions"),
+                                                     includingPropertiesForKeys: nil)?
+                        .compactMap { $0 as? URL }
+                        .first { $0.lastPathComponent.contains(thread) })
+                    let saved = rolloutFile.map { CodexSessionScanner.savedServiceTier(of: $0) }
+                    check("…and the rollout's newest record says so — the speed the greyed switches show",
+                          saved?.found == true && saved?.tier == "priority", "\(String(describing: saved))")
+                } else {
+                    check("a resumed thread does not remember its tier: priority, then nothing passed, then none",
+                          firstTier == "priority" && resumed == nil,
+                          "\(firstTier ?? "none") → \(resumed ?? "none")")
+                }
             } else {
                 check("the resume probe got a thread id", false, String(first.out.prefix(160)))
             }
@@ -1062,9 +1508,94 @@ if let codex = realCodex, fm.fileExists(atPath: fakeServerScript) {
                          pick: other.id, expect: other.id)
         } else { note("no listed model offers two tiers — that case skipped") }
 
+        // Two speeds on one model — what an account offered Ultrafast
+        // sees on GPT-6.1-Sol and GPT-6-Astra. Every switch's claim
+        // against what the request carries.
+        if let two = twoSpeed {
+            let ultraConfig = catalogLine + "service_tier = \"ultrafast\"\n"
+            composerSend("\(two), Ultrafast picked", userModel: two, pickModel: two,
+                         pick: "ultrafast", configLine: catalogLine, expect: "ultrafast")
+            composerSend("\(two), Fast picked over a config asking for Ultrafast", userModel: two,
+                         pickModel: two, pick: "priority", configLine: ultraConfig, expect: "priority")
+            composerSend("\(two), Default under a config asking for Ultrafast", userModel: two,
+                         pickModel: two, pick: nil, configLine: ultraConfig, expect: "ultrafast")
+            composerSend("\(two), Standard over that config", userModel: two, pickModel: two,
+                         pick: CodexSpeed.standard, configLine: ultraConfig, expect: nil)
+            if independentCodex {
+                composerSend("\(two), Default under a config asking for Ultrafast, Fast's switch off: Ultrafast still runs",
+                             userModel: two, pickModel: two, pick: nil,
+                             configLine: ultraConfig + "[features]\nfast_mode = false\n", expect: "ultrafast")
+                composerSend("\(two), Ultrafast picked with its own switch off", userModel: two,
+                             pickModel: two, pick: "ultrafast",
+                             configLine: catalogLine + "[features]\nultrafast_mode = false\n", expect: nil)
+                composerSend("\(two), Fast picked with Ultrafast's switch off", userModel: two,
+                             pickModel: two, pick: "priority",
+                             configLine: catalogLine + "[features]\nultrafast_mode = false\n", expect: "priority")
+                let answered = probe(userModel: two, config: catalogLine, read: true,
+                                     argvFor: { _ in [] }).settings?.gates
+                check("configRequirements/read: this codex says it gates its two speeds apart, and it is read so",
+                      answered?.independent == true, "\(String(describing: answered))")
+            } else {
+                composerSend("\(two), Ultrafast picked with Fast's switch off (one shared switch)",
+                             userModel: two, pickModel: two, pick: "ultrafast",
+                             configLine: catalogLine + "[features]\nfast_mode = false\n", expect: nil)
+            }
+
+            // The pin rides every send — Ultrafast as well as Fast; a codex
+            // that keeps a thread's speed runs the one the thread was born
+            // with, which is this same pin.
+            let home = scratch.appendingPathComponent("codex-two-resume", isDirectory: true)
+            let work = home.appendingPathComponent("cwd", isDirectory: true)
+            try? fm.createDirectory(at: work, withIntermediateDirectories: true)
+            try? """
+            model_provider = "fake"
+            model = "\(two)"
+            \(catalogLine)
+            [model_providers.fake]
+            name = "fake"
+            base_url = "http://127.0.0.1:\(server.port)"
+            wire_api = "responses"
+
+            """.write(to: home.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+            var env = baseEnv
+            env["CODEX_HOME"] = home.path
+            var pinned = AgentLaunchOptions(model: two)
+            pinned.codexServiceTierOverride = CodexSpeed.override(
+                pick: "ultrafast",
+                effective: CodexSpeed.effective(pick: "ultrafast", configured: nil,
+                                                model: allTiers[two], gates: allOn),
+                model: allTiers[two], gates: allOn)
+            clear(rec)
+            let first = run(codex, ["exec", "--json", "--skip-git-repo-check"] + pinned.flags(for: "codex") + ["one"],
+                            environment: env, cwd: work)
+            let firstTier = requests(in: rec, pathSuffix: "/responses").last?["service_tier"] as? String
+            let thread = first.out.split(separator: "\n").compactMap { line -> String? in
+                guard line.contains("thread.started"), let at = line.firstIndex(of: "{"),
+                      let obj = (try? JSONSerialization.jsonObject(with: Data(line[at...].utf8))) as? [String: Any]
+                else { return nil }
+                return obj["thread_id"] as? String
+            }.first
+            if let thread {
+                clear(rec)
+                _ = run(codex, ["exec", "resume", "--json", "--skip-git-repo-check"]
+                        + pinned.flags(for: "codex") + [thread, "two"], environment: env, cwd: work)
+                let resumed = requests(in: rec, pathSuffix: "/responses").last?["service_tier"] as? String
+                check("Ultrafast picked: the first turn and a resumed one both carry it",
+                      firstTier == "ultrafast" && resumed == "ultrafast",
+                      "\(firstTier ?? "none") → \(resumed ?? "none")")
+            } else {
+                check("the Ultrafast resume probe got a thread id", false, String(first.out.prefix(160)))
+            }
+            try? fm.removeItem(at: home)
+        } else { note("no two-speed catalog — those cases skipped") }
+
         /// A scheduled task's run: the REAL builder's argv, the tier the
         /// task card states (`CodexSpeed.scheduled` over codex's answer
-        /// for the folder), and what the request then carries.
+        /// for the folder), and what the request then carries. The task is
+        /// on Workspace Write — a mode `codex exec` runs. One on Default or
+        /// Plan runs through codex's app-server, where the same rule (no
+        /// pick is the config's tier for the folder) is pinned by
+        /// CodexAppServerBridge's W checks.
         func taskSend(_ label: String, userModel: String, pick: String?,
                       configLine: String = "", project: String? = nil, trusted: Bool = false,
                       expect: String?) {
@@ -1073,9 +1604,9 @@ if let codex = realCodex, fm.fileExists(atPath: fakeServerScript) {
                           trusted: trusted, read: true) { settings in
                 let s = settings ?? CodexSpeed.Settings()
                 stated = CodexSpeed.scheduled(pick: pick, configured: s.configured,
-                                              model: tiers[userModel], featureEnabled: s.featureEnabled)
-                return AgentLaunchOptions.scheduledRun(agent: "codex", mode: nil, model: userModel,
-                                                       effort: nil, fastMode: false,
+                                              model: allTiers[userModel], gates: s.gates)
+                return AgentLaunchOptions.scheduledRun(agent: "codex", mode: "workspace-write",
+                                                       model: userModel, effort: nil, fastMode: false,
                                                        serviceTier: pick).flags(for: "codex")
             }
             check("task: \(label): the card says \(stated ?? "standard"), the request carries \(r.tier ?? "none")",
@@ -1102,6 +1633,110 @@ if let codex = realCodex, fm.fileExists(atPath: fakeServerScript) {
                      pick: nil, project: "service_tier = \"priority\"\n", trusted: true,
                      expect: "priority")
         }
+        if let two = twoSpeed {
+            taskSend("\(two), Ultrafast picked", userModel: two, pick: "ultrafast",
+                     configLine: catalogLine, expect: "ultrafast")
+            taskSend("\(two), Default under a config asking for Ultrafast, Fast's switch off", userModel: two,
+                     pick: nil,
+                     configLine: catalogLine + "service_tier = \"ultrafast\"\n[features]\nfast_mode = false\n",
+                     expect: independentCodex ? "ultrafast" : nil)
+        }
+
+        // What codex says when it opens a session on a speed: the speed it
+        // will send, answered back — none when its list for the model lacks
+        // it, as its built-in list lacks Ultrafast when a download does not
+        // finish — and, from `codex exec`, its own warning. Named only on
+        // `turn/start`, the same speed is dropped without a word.
+        if let astra = noDefault {
+            func speedHome(model: String, extra: String) -> (home: URL, work: URL) {
+                let home = scratch.appendingPathComponent("codex-open-\(UUID().uuidString.prefix(8))", isDirectory: true)
+                let work = home.appendingPathComponent("cwd", isDirectory: true)
+                try? fm.createDirectory(at: work, withIntermediateDirectories: true)
+                let config = """
+                model_provider = "fake"
+                model = "\(model)"
+                \(extra)
+
+                [model_providers.fake]
+                name = "fake"
+                base_url = "http://127.0.0.1:\(server.port)"
+                wire_api = "responses"
+                """
+                try? config.write(to: home.appendingPathComponent("config.toml"), atomically: true, encoding: .utf8)
+                return (home, URL(fileURLWithPath: CodexConfigRead.physicalPath(work.path)))
+            }
+            func opened(_ home: URL, _ method: String, _ params: [String: Any]) -> [String: Any]? {
+                let body: [String: Any] = ["jsonrpc": "2.0", "id": 2, "method": method, "params": params]
+                guard let data = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+                return appServerAnswers(codex: codex, home: home, environment: baseEnv,
+                                        requests: [String(decoding: data, as: UTF8.self)],
+                                        awaiting: [2])[2]?["result"] as? [String: Any]
+            }
+            /// One exec turn, so a thread with a rollout exists to resume.
+            func threadWithTurn(_ home: URL, _ work: URL) -> String? {
+                var env = baseEnv
+                env["CODEX_HOME"] = home.path
+                let out = run(codex, ["exec", "--json", "--skip-git-repo-check", "hi"], environment: env, cwd: work).out
+                for raw in out.split(separator: "\n") {
+                    guard let start = raw.firstIndex(of: "{"),
+                          let obj = (try? JSONSerialization.jsonObject(with: Data(raw[start...].utf8))) as? [String: Any],
+                          obj["type"] as? String == "thread.started" else { continue }
+                    return obj["thread_id"] as? String
+                }
+                return nil
+            }
+            func describe(_ answer: [String: Any]?) -> String {
+                guard let answer else { return "no answer" }
+                guard let value = answer["serviceTier"] else { return "no serviceTier field" }
+                return (value as? String) ?? "null"
+            }
+
+            let one = speedHome(model: astra, extra: "")
+            let startOne = opened(one.home, "thread/start", ["cwd": one.work.path, "serviceTier": "ultrafast",
+                                                             "approvalPolicy": "never", "sandbox": "read-only"])
+            check("a new session opened on Ultrafast for a model codex's list gives Fast alone: codex answers no speed",
+                  CodexSpeed.served(asked: "ultrafast", openAnswer: startOne) == false, describe(startOne))
+            if let thread = threadWithTurn(one.home, one.work) {
+                let resumeOne = opened(one.home, "thread/resume", ["threadId": thread, "serviceTier": "ultrafast"])
+                check("… and so does an existing session resumed on it",
+                      CodexSpeed.served(asked: "ultrafast", openAnswer: resumeOne) == false, describe(resumeOne))
+            } else {
+                check("an exec turn leaves a thread to resume", false, "(no thread.started)")
+            }
+            clear(rec)
+            var envOne = baseEnv
+            envOne["CODEX_HOME"] = one.home.path
+            let execOne = run(codex, ["exec", "--json", "--skip-git-repo-check", "-c", "service_tier=\"ultrafast\"", "hi"],
+                              environment: envOne, cwd: one.work).out
+            let warned = execOne.split(separator: "\n").compactMap { raw -> String? in
+                guard let start = raw.firstIndex(of: "{"),
+                      let obj = (try? JSONSerialization.jsonObject(with: Data(raw[start...].utf8))) as? [String: Any],
+                      obj["type"] as? String == "item.completed",
+                      let item = obj["item"] as? [String: Any], item["type"] as? String == "error" else { return nil }
+                return item["message"] as? String
+            }
+            check("`codex exec` prints codex's warning as an error item, and SipAI reads the speed it drops",
+                  warned.contains { CodexSpeed.droppedTier(warning: $0) == "ultrafast" }, "\(warned)")
+            let execSent = requests(in: rec, pathSuffix: "/responses").last
+            check("… and the request goes without it",
+                  execSent != nil && execSent?["service_tier"] == nil,
+                  "\(execSent?["service_tier"] ?? "none")")
+            try? fm.removeItem(at: one.home)
+
+            if let two = twoSpeed {
+                let both = speedHome(model: two, extra: catalogLine)
+                let startTwo = opened(both.home, "thread/start", ["cwd": both.work.path, "serviceTier": "ultrafast",
+                                                                  "approvalPolicy": "never", "sandbox": "read-only"])
+                check("a session opened on Ultrafast for a model whose list has it: codex answers Ultrafast",
+                      CodexSpeed.served(asked: "ultrafast", openAnswer: startTwo) == true, describe(startTwo))
+                if let thread = threadWithTurn(both.home, both.work) {
+                    let resumeTwo = opened(both.home, "thread/resume", ["threadId": thread, "serviceTier": "ultrafast"])
+                    check("… resumed as well", CodexSpeed.served(asked: "ultrafast", openAnswer: resumeTwo) == true,
+                          describe(resumeTwo))
+                }
+                try? fm.removeItem(at: both.home)
+            }
+        } else { note("no listed model without a default tier — the open-session cases are skipped") }
 
         server.process.terminate(); server.process.waitUntilExit()
     } else { note("the fake endpoint did not start — section skipped") }
@@ -1156,22 +1791,28 @@ check("… and off every cloud provider claude runs on",
       && composerSrc.contains("ClaudeModelCatalog.childEnvironmentFacts().provider"))
 check("the credits verdict is refreshed on appearance and when the menu opens",
       composerSrc.components(separatedBy: "caps.refreshUsageCreditsBlock()").count - 1 == 2)
-check("codex gets ONE Fast mode switch — off pins standard, on the model's Fast tier — and a model pick drops a tier it does not advertise",
-      composerSrc.contains("codexFastModeSwitch")
-      && composerSrc.contains("updated.serviceTier = turnOn ? fast?.id : CodexSpeed.standard")
+check("codex gets a switch per speed — Fast mode, then every other speed the catalog lists; on writes that speed, off pins standard — and a model pick drops a tier it does not advertise",
+      composerSrc.contains("ForEach(codexSpeedSwitches, id: \\.tier.id) { speed in")
+      && composerSrc.contains("updated.serviceTier = turnOn ? speed.tier.id : CodexSpeed.standard")
+      && composerSrc.contains("enabled: speed.enabled && !codexSpeedLocked,")
+      && composerSrc.contains("title: speed.isFast ? fastModeTitle : speed.tier.name,")
       && !composerSrc.contains("ComposerOptionRow(value: CodexSpeed.standard")
-      && composerSrc.contains("codexCaps.serviceTier(id: tier, forModel: value, folder: codexFolder) == nil"))
-check("… and it shows what the send will run: codex's own speed here until it is flipped, and says so",
-      composerSrc.contains("codexFastTier != nil && CodexSpeed.isFaster(codexEffectiveTier)")
-      && composerSrc.contains("let on = codexFastOn")
-      && composerSrc.contains("if on, codexCaps.speedPick(for: options, folder: codexFolder) == nil {")
-      && composerSrc.contains("String(localized: \"On by default in \\(agentName)\""))
-check("… and the bolt, the hover and a task made from here read the SAME switch — a tier on a model the catalog does not list lights nothing",
-      composerSrc.contains("return codexFastOn ? \"bolt.fill\" : nil")
-      && composerSrc.contains("guard codexFastOn, let tier = codexEffectiveTier else { return nil }")
-      && composerSrc.contains("effective: codexFastOn ? codexEffectiveTier : nil")
+      && composerSrc.contains("options = updated.fitted(to: modelPickOffer(forModel: value))")
+      && composerSrc.contains("? codexCaps.speedTiers(forModel: value, folder: codexFolder)?.tiers.map(\\.id) ?? []")
+      && optionsSrc.contains("if let tier = out.serviceTier, tier != CodexSpeed.standard, let listed = offer.tiers,"))
+check("… each switch reads on only for its own speed, and says when codex itself turned it on",
+      composerSrc.contains("let on = codexSpeedOn?.tier.id == speed.tier.id")
+      && composerSrc.contains("return codexSpeedSwitches.first { $0.offered && $0.tier.id == tier }")
+      && composerSrc.contains("lines: CodexSpeedWords.lines(")
+      && optionsSrc.contains("String(localized: \"On by default in \\(agentName)\""))
+check("… and the bolt, the hover and a task made from here read the SAME answer — a tier on a model the catalog does not list lights nothing",
+      composerSrc.contains("guard codexSpeedOn != nil else { return nil }")
+      && composerSrc.contains("guard let on = codexSpeedOn else { return nil }")
+      && composerSrc.contains("effective: codexSpeedOn?.tier.id)")
       && !composerSrc.contains("CodexSpeed.isFaster(codexEffectiveTier) ? \"bolt.fill\"")
       && composerSrc.components(separatedBy: "CodexSpeed.isFaster(codexEffectiveTier)").count - 1 == 1)
+check("… the hover names a speed other than Fast by codex's name for it",
+      composerSrc.contains("String(localized: \"\\(on.tier.name) is on · \\(description)\""))
 check("claude's switch says what fast mode costs in BOTH states, and every line wraps rather than being cut short",
       composerSrc.contains("lines: ClaudeFastModeWords.lines(")
       && composerSrc.contains("String(localized: \"\\(agentName) fast mode is paid only from usage credits.\"")
@@ -1185,14 +1826,21 @@ check("the composer asks codex about its folder on appearance, on a folder chang
 check("no codex speed or default-model read in the composer skips the folder",
       !composerSrc.contains("codexCaps.configuredServiceTier")
       && !composerSrc.contains("codexCaps.fastModeFeatureEnabled")
+      && !composerSrc.contains("codexCaps.configuredFastMode")
+      && !composerSrc.contains("codexCaps.configuredUltrafastMode")
       && !composerSrc.contains("codexCaps.defaultModel ")
       && !composerSrc.contains("codexCaps.defaultModel.")
       && !composerSrc.contains("codexCaps.defaultModel,")
       && composerSrc.contains("codexCaps.defaultModel(forFolder: codexFolder)"))
-check("codex's answer is asked with the folder's physical path, over the shared client",
+let updatesSrc = read("SipAI/Models/AgentCLIUpdates.swift")
+check("codex's answer is asked with the folder's physical path, over the shared client — config and requirements in one conversation",
       optionsSrc.contains("cwd: CodexConfigRead.physicalPath(folder))")
-      && read("SipAI/Models/AgentCLIUpdates.swift")
-          .contains("request(cwd: cwd, id: CodexAppServerCall.answerId)"))
+      && updatesSrc.contains("guard let line = request(cwd: cwd, id: configId)")
+      && updatesSrc.contains("requests: [line, requirementsRequest(id: requirementsId)],"))
+check("… and a folder's settings are built from both answers",
+      optionsSrc.contains("CodexSpeed.settings(fromEffectiveConfig: config,\n                                                   requirements: answer.requirements)"))
+check("… while, before codex has answered, the binary's own feature list says whether it gates its speeds apart",
+      optionsSrc.contains("independent: featureNames?.contains(\"ultrafast_mode\") == true)"))
 check("a moved config file or a new binary asks again for the folder on screen",
       optionsSrc.components(separatedBy: "speedSettingsMayHaveMoved()").count - 1 == 3)
 check("a Default pick's model is the folder's, for the tiers as for the chip",
@@ -1201,10 +1849,11 @@ check("a Default pick's model is the folder's, for the tiers as for the chip",
 check("the pick is persisted in both maps",
       configSrc.components(separatedBy: "prefs[\"service_tier\"] = tier").count - 1 == 2
       && configSrc.components(separatedBy: "serviceTier: field(\"service_tier\")").count - 1 == 2)
-check("a scheduled run launches with the TASK's speed, through the one builder, and resolves nothing itself",
+check("a scheduled run launches with the TASK's speed, Non-stop and Chat only, through the one builder, and resolves nothing itself",
       schedulerSrc.contains("AgentLaunchOptions.scheduledRun(")
       && schedulerSrc.contains("effort: def.effort, fastMode: def.fastMode,")
-      && schedulerSrc.contains("serviceTier: def.serviceTier)")
+      && schedulerSrc.contains("serviceTier: def.serviceTier, nonStop: def.nonStop,")
+      && schedulerSrc.contains("chatOnly: def.chatOnly)")
       && !schedulerSrc.contains("codexServiceTierOverride")
       && !schedulerSrc.contains("var options = AgentLaunchOptions()"))
 check("a session with no saved picks is seeded through the rule — a standard record cannot switch it off",
@@ -1218,11 +1867,12 @@ check("the task file owns fast_mode and service_tier, read and written",
       && taskFileSrc.contains("case \"fast_mode\":   def.fastMode = isTrue(value)")
       && taskFileSrc.contains("if fastMode { fields.append(\"fast_mode: true\") }")
       && taskFileSrc.contains("fields.append(\"service_tier: \\(tier)\")"))
-check("the task card offers claude's switch on the task's model and codex's in the task's folder — the same one switch",
+check("the task card offers claude's switch on the task's model and codex's switches in the task's folder — the composer's own",
       panelSrc.contains("let supported = claudeTaskTakesFastMode(model: draft.model)")
       && panelSrc.contains("lines: ClaudeFastModeWords.lines(")
-      && panelSrc.contains("codexCatalog.fastTier(forModel: draft.model, folder: folder)")
-      && panelSrc.contains("draft.serviceTier = turnOn ? fast?.id : CodexSpeed.standard")
+      && panelSrc.contains("ForEach(codexCatalog.speedSwitches(forModel: draft.model, folder: folder),")
+      && panelSrc.contains("draft.serviceTier = turnOn ? speed.tier.id : CodexSpeed.standard")
+      && panelSrc.contains("lines: CodexSpeedWords.lines(speed, on: on,")
       && panelSrc.contains("codexCatalog.scheduledServiceTier(pick: draft.serviceTier,")
       && !panelSrc.contains("Picker(\"\", selection: optionalBinding($draft.serviceTier))"))
 check("… and the card's summary names a codex speed only where the checkbox offers one — never a raw tier id",
@@ -1237,7 +1887,7 @@ check("… and a model pick drops a speed the new model cannot take",
       panelSrc.contains("!claudeTaskTakesFastMode(model: draft.model) {\n                    draft.fastMode = false")
       && panelSrc.contains("folder: Self.runFolder(draft)) == nil {\n                    draft.serviceTier = nil"))
 check("a task made from the composer takes its speed, like its model and effort — as the switch shows it",
-      composerSrc.contains("fastMode: !isCodex && !isKimi && options.fastMode")
+      composerSrc.contains("fastMode: isClaude && options.fastMode")
       && composerSrc.contains("serviceTier: isCodex ? codexTaskSpeedPick : nil")
       && composerSrc.contains("CodexSpeed.carriedToTask(pick: codexCaps.speedPick(for: options, folder: codexFolder),"))
 check("the fast-mode and credits sentences are spelled once, and the usage window reads them",
@@ -1258,6 +1908,59 @@ check("the send's override knows whether the speed was picked",
 // ─────────────────────────────────────────────────────────── summary
 
 try? fm.removeItem(at: scratch)
+// Codex keeps a thread's speed (`CodexKeptSpeed`): the switches are greyed
+// and say why once the session has a saved speed, and every way a session
+// continues keeps that speed.
+let forkSrc = read("SipAI/Models/CodexSessionFork.swift")
+check("the composer greys codex's speed switches where codex keeps the session's speed",
+      composerSrc.contains("enabled: speed.enabled && !codexSpeedLocked"))
+check("…shows the speed the session runs at, not the pick",
+      composerSrc.contains("if codexSpeedLocked, let saved = codexSessionSpeed {\n            return CodexKeptSpeed.runningTier(saved)"))
+check("…and says why under them, in the mode chip's own words",
+      composerSrc.contains("CodexSpeedWords.keptNote(started: codexSpeedLocked,\n                                                        mode: selectedModeTitle"))
+check("the page hands the composer the session's saved speed, none for a draft before its first send",
+      viewSrc.contains("codexSessionSpeed: isDraftBeforeFirstSend ? nil : codexSavedSpeed,"))
+check("the saved speed rides the runner's context feed and is read when the session opens",
+      viewSrc.contains(".combineLatest(runner.$lastContextWindow, runner.$codexSavedSpeed)")
+        && viewSrc.contains("case let read = Self.codexSavedSpeed(of: url), read != .unknown"))
+check("the runner knows a new exec thread's speed from its first send",
+      runnerSrc.contains("codexSavedSpeed = .tier(pinned)"))
+check("a branch is forked at its parent's saved speed",
+      forkSrc.contains("serviceTier: keepsSpeed ? CodexKeptSpeed.forkTier(parentSpeed) : nil")
+        && viewSrc.contains("keepsSpeed: CodexKeptSpeed.keeps("))
+check("a first-message edit starts its new session at that speed too",
+      viewSrc.contains("let tier = CodexKeptSpeed.forkTier(codexSavedSpeed) {\n            draft.sentOptions?.serviceTier = tier"))
+
+// Codex's saved list speaks while it is signed in with ChatGPT, and codex
+// says, opening each message's session, whether it can run the speed asked.
+let driverSrc = read("SipAI/Models/CodexAppServerTurn.swift")
+let appSrc = read("SipAI/SipAIApp.swift")
+check("a model's speeds and its default effort go through one rule over the saved list and codex's answer",
+      optionsSrc.contains("return Self.preferred(saved: entry?.inSavedList == true ? tiers : nil,")
+        && optionsSrc.contains("return Self.preferred(saved: entry?.inSavedList == true ? entry?.defaultEffort : nil,")
+        && !optionsSrc.contains("if let listed = listedTiers[slug] { return listed }"))
+check("the app tells the catalog whether codex is signed in with ChatGPT",
+      appSrc.contains("CodexCatalog.chatGPTSignIn = { UsageMonitor.shared.accounts[\"codex\"]?.isPlan == true }"))
+check("the driver names the message's speed opening the session, new and resumed",
+      driverSrc.contains("permissions: permissions,\n                                                                  serviceTier: speedPin))")
+        && driverSrc.contains("threadStartParams(cwd: cwd, stating: fixed,\n                                                                             serviceTier: speedPin))"))
+check("… never on the turnless thread that asks codex for the folder's defaults",
+      driverSrc.contains("\"thread/start\", params: CodexAppServer.threadStartParams(cwd: cwd))"))
+check("… and hands codex's answer to the runner",
+      driverSrc.contains("let served = CodexSpeed.served(asked: pin, openAnswer: opened)")
+        && driverSrc.contains("host.noteSpeed(asked: pin, served: served)"))
+check("the runner starts each message's report afresh, takes the driver's answer and codex exec's warning",
+      runnerSrc.contains("? .asking(options.codexServiceTierOverride) : CodexSpeedReport())")
+        && runnerSrc.contains("runner.setCodexSpeedReport(CodexSpeedReport(asked: CodexSpeed.normalized(asked),")
+        && runnerSrc.contains("if let dropped = CodexSpeed.droppedTier(warning: notice),"))
+check("the page mirrors the runner's report and hands it to the composer",
+      viewSrc.contains("runner.$codexSpeedReport") && viewSrc.contains("codexSpeedReport: liveCodexSpeedReport,"))
+check("opening the model menu re-reads the list codex last saved, which any codex run may have rewritten",
+      composerSrc.contains("if isCodex {\n                codexCaps.ensureLoaded()\n                codexCaps.refreshSpeedSettings(forFolder: codexFolder, force: true)"))
+check("the chip strikes the bolt through and the switch says why when codex dropped the speed",
+      composerSrc.contains("return codexSpeedDropped ? \"bolt.slash.fill\" : \"bolt.fill\"")
+        && composerSrc.contains("dropped: codexSpeedReport.drops(speed.tier.id)),"))
+
 print("\n\(checks - failures)/\(checks) checks passed")
 if failures > 0 {
     print("\(failures) FAILED")

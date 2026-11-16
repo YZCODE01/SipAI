@@ -12,6 +12,398 @@ GitHub release body, and — once that window exists — the "what's new"
 panel shown after updating. Write each entry for the person reading it
 inside the app, not for someone reading a diff.
 
+## [1.0.5] — 2026-11-15
+
+**Highlights.** Agents can now ask you things. Claude Code's questions,
+plans and permissions, Codex's and Kimi Code's own approvals, plans and
+questions, and an MCP server's forms and links all arrive as cards you
+can answer from the keyboard, and the mode chip's **Default** now means
+each tool's own default setting. Skills get a Settings page and a chip
+under the message box. You can edit an earlier message in place, send a
+message while a turn runs, run your own `!` commands, and fold
+everything an agent did into one line per answer with Compact view.
+Settings gains Usage, Privacy and Agent Skills, the View menu gains
+Zoom, Codex gains its Ultrafast speed and gets its older sessions back,
+and a turn that fails now says so — on a scheduled run too.
+
+### Added
+
+- **Questions on a card.** When Claude Code stops to ask you something
+  in the middle of a turn — its multiple-choice questions, most often
+  while planning — the question now appears at the end of the
+  conversation as a card: each question with its options (one, or
+  several where it says so), a field for an answer in your own words,
+  and **Submit**, **Skip** or **Chat about this**. Several questions
+  show one at a time. From the keyboard it works the way Claude Code's
+  terminal does: ↑ and ↓ walk the options, ← and → turn the page, and
+  Return takes what the keyboard is on. Like an approval, a question
+  posts a notification when you are looking elsewhere and marks its
+  session in the sidebar. Before, SipAI declined these questions and
+  asked the agent to put them in its reply.
+- **Non-stop**, a switch at the bottom of the mode menu. Off — the
+  default — a question waits for your answer. On, the agent chooses what
+  it judges best, says what it chose, and carries on to the end. It
+  answers questions only: in a mode that asks before it acts, an
+  approval card still waits for you. Nothing turns it on but you — a
+  scheduled task runs Non-stop only when its own **Non-stop** box is
+  ticked.
+- **Codex and Kimi Code stop to ask, too.** On Codex (0.159.3 or newer),
+  **Default** and the new **Plan** mode run through the front end
+  Codex's own app uses, so Codex's requests arrive as cards in the words
+  its terminal uses — "Would you like to run the following command?",
+  with the whole command — answered with Codex's own answers. In Plan,
+  Codex explores, asks you questions and ends with a plan; **Implement
+  this plan?** then names the mode to carry it out in. On Kimi Code
+  (2.1.1 or newer) the mode chip offers Kimi's own modes — **Default**,
+  **Ask When Needed**, **Plan** and **Never Ask** — and a tool request,
+  a finished plan or a question becomes a card with Kimi's own answers
+  (**Approve once**, **Approve for this session**, **Reject**; a plan
+  approval names the mode the session continues in). In Default and
+  Kimi's asking modes Kimi answers its own slash commands (`/status`,
+  `/usage`, `/help`, `/compact`) itself.
+- **An MCP server's own questions.** A server you added to an agent can
+  pause one of its tools to ask you for something — a short form, a yes
+  or a no, or a link to open in your browser, to sign in somewhere for
+  example. SipAI now shows it on a card named after the server: a form
+  with one field per page (up to 8 fields, and 12 choices in each), a
+  link shown whole exactly as it would open, or **Allow** and **Deny**.
+  This works for Claude Code (2.1.288 or newer) and for Codex on Default
+  and Plan, where Codex's own approval of an MCP tool arrives the same
+  way: **Allow**, **Allow for this session**, **Always allow** or
+  **Cancel**. Before, every such request was cancelled or declined
+  without you seeing it.
+- **Questions Codex asks without stopping.** With the models Codex marks
+  for it, Codex can ask a question and keep working. The question
+  arrives on a card that says so; your answer reaches Codex in the turn
+  that asked and shows in the conversation as your reply. If the turn
+  ends first, whatever you had started to answer moves into the message
+  box under its question, ready to send — as Codex's own terminal does.
+- **Skills.** **Settings → Agent Skills** lists each agent's skills
+  under that agent — its own for every folder, the chosen folder's,
+  those of the folders below it, its plugins' and its built-in ones —
+  and each skill's **…** menu switches it **On**, **Only when I call
+  it** or **Off**, pins it so new sessions start with it, edits it,
+  shares it with another agent, or deletes it from that agent alone.
+  **Share With** keeps one copy in SipAI's own library and links it into
+  each agent's skills folder, so an edit reaches every agent that has
+  it; because the three tools read a `SKILL.md` differently, it first
+  fixes what the new agent would skip the skill over, or says what it
+  can't fix and shares nothing. A skill an agent has but doesn't load is
+  marked **Not loaded**, with the reason, and offers a fix where SipAI
+  can make one. **New Skill** writes one; **Add…** brings one in from a
+  folder or an archive. Under an agent session's message box, the new
+  **skill chip** — a small robot — preloads the skills you tick: each
+  loads once, with your next message, stays in the conversation, and is
+  sent again after the conversation is summarised where the tool doesn't
+  keep it by itself. A message that loaded skills names them under your
+  text. A scheduled task can list skills for every run to load.
+- **Edit an earlier message in place.** The pencil on a message you sent
+  now offers **Send** beside **Create Branch**. Send goes back to that
+  message in the same session — the message and everything after it
+  leave the conversation and your edit takes their place — the way each
+  tool's own terminal does it (Claude Code's rewind, Codex's revert,
+  Kimi Code's undo). In a chat, Send replaces the message and the
+  replies after it. A session rewound in the tool's own terminal is read
+  the same way now: SipAI shows the conversation the agent continues
+  from. Like a branch, this rewinds the conversation, not the files the
+  agent already wrote.
+- **Send while a turn runs.** A message you send while an agent works
+  now waits above the message box and goes when the turn ends.
+  **Steer**, beside it, hands it to the running turn instead — the agent
+  reads it at its next step (Claude Code 2.1.310 or newer, and Codex;
+  Kimi Code takes none mid-turn). × puts a waiting message back in the
+  box, with its files, so you can change it; after Stop nothing is sent
+  by itself.
+- **Background tasks are waited for, and named.** When an agent starts a
+  long command in the background and answers before it finishes, the
+  turn now stays open until the task ends and the agent has reported on
+  it. A line under the answer names what the agent is waiting for, a
+  short notice says when a task finished or was stopped — the same after
+  a reopen — and with Claude Code 2.1.310 or newer, or Codex, each task
+  has a Stop of its own. Claude Code's background tasks, switched off
+  since 1.0.2, are back on wherever the installed Claude Code (2.1.309
+  or newer) waits for them itself.
+- **`!` commands.** A line that starts with `!` in a Claude Code
+  (2.1.310 or newer) or Codex (0.165.0 or newer) session is your own
+  shell command, run the way that tool's terminal runs one — directly,
+  with no model, no approval and no sandbox — and its output joins the
+  conversation. In a Claude Code session it runs in your own shell, with
+  your aliases, in the folder the last one ended in. This is also how
+  each tool's cloud commands work here, as in its own terminal (`!codex
+  cloud list`, for example). Kimi Code offers apps no way to run one, so
+  a Kimi session sends the line as an ordinary message, and the composer
+  says so before you send.
+- **Codex's `/compact` and `/review`** run as they do in Codex's own
+  terminal. `/review` opens Codex's review picker: a base branch,
+  uncommitted changes, a commit, or your own instructions.
+- **Compact view, for reading the answers rather than the work.** A new
+  icon in the toolbar, beside the magnifier, opens its switch (also in
+  Settings → Display, and View → Agent Session Compact View, ⌃⌘O). With
+  it on, each of the agent's answers is one line with its final message
+  under it. The line holds everything between your message and that
+  final message — thinking, tool calls, messages written along the way,
+  answered questions, a reviewed plan, a background task reporting back
+  — and shows the newest of them while the agent works, then a summary
+  of what it did; a click opens it into its steps. A card still appears
+  while it waits for you. Only the drawing changes.
+- **View → Zoom In, Zoom Out and Actual Size** (⌘+, ⌘−, ⌘0) step through
+  the four text sizes from anywhere. Settings → Display → **Zoom** — the
+  setting that was Font Size — shows the same choice. A conversation, a
+  chat or a note's preview keeps the line you were reading in place when
+  the size changes.
+- **Settings → Usage.** What each agent's plan reports, with more room
+  than the toolbar's plan-usage window, whose new **Learn more** opens
+  it: Claude Code's own account of what is using your limits, as a
+  table; Codex's credits, workspace spend cap, limit resets, its
+  lifetime figures and a year of token activity, a square a day; Kimi
+  Code's limits and Extra Usage; and a link to each tool's own usage
+  page. A free Codex limit reset can be used there, after Codex's own
+  confirmation. An agent on an API key gets a line saying where it is
+  billed. No tokens are spent.
+- **Settings → Privacy** says in three short paragraphs what SipAI keeps
+  and sends: it collects no data, what you send to a model goes straight
+  to that provider, and apart from your providers it goes online only
+  for the update checks, which you can turn off.
+- **Codex's Ultrafast speed.** The model menu has a switch for each of
+  Codex's speeds — **Fast mode**, and **Ultrafast** where Codex offers
+  it to your account — each described in Codex's own words, and greyed
+  out on a model without it or where your Codex config or your
+  organization turns it off. Scheduled Codex tasks get the same boxes.
+  When Codex can't use the picked speed for a message, the bolt on the
+  chip is struck through and the switch says why.
+- **Attached files show as chips in agent sessions.** **+** and a drop
+  on the box now put a chip above the text, as on the chat page, in
+  every mode — instead of typing the file's path into your message — and
+  the sent message names each file with a paperclip. Outside Chat only
+  the file stays where it is, and the agent opens it itself.
+- **Links to files in a reply.** A reply's link to a file on your Mac —
+  Codex writes one for every file it mentions — used to show only its
+  words. It now shows the file's path after them; a click opens a
+  document in its usual app, and opens a folder in Finder. A file that
+  isn't there is greyed out.
+- **Notices beside the logo.** The SipAI name at the top of the sidebar
+  gives way to a sky-blue bubble when something is worth saying: a
+  session waiting for you (ten seconds), a finished or failed run, or a
+  chat's reply (five), a tool that was just updated. Click one to open
+  what it names. An update on offer — SipAI's or a tool's — stands there
+  with an update button and a × until you use one of them, and a SipAI
+  update held for a running turn shows **Install Now**. Settings →
+  Display → **Show notifications beside the logo** turns them all off.
+- **More in the sidebar's menus.** **Notes**, **Chats** and **Chat
+  groups** have a … menu whose **Hide** takes the section off the
+  sidebar; Settings → Display → **Show sections** brings it back, in its
+  place. A folder or custom group's header has a … menu — **Mark all as
+  read**, **Delete all sessions** for a folder, and **Rename**,
+  **Ungroup** and **Delete the group** for a custom group, each asking
+  first — **Ungrouped** has a **+** of its own, and a scheduled task's
+  menu has **Mark all as read** for its runs.
+- **A new session waits under its +.** A new session you haven't sent
+  yet — its message, files, schedule, skills and the chips you changed —
+  is kept under the **+** you started it from, so each group's **+**,
+  and **+ New session**, has its own. A group's **+** starts on the
+  mode, model, effort and speed of that group's newest session.
+- **Scheduled tasks: mode, Non-stop, Chat only and skills.** A task's
+  **Runs as** row now offers the composer's own Model, Effort and Mode
+  menus — each tool's asking modes and Chat only included — with
+  **Non-stop** and the speed boxes under them, and a run does exactly
+  what its task says. A task created from the composer keeps the
+  composer's mode as it stands.
+- **Kimi Code plans.** The Agent Initialization card and the usage card
+  name your membership as Kimi does. Signing in with a Moonshot platform
+  key now asks which model to start on, from Kimi's own list. And when
+  Moonshot refuses a model for your plan, its row in the model menu says
+  "Your plan doesn't include this model" from then on, for that account
+  — still pickable, since plans change. (That note is read off Kimi
+  Code's own record of the turn; Kimi Code 2.6.1 no longer keeps the
+  model there, so no note appears with it yet.)
+- **Delete for a tool that isn't signed in.** Settings → Agent
+  Initialization offers **Delete** on an installed tool whether it is
+  signed in or not.
+- **Edit and Copy for VoiceOver.** A message you sent offers **Edit this
+  message** and **Copy this message** among its actions.
+- **Settings → Help** gained eleven answers: Compact view, background
+  tasks, sending while the agent works, which of Codex's own commands
+  work here, how cloud sessions work, an MCP server asking for your
+  input, why Codex sometimes asks a question as plain text, Claude
+  Code's "Prompt is too long", sharing a skill, the skill chip, and
+  hiding a sidebar section or clearing a whole group.
+
+### Changed
+
+- **Default means the tool's own default.** The mode chip's **Default**
+  is now each tool's own default setting — Claude Code's from its
+  settings, Codex's own default for the folder, the default mode in Kimi
+  Code's config. A Codex session on Default therefore stops for approval
+  where Codex's own app would, and a model, effort or speed left on
+  Default means what the tool itself would run in that folder.
+- **Kimi Code's Auto-approve is now Never Ask**, Kimi's own name for it.
+  It remains what a Kimi task with no mode in its file runs as.
+- **The approval card is answered from the keyboard the way Claude
+  Code's terminal is.** The filled button is the one Return presses, the
+  arrow keys move it, and Escape denies — only for the newest card, and
+  only while nothing is being typed, so a Return meant for a message can
+  never approve a command.
+- **Allow Always remembers Claude Code's own rule.** It now hands back
+  the rule Claude Code itself suggests for the call — the exact command,
+  a family such as `git commit *`, a folder to work in, or "accept every
+  edit" — shown on a line under the command, where it used to remember
+  that one exact call. A rule for the folder holds for every later
+  session there.
+- **The plan card offers what Claude Code's terminal offers, in its
+  words** — **Yes, and use auto mode**, **Yes, auto-accept edits**,
+  **Yes, manually approve edits**, **No, keep planning** — with a line
+  for what to change: type it and Claude Code revises the plan in the
+  same turn.
+- **The turn clock holds still while a card waits for you** — a
+  permission, a plan, a question — and the time a turn took counts only
+  its working time. A card now waits about a day for you, where Claude
+  Code used to give up on one after 30 minutes.
+- **Codex's Read Only, Workspace Write and Full Access** run through
+  Codex's own front end too (Codex 0.159.3 or newer): any message can
+  change the speed, a command left running in the background keeps the
+  turn open, and Stop is Codex's own interrupt. Chat only still runs as
+  before and keeps the speed the session started at; its switches say
+  so.
+- **Settings, regrouped.** Chat models and Chat Prompt and Roles are one
+  section, **Chat Settings**. Agent Guide is now **Agent
+  Initialization**. What SipAI does with your data is said once, in
+  Privacy, instead of in several places.
+- **Chat only.** A Chat only answer draws as one line with its final
+  message under it, whether Compact view is on or off, and a scheduled
+  task can run Chat only.
+- **Grouped by Custom, the section's first row is + New group**, and a
+  session starts from its group's **+**. A group header's … menu
+  replaces its right-click menu.
+- **One Show earlier, always at the top**, however long a turn runs —
+  and the page holds still while you scroll up to read during a
+  streaming turn.
+- **Tool rows say what ran, for Codex and Kimi Code.** A Codex edit row
+  shows each file with its diff; a reopened Codex session shows the
+  commands and edits Codex recorded instead of its internal scripts; a
+  Kimi Code read, edit or write row names its file, and a failed Kimi
+  tool is marked while the turn runs.
+- **Chats with Claude models stream**, and a reply is capped at the
+  model's own published maximum rather than a fixed 16,384 tokens.
+  Requests to Anthropic now carry its API version `2026-10-21`.
+- **Kimi Code key sign-in offers the Moonshot platform key only.** A key
+  from the Kimi Code Console belongs to the membership, so the sheet
+  points its owner to the membership sign-in, as Kimi Code's own login
+  does.
+- **The first-launch welcome page** uses the system's own text sizes,
+  symbols and button, in a window sized to the screen.
+- **Links show the pointing hand**, link buttons and links inside text
+  alike.
+- **Bundled components.** Sparkle moves to 2.9.6 (see Security). SipAI
+  now includes the decoder of Zstandard 1.5.7, under its BSD licence, to
+  read Codex's compressed sessions; About SipAI and the licence file
+  name it.
+
+### Fixed
+
+- **Chats with current Claude models failed whenever the model thought
+  first** ("Decode error: Anthropic: missing content[0].text"), and so
+  did notes written with them. A reply is now read by its text, wherever
+  the thinking sits.
+- **A turn that fails now ends as failed, on all three agents.** An API
+  error, a refused connection or a limit used to end a turn looking
+  finished, and a scheduled run was recorded as done under its own
+  error. The task's page now says the run failed, in the tool's words.
+  While Claude Code or Codex retries a dropped connection, one row under
+  "Sipping…" shows the attempt (Kimi Code's too, up to Kimi Code 2.5),
+  and a Kimi Code turn that fails with no internet no longer ends with
+  nothing on screen.
+- **"Prompt is too long" near the end of a long Claude Code session.**
+  When a project file such as CLAUDE.md had changed since your last
+  message, Claude Code could refuse the next message instead of making
+  room first. SipAI now sends it once more, and Claude Code compacts the
+  conversation and answers.
+- **Coming back to a session while its turn runs** showed the page
+  starting at the new question, with every earlier turn missing.
+- **Long Claude Code sessions reopened with almost none of their
+  history**, and with the mode chip on Default, once Claude Code
+  (2.1.300 or newer) began recording each request in the session file.
+- **Codex sessions older than about a week had left the sidebar.** Codex
+  now stores a session left alone for a while compressed; SipAI reads
+  those — in the list, in search, as a task's runs and as a branch's
+  history.
+- **Codex 0.164 and newer kept a session's first speed**, whatever the
+  Fast mode switch said afterwards, and a branch took the speed in your
+  Codex config instead of its parent's. Each message's speed is its own
+  again (Chat only excepted, and it says so), and a branch keeps its
+  parent's.
+- **The Kimi Code usage card was empty** on Kimi Code 2.x, whose usage
+  answer changed shape. It shows the 5-hour and monthly limits (a weekly
+  one on older plans) and Extra Usage.
+- **Kimi Code 2.6.1: a new session's first Chat only message failed.**
+- **A Kimi Code session open elsewhere.** While Kimi Code's own
+  terminal, desktop app or an editor has a session open (Kimi Code 2.3
+  or newer), a message sent from SipAI is no longer started beside it;
+  the conversation says which Kimi has the session.
+- **Kimi Code's local server could hang for good when it was stopped**,
+  after which signing in, reading usage and a new session's first Chat
+  only message all answered "busy" until SipAI was relaunched.
+- **A tool that an update left unable to start** was announced as
+  updated — with a version that was not its own — and its usage card
+  said only that the tool did not answer. Its row in Settings → Updates
+  now says **Can’t start**, and **Details** shows what the tool printed,
+  which usually says how to fix it.
+- **A tool SipAI was updating could vanish from the sidebar** when a
+  slow download ran past fifteen minutes. SipAI now waits for an update
+  that has already taken the old version away, however long it takes.
+  And when Claude Code stops its own update download at its 10-minute
+  limit, the failed update says so.
+- **The composer's chips could be saved as your pick when you never
+  picked them** — for the session and as the starting choice for new
+  ones — when two of SipAI's own updates of the chips landed together.
+- **Editing a session's first message** started a new session that then
+  fell back to the agent's latest mode, model and effort; it keeps the
+  session's own.
+- **Kimi Code: Create Branch below a first message of attached files
+  alone** started a new session instead of a branch, and **a Chat only
+  turn sent as files alone** lost its one-line look once the session was
+  reopened.
+- **A sidebar section that isn't shown for now** — an agent signed out
+  or hidden — keeps its place when you drag the others.
+- **Two agents' custom groups with the same name**: deleting, ungrouping
+  or renaming one no longer reaches the other's.
+- **The … button on a row** fills under the pointer and opens its menu
+  wherever you click in its box; it used to answer only on the dots
+  themselves.
+- **The pencil and copy buttons on a message you sent could vanish**
+  while macOS reported the pointer hidden — for hours at a time on a Mac
+  used over Screen Sharing.
+- **Settings → Display → Appearance: choosing System after Light or
+  Dark** did nothing until you clicked elsewhere. Light and Dark also
+  reach every window now — alerts, file panels, menus and the update
+  window, not only the main one.
+- **The error row's text** was drawn smaller than its icon.
+- **A link to a file whose path holds a parenthesis** no longer garbles
+  its line.
+
+### Security
+
+- **Requests to a chat provider are no longer kept in macOS's web
+  cache.** macOS could keep a copy of a request — your API key in its
+  header, a chat's messages in its body — in the cache it holds for
+  every app, where deleting the chat, a factory reset or a key given as
+  an environment variable never reached. Provider requests now bypass
+  that cache, SipAI deletes the cache each time it starts, and Factory
+  reset empties it.
+- **Sparkle 2.9.6.** The update framework moves to its security release,
+  which hardens how the installer handles a downloaded update.
+- **A link to a file never runs anything.** A click opens documents
+  only; an app, a script, an installer or a disk image is shown in
+  Finder instead.
+- **An MCP server's link is opened only when it is an `https` address
+  SipAI can show exactly as it will open**; any other is shown with
+  Decline alone.
+- **A skill archive is checked before it is used**: one that holds a
+  link pointing outside itself, or that unpacks past its size limit, is
+  refused. Add skills only from sources you trust — a skill can include
+  scripts an agent may run.
+- **Usage and billing pages** open only on each tool's own site, over
+  `https`.
+
 ## [1.0.4] — 2026-09-28
 
 **Highlights.** Chat only talks to the model you're subscribed to inside

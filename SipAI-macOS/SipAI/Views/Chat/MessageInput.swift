@@ -162,6 +162,12 @@ final class DropForwardingTextView: NSTextView {
     /// Reports a file drag entering and leaving, for the host's highlight.
     var onDropTargeted: ((Bool) -> Void)?
 
+    /// Whether this box gives a waiting card the arrow keys and Return
+    /// while it is empty (`ApprovalCardKeys`). Only the agent composer
+    /// sets it: that is the box a session's cards are drawn above, and in
+    /// an empty one those keys do nothing else.
+    var yieldsCardKeys = false
+
     // MARK: Session-id tokens
 
     /// The ids this box draws on a grey token (`SessionIdTokens`): every
@@ -273,9 +279,9 @@ final class DropForwardingTextView: NSTextView {
     /// that to get a subclass in drifts from it — measured, seven
     /// properties out, the text container's size among them. Build the
     /// stock stack and swap ONLY the document view, inheriting the
-    /// configuration AppKit just made. Shared by the chat cards'
-    /// `MultilineTextField` and the agent composer's `GrowingTextField`,
-    /// which forwards drops only while its host says so (Chat only).
+    /// configuration AppKit just made. Shared by `MultilineTextField`
+    /// (the chat card, the inline editors) and the agent composer's
+    /// `GrowingTextField`.
     static func makeForwardingScrollView() -> NSScrollView {
         let scroll = NSTextView.scrollableTextView()
         guard let stock = scroll.documentView as? NSTextView,
@@ -350,28 +356,45 @@ final class DropForwardingTextView: NSTextView {
     }
 }
 
+extension DropForwardingTextView: CardKeyYielding {}
+
 // MARK: - Attachment chips
 
 /// The files staged for the next message, drawn above the composer's
-/// text field. Each chip names the file, its size and what it will
-/// become, and carries the only control that removes it.
+/// text field — the chat page's and an agent session's alike. Each chip
+/// names the file, its size and what it will become, and carries the
+/// only control that removes it.
 ///
 /// A chip is the RECEIPT for an attach. Before this row existed the
 /// only feedback was a dismissible banner, so picking a file and seeing
 /// nothing change was indistinguishable from the button not working.
 struct AttachmentChipRow: View {
-    let attachments: [ChatAttachment]
+    let items: [AttachmentChipItem]
     let onRemove: (UUID) -> Void
     /// `SipFont.ratio` of the card's tier scale: the strip's pinned
     /// height bounds chips whose text is tier-scaled, so it grows with
     /// them or clips them.
     var frameRatio: CGFloat = 1
 
+    init(items: [AttachmentChipItem], onRemove: @escaping (UUID) -> Void,
+         frameRatio: CGFloat = 1) {
+        self.items = items
+        self.onRemove = onRemove
+        self.frameRatio = frameRatio
+    }
+
+    /// The chat page's files.
+    init(attachments: [ChatAttachment], onRemove: @escaping (UUID) -> Void,
+         frameRatio: CGFloat = 1) {
+        self.init(items: attachments.map(\.chipItem), onRemove: onRemove,
+                  frameRatio: frameRatio)
+    }
+
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
-                ForEach(attachments) { attachment in
-                    AttachmentChip(attachment: attachment) { onRemove(attachment.id) }
+                ForEach(items) { item in
+                    AttachmentChip(item: item, frameRatio: frameRatio) { onRemove(item.id) }
                 }
             }
             .padding(.vertical, 1)
@@ -383,55 +406,34 @@ struct AttachmentChipRow: View {
 }
 
 private struct AttachmentChip: View {
-    let attachment: ChatAttachment
+    let item: AttachmentChipItem
+    /// The frames below bound tier-scaled text, so they scale with it.
+    let frameRatio: CGFloat
     let onRemove: () -> Void
 
     @State private var hovering = false
 
-    private var icon: String {
-        switch attachment.kind {
-        case .image: return "photo"
-        case .pdf: return "doc.richtext"
-        case .text: return "doc.plaintext"
-        }
-    }
-
-    /// The hover title states what the model will actually receive.
-    /// The distinction is invisible otherwise and it decides whether a
-    /// later turn still knows about the file.
-    private var hint: String {
-        switch attachment.kind {
-        case .image:
-            return String(localized: "\(attachment.name) — \(attachment.sizeLabel), sent as an image with this message",
-                          comment: "Tooltip for an attached image chip")
-        case .pdf:
-            return String(localized: "\(attachment.name) — \(attachment.sizeLabel), sent as a document with this message",
-                          comment: "Tooltip for an attached PDF chip")
-        case .text:
-            return String(localized: "\(attachment.name) — \(attachment.sizeLabel), its text is included in the message",
-                          comment: "Tooltip for an attached text file chip")
-        }
-    }
-
     var body: some View {
         HStack(spacing: 5) {
-            Image(systemName: icon)
+            Image(systemName: item.icon)
                 .sipFont(11)
                 .foregroundColor(SipDesign.textSecondary)
-            Text(verbatim: attachment.name)
+            Text(verbatim: item.name)
                 .sipFont(11)
                 .foregroundColor(SipDesign.textPrimary)
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .frame(maxWidth: 160, alignment: .leading)
-            Text(verbatim: attachment.sizeLabel)
-                .sipFont(10)
-                .foregroundColor(SipDesign.textHint)
+                .frame(maxWidth: 160 * frameRatio, alignment: .leading)
+            if let detail = item.detail {
+                Text(verbatim: detail)
+                    .sipFont(10)
+                    .foregroundColor(SipDesign.textHint)
+            }
             Button(action: onRemove) {
                 Image(systemName: "xmark")
                     .sipFont(9, weight: .bold)
                     .foregroundColor(hovering ? SipDesign.textPrimary : SipDesign.textHint)
-                    .frame(width: 14, height: 14)
+                    .frame(width: 14 * frameRatio, height: 14 * frameRatio)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -449,6 +451,6 @@ private struct AttachmentChip: View {
                 )
         )
         .onHover { hovering = $0 }
-        .help(hint)
+        .help(item.hint)
     }
 }

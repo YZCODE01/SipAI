@@ -423,11 +423,12 @@ let customTiered = AgentSessionGrouping.buckets(
     customGroups: ["Alpha", "Beta", "Gamma", "Empty"],
     assignments: ["run-early": "Gamma", "done-late": "Alpha", "unread-old": "Beta"],
     now: now)
-check("Custom: running, then unread, then the rest — a named group with nothing dated last",
-      customTiered.map(\.key) == ["Gamma", "Beta", "Alpha", "Empty"],
+check("Custom: running, then unread, then the rest — a named group with nothing dated, then an empty Ungrouped, last",
+      customTiered.map(\.key) == ["Gamma", "Beta", "Alpha", "Empty",
+                                    AgentSessionGrouping.ungroupedKey],
       "— got \(customTiered.map(\.key))")
 check("a group carries its best tier, taken over every row",
-      customTiered.map(\.tier) == [.running, .unread, .rest, .rest])
+      customTiered.map(\.tier) == [.running, .unread, .rest, .rest, .rest])
 let twoRunning = AgentSessionGrouping.buckets(
     tieredStream([.regular(session("x-run", 50, folder: "/tmp/x")),
                   .regular(session("x-idle", 1, folder: "/tmp/x")),
@@ -711,7 +712,7 @@ check("ContentView tells both managers what is open, from launch on",
 
 let endTurnSrc = body(of: "endTurn(", in: chatManager)
 check("a chat reply is marked unread only when a live turn really ended here",
-      precedes("guard liveTurns.removeValue(forKey: key) != nil else { return }",
+      precedes("guard let turn = liveTurns.removeValue(forKey: key) else { return }",
                "config?.markChatUnread(key: key)", in: endTurnSrc),
       "— a deleted or moved chat's turn is torn down first, and must leave nothing behind")
 check("…not when the chat is open, and not when the user stopped it",
@@ -792,8 +793,8 @@ check("the steady dot is the mode chip's blue, never the pulse's orange",
       "— at the top of every beat an orange pulse IS a steady orange dot")
 
 check("chats: both lists ordered by tier, then capped with dotted chats exempt",
-      chatList.contains("let visible = chats.sidebarOrdered(filtered(chats.rootChats))")
-        && chatList.contains("chats.sidebarOrdered(filtered(chats.projectChats[project.slug] ?? []))")
+      chatList.contains("let visible = chats.sidebarOrdered(chats.rootChats)")
+        && chatList.contains("chats.sidebarOrdered(chats.projectChats[project.slug] ?? [])")
         && occurrences("chats.sidebarTier(slug: $0.slug, project: $0.project) < .rest", in: chatList) == 2)
 check("…the collapsed Chats and Chat groups sections and a chat row carry the steady dot",
       chatList.contains("unread: chats.hasChatUnread(inProject: nil)")

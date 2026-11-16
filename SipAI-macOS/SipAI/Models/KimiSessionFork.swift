@@ -21,7 +21,10 @@
 // `AgentRunner` already does for any kimi session with an id.
 //
 // No wire record carries the session id — only `agentId` — so the
-// prefix is copied untouched; only `state.json` names the session.
+// prefix is copied untouched; only `state.json` names the session. One
+// record may be ADDED: a cut inside an ACP turn's span ends on that
+// turn's runtime binding, so the branch gets kimi's own hand-back record
+// (`KimiRuntimeBinding`) before `forked`.
 // `kimi fork` itself is deliberately NOT run and then cut: it has no
 // cut option, and truncating a file kimi just wrote is the one thing
 // never done to an agent's store.
@@ -62,23 +65,32 @@ enum KimiSessionFork {
 
     /// True when a prefix holds an actual conversation — at least one
     /// user message and one record of the agent speaking or acting. A
-    /// prefix of bookkeeping alone (`metadata`, `profile.bind`, the
-    /// injected reminders) would resume with no context: that is a new
-    /// session, not a branch, and the caller starts one.
+    /// message of attached files alone counts: its words strip to nothing,
+    /// and the files it names are what the user said — judged on words
+    /// alone, a branch below such a first exchange began a new session
+    /// without the file. A prefix of bookkeeping alone (`metadata`,
+    /// `profile.bind`, the injected reminders) would resume with no
+    /// context: that is a new session, not a branch, and the caller
+    /// starts one.
     static func prefixHoldsConversation(_ lines: [String]) -> Bool {
-        var sawUser = false
-        var sawAgent = false
+        // Folded as kimi replays the prefix (`UndoFold`): a prefix whose
+        // only exchange an undo took resumes with nothing in it.
+        var held: [(user: Bool, agent: Bool)] = []
+        var undo = KimiSessionScanner.UndoFold()
         for line in lines {
             guard let obj = object(line) else { continue }
-            if let user = KimiSessionScanner.userMessage(obj),
-               !user.text.isEmpty {
-                sawUser = true
-            } else if KimiSessionScanner.isAgentOutput(obj) {
-                sawAgent = true
+            if let cut = undo.apply(KimiSessionScanner.UndoFold.signal(of: obj),
+                                    at: held.count, windowIsWhole: true) {
+                held.removeSubrange(cut...)
             }
-            if sawUser && sawAgent { return true }
+            if let user = KimiSessionScanner.userMessage(obj),
+               !user.text.isEmpty || !KimiSessionScanner.userMessageFiles(obj).isEmpty {
+                held.append((true, false))
+            } else if KimiSessionScanner.isAgentOutput(obj) {
+                held.append((false, true))
+            }
         }
-        return false
+        return held.contains(where: \.user) && held.contains(where: \.agent)
     }
 
     /// The record kimi's own fork appends after the copied wire.
@@ -158,13 +170,32 @@ enum KimiSessionFork {
     /// claude fork already strips (`content` as text blocks), so the
     /// rule is shared rather than respelled; a record the rewrite
     /// cannot re-serialise is kept as it was.
+    ///
+    /// A run that loaded a skill carries the marker a SECOND time. Its
+    /// first user record is the skill kimi started (`origin.kind`
+    /// `skill_activation`): the content is the skill's text, and what
+    /// the run actually sent — marker first — is kept beside it in
+    /// `origin.skillArgs`, which is where the reader takes the message's
+    /// words from and the scanner the task's name
+    /// (`KimiSessionScanner.skillActivation`). Stripped from the content
+    /// alone, the branch of such a run was filed straight back under its
+    /// task.
     static func strippingScheduledTaskMarker(fromUserLine line: String) -> String {
         guard line.contains("<scheduled-task"),
               var obj = object(line),
               (obj["type"] as? String) == "context.append_message",
               let message = obj["message"]
         else { return line }
-        obj["message"] = AgentSessionFork.strippingScheduledTaskMarker(message)
+        var stripped = AgentSessionFork.strippingScheduledTaskMarker(message)
+        if var dict = stripped as? [String: Any],
+           var origin = dict["origin"] as? [String: Any],
+           let args = origin["skillArgs"] as? String,
+           let words = AgentSessionFork.strippedScheduledTaskMarker(fromText: args) {
+            origin["skillArgs"] = words
+            dict["origin"] = origin
+            stripped = dict
+        }
+        obj["message"] = stripped
         // A number JSON cannot write back raises, uncatchably.
         guard JSONSerialization.isValidJSONObject(obj),
               let data = try? JSONSerialization.data(
@@ -179,23 +210,30 @@ enum KimiSessionFork {
     /// The prompt id of the newest user record whose cleaned text
     /// matches `text` — for LIVE rows, which never went through the
     /// wire reader and carry no handle. The same identification
-    /// `AgentSessionView.trimmedForInFlight` makes between a live event
-    /// and its record; newest-first, so a repeated prompt branches at
-    /// the one on screen. Reads files; call it off the main thread.
+    /// `TranscriptSeam.cut` makes between a live event and its record;
+    /// newest-first, so a repeated prompt branches at the one on screen.
+    /// A message of attached files alone has no words to match: its
+    /// record is the one with no words that names `files`, the live
+    /// row's own (`filesOnlyCutPointScan`).
+    /// Reads files; call it off the main thread.
     static func resolveCutPoint(matchingUserText text: String,
+                                attachedFiles files: [String] = [],
                                 in wire: URL,
                                 skippingNewest skip: Int = 0) -> String? {
         // The reader's own cleaner on both sides (`userMessage` answers
         // `cleanUserText`), so a message spelling a bare `<…>` matches.
         let wanted = AgentSessionScanner.cleanUserText(text)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !wanted.isEmpty else { return nil }
+        guard !wanted.isEmpty || !files.isEmpty else { return nil }
         let attributes = try? FileManager.default
             .attributesOfItem(atPath: wire.path)
         let size = (attributes?[.size] as? NSNumber)?.uint64Value
         for budget in [256 * 1024, 4 * 1024 * 1024, 64 * 1024 * 1024] {
-            if let found = cutPointScan(text: wanted, in: wire, budget: budget,
-                                        skippingNewest: skip) {
+            if let found = wanted.isEmpty
+                ? filesOnlyCutPointScan(files: files, in: wire, budget: budget,
+                                        skippingNewest: skip)
+                : cutPointScan(text: wanted, in: wire, budget: budget,
+                               skippingNewest: skip) {
                 return found
             }
             if let size, size <= UInt64(budget) { break }
@@ -209,24 +247,71 @@ enum KimiSessionFork {
         guard let window = AgentSessionScanner.boundedTail(of: wire,
                                                            budget: budget)
         else { return nil }
-        // Forward, collecting every match: a user record without an id
-        // of its own is identified by the `turn.prompt` before it, which
-        // a reverse walk would only meet after the record. The answer is
-        // the newest, less the ones the caller says to skip.
+        // Forward, collecting every message the user sent: a user record
+        // without an id of its own is identified by the `turn.prompt`
+        // before it, which a reverse walk would only meet after the
+        // record. A turn an undo took is still in the wire with the same
+        // words as a message on screen, so the messages are folded as kimi
+        // folds them (`UndoFold`) before the newest match, less the ones
+        // the caller says to skip, is the answer.
+        let size = ((try? FileManager.default.attributesOfItem(atPath: wire.path))?[.size]
+                    as? NSNumber)?.intValue ?? 0
+        let whole = size <= budget
         var currentPrompt: String? = nil
-        var matches: [String] = []
+        var sent: [(handle: String?, matches: Bool)] = []
+        var undo = KimiSessionScanner.UndoFold()
         for line in window.split(separator: "\n") {
             guard let obj = object(String(line)) else { continue }
             if let prompt = KimiSessionScanner.turnPromptId(obj) {
                 currentPrompt = prompt
                 continue
             }
-            guard let user = KimiSessionScanner.userMessage(obj),
-                  user.text == text,
-                  let handle = user.id ?? currentPrompt
-            else { continue }
-            matches.append(handle)
+            let signal = KimiSessionScanner.UndoFold.signal(of: obj)
+            if let cut = undo.apply(signal, at: sent.count, windowIsWhole: whole) {
+                sent.removeSubrange(cut...)
+            }
+            guard signal == .anchor else { continue }
+            let user = KimiSessionScanner.userMessage(obj)
+            sent.append((user?.id ?? currentPrompt, user?.text == text))
         }
+        let matches = sent.filter(\.matches).compactMap(\.handle)
+        guard matches.count > skip else { return nil }
+        return matches[matches.count - 1 - skip]
+    }
+
+    /// The cut of a message of attached files alone, by the same walk —
+    /// folded the same way, since a turn an undo took names the same files
+    /// as one on screen: every such record has no words, so the one meant
+    /// is the one whose markers name `files` — the newest, less the ones
+    /// to skip.
+    private static func filesOnlyCutPointScan(files: [String], in wire: URL,
+                                              budget: Int,
+                                              skippingNewest skip: Int) -> String? {
+        guard let window = AgentSessionScanner.boundedTail(of: wire,
+                                                           budget: budget)
+        else { return nil }
+        let size = ((try? FileManager.default.attributesOfItem(atPath: wire.path))?[.size]
+                    as? NSNumber)?.intValue ?? 0
+        let whole = size <= budget
+        var currentPrompt: String? = nil
+        var sent: [(handle: String?, matches: Bool)] = []
+        var undo = KimiSessionScanner.UndoFold()
+        for line in window.split(separator: "\n") {
+            guard let obj = object(String(line)) else { continue }
+            if let prompt = KimiSessionScanner.turnPromptId(obj) {
+                currentPrompt = prompt
+                continue
+            }
+            let signal = KimiSessionScanner.UndoFold.signal(of: obj)
+            if let cut = undo.apply(signal, at: sent.count, windowIsWhole: whole) {
+                sent.removeSubrange(cut...)
+            }
+            guard signal == .anchor else { continue }
+            let user = KimiSessionScanner.userMessage(obj)
+            sent.append((user?.id ?? currentPrompt,
+                         user?.text.isEmpty == true && KimiSessionScanner.userMessageFiles(obj) == files))
+        }
+        let matches = sent.filter(\.matches).compactMap(\.handle)
         guard matches.count > skip else { return nil }
         return matches[matches.count - 1 - skip]
     }
@@ -316,6 +401,15 @@ enum KimiSessionFork {
         // --- the files ---
         let fm = FileManager.default
         let now = Date()
+        // A cut inside an Ask turn's span keeps the ACP runtime binding
+        // that turn opened with and not the hand-back after it, and kimi
+        // replays the newest binding: the branch would run without its
+        // file and command tools. It gets the hand-back of its own,
+        // before kimi's `forked` record, which stays the last.
+        let prefixText = kept.joined(separator: "\n")
+        if let handBack = KimiRuntimeBinding.restoreLine(head: prefixText, tail: prefixText, now: now) {
+            kept.append(handBack)
+        }
         var sourceState: [String: Any] = [:]
         if let data = try? Data(contentsOf: sourceDir.appendingPathComponent("state.json")),
            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {

@@ -136,7 +136,7 @@ let writesKey = controller.split(separator: "\n").contains { line in
 check("…and writes none of Sparkle's settings (they are the installed copy's too)",
       !writesKey && controller.contains("controller?.updater.automaticallyChecksForUpdates = enabled"))
 
-let launchPart = segment(controller, from: "func noteLaunch() {", to: "UpdateAnnouncer.shared.announce(")
+let launchPart = segment(controller, from: "func noteLaunch() {", to: "SidebarNotices.shared.post(")
 check("\"just updated\" is judged against THIS copy's own record, keyed by where it lives",
       launchPart.contains("CopyLaunchRecord.note(") && launchPart.contains("Bundle.main.bundleURL")
         && !controller.contains("lastLaunchedBuildDefaultsKey"))

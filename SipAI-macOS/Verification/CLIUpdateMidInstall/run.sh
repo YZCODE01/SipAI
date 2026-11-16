@@ -5,8 +5,8 @@
 #
 # The update monitor is EXTRACTED WHOLE from the shipping
 # AgentCLIUpdates.swift (the class and the pure types it uses), and the
-# badge / announcer file is compiled whole, so the replay drives the real
-# rows, the real re-stat and the real announcer. Stubs.swift stands in
+# badge file and the notices file are compiled whole, so the replay drives
+# the real rows, the real re-stat and the real notices beside the logo. Stubs.swift stands in
 # for the app types the monitor reaches for; none of them carries a rule.
 #
 # Draws nothing and touches no network: the release endpoint is served
@@ -24,7 +24,8 @@ trap 'rm -rf "$out"' EXIT
 
 model="$root/SipAI/Models/AgentCLIUpdates.swift"
 notices="$root/SipAI/Models/UpdateNotices.swift"
-for f in "$model" "$notices"; do
+sidebarNotices="$root/SipAI/Models/SidebarNotices.swift"
+for f in "$model" "$notices" "$sidebarNotices"; do
   if [ ! -f "$f" ]; then
     echo "  FAIL  $f not found"
     exit 1
@@ -55,6 +56,18 @@ for required in "final class AgentCLIUpdateMonitor" "func refreshInstalledAgents
   fi
 done
 
+# The update ceiling is fifteen minutes; the replay past it sets it to
+# seconds. The one line changed in the extracted copy is that constant,
+# made settable — and if it no longer reads as it did, nothing past the
+# ceiling below would be the code shipping.
+ceiling='static let updateCeiling: TimeInterval = 15 \* 60'
+if ! grep -q "$ceiling" "$out/Extracted.swift"; then
+  echo "  FAIL  'static let updateCeiling: TimeInterval = 15 * 60' not found in $model"
+  exit 1
+fi
+sed -i '' "s/$ceiling/nonisolated(unsafe) static var updateCeiling: TimeInterval = 15 * 60/" \
+  "$out/Extracted.swift"
+
 swiftc -swift-version 5 -o "$out/updmid" \
-  "$here/Stubs.swift" "$out/Extracted.swift" "$notices" "$here/main.swift"
+  "$here/Stubs.swift" "$out/Extracted.swift" "$notices" "$sidebarNotices" "$here/main.swift"
 "$out/updmid" "$root"

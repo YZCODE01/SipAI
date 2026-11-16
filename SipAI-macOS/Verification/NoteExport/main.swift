@@ -133,6 +133,37 @@ do {
 }
 
 // ---------------------------------------------------------------------
+section("6b. A link to a file on this Mac")
+do {
+    // Codex cites a file as `[words](/full/path)`, in angle brackets when
+    // the path holds spaces. A note has no folder: the full path opens it
+    // through the app's own scheme, and is shown after the words.
+    let audit = html("[Detailed audit report](</Users/example-user/My Project/AUDIT.txt>)")
+    ok("the words open the file through the app's own scheme",
+       audit.contains("<a href=\"sipai-file:/Users/example-user/My%20Project/AUDIT.txt\" "
+                      + "title=\"/Users/example-user/My Project/AUDIT.txt\">Detailed audit report</a>"), audit)
+    ok("the path follows them, quieter, opening the same file",
+       audit.contains("<a class=\"sipai-file-path\" href=\"sipai-file:/Users/example-user/My%20Project/AUDIT.txt\"")
+           && audit.contains(">(/Users/example-user/My Project/AUDIT.txt)</a>"), audit)
+    ok("no markdown is left on the page", !audit.contains("]("), audit)
+
+    let paren = html("[Report (final).md](</Users/example-user/My Project/Report (final).md>)")
+    ok("an angle-bracket path may hold a parenthesis",
+       paren.contains(">(/Users/example-user/My Project/Report (final).md)</a>") && !paren.contains(".md>)"), paren)
+
+    let relative = html("[notes](docs/notes.md)")
+    ok("a relative path has no folder to open from: shown as text",
+       !relative.contains("<a ") && relative.contains("notes <span class=\"sipai-file-path\">(docs/notes.md)</span>"),
+       relative)
+
+    let hostile = html("[x](</tmp/a\"b onmouseover=\"alert(1).md>) and [y](</tmp/<script>.md>)")
+    ok("a path cannot write markup", !hostile.contains("<script>") && !hostile.contains("\"b onmouseover"), hostile)
+    let sheet = NoteHTML.document(markdown: "x", metadata: .init(title: "t", model: "m", date: nil),
+                                  dark: false, forPrint: false)
+    ok("the stylesheet quiets the path", sheet.contains(".sipai-file-path { color: var(--dim)"), "")
+}
+
+// ---------------------------------------------------------------------
 section("7. Block structure matches the shared parser")
 do {
     let h = html("# One\n## Two\n")

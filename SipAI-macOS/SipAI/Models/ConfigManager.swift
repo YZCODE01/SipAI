@@ -49,14 +49,29 @@ struct DisplaySettings {
     /// When on, the note button offers "Direct note" / "Add prompt…"
     /// instead of generating immediately.
     var showNotePrompt: Bool = true
+    /// The sidebar's Notes, Chats and Chat groups sections. A section's
+    /// own ⋮ → Hide turns its switch off; Settings → Display is where it
+    /// comes back. Agent sections are not here: whether one shows is
+    /// `AgentPresence`, and Settings → Agent Initialization hides them.
+    var showNotesSection: Bool = true
+    var showChatsSection: Bool = true
+    var showChatGroupsSection: Bool = true
     /// Agent sessions only — chat sessions no longer have a counter.
     var showTokenAgent: Bool = true
-    /// A short line in the wordmark's place when an update has happened
-    /// (`UpdateAnnouncer`). On by default. The lockup it takes the place
-    /// of is always drawn — it is not a setting — so there is always
-    /// somewhere to say it.
-    var showUpdateMessages: Bool = true
+    /// The bubble beside the sidebar's logo, in the wordmark's place
+    /// (`SidebarNotices`): updates on offer, cards waiting on the user,
+    /// turns that ended, updates that landed. On by default. The lockup it
+    /// takes the place of is always drawn — it is not a setting — so there
+    /// is always somewhere to say it. Stored under `update_messages`, the
+    /// key it had while it switched only the update lines, so a choice
+    /// made then still holds.
+    var showSidebarNotices: Bool = true
     var spellCheck: Bool = true
+    /// Agent sessions drawn compact: each run of the agent's tool calls
+    /// (and the thinking its tool saved) as one line, the agent's name
+    /// once per answer. Off by default; the toolbar's window, Settings →
+    /// Display and View → Agent Session Compact View all flip this one value.
+    var agentCompactView: Bool = false
     // This struct models the display keys the app READS; it is not the
     // whole `display` dict. `setDisplay` merges into the stored dict
     // rather than rebuilding it, so a key nothing here knows about is
@@ -201,7 +216,7 @@ final class ConfigManager: ObservableObject {
         saveRaw(); rebuildDerived()
     }
 
-    /// Agents the user unticked in Settings → Agent Guide: installed
+    /// Agents the user unticked in Settings → Agent Initialization: installed
     /// and signed in, but shown nowhere and asked nothing. Written ONLY
     /// through `AgentManager.setHidden(_:for:)`, which recomputes
     /// presence in the same call; the setter here is the storage.
@@ -414,9 +429,13 @@ final class ConfigManager: ObservableObject {
         s.showNoteChat = d["note_chat"] as? Bool ?? legacyNote ?? true
         s.showNoteAgent = d["note_agent"] as? Bool ?? legacyNote ?? true
         s.showNotePrompt = d["note_prompt"] as? Bool ?? true
+        s.showNotesSection = d["sidebar_notes"] as? Bool ?? true
+        s.showChatsSection = d["sidebar_chats"] as? Bool ?? true
+        s.showChatGroupsSection = d["sidebar_chat_groups"] as? Bool ?? true
         s.showTokenAgent = d["token_agent"] as? Bool ?? legacyToken ?? true
-        s.showUpdateMessages = d["update_messages"] as? Bool ?? true
+        s.showSidebarNotices = d["update_messages"] as? Bool ?? true
         s.spellCheck = d["spell_check"] as? Bool ?? true
+        s.agentCompactView = d["agent_compact_view"] as? Bool ?? false
         // A stored value that is only some language's default is not a
         // choice — leave `userLabel` on the localized default.
         if let ul = (d["user_label"] as? String)?.trimmingCharacters(in: .whitespaces),
@@ -505,12 +524,16 @@ final class ConfigManager: ObservableObject {
         d["note_chat"] = s.showNoteChat
         d["note_agent"] = s.showNoteAgent
         d["note_prompt"] = s.showNotePrompt
+        d["sidebar_notes"] = s.showNotesSection
+        d["sidebar_chats"] = s.showChatsSection
+        d["sidebar_chat_groups"] = s.showChatGroupsSection
         d["token_agent"] = s.showTokenAgent
         // Retired with the switch that hid the sidebar's logo and name:
         // the lockup is always drawn now, so the key converges away.
         d.removeValue(forKey: "sidebar_brand")
-        d["update_messages"] = s.showUpdateMessages
+        d["update_messages"] = s.showSidebarNotices
         d["spell_check"] = s.spellCheck
+        d["agent_compact_view"] = s.agentCompactView
         // `d` starts from the stored dict, so any key this app does not
         // model passes through this save untouched — which is the point.
         // Written only when the user actually picked a word. Writing the
@@ -534,6 +557,14 @@ final class ConfigManager: ObservableObject {
     /// or malformed stored values.
     var fontTier: FontTier {
         FontTier(rawValue: display.fontTier) ?? .standard
+    }
+
+    /// The one writer of the size: Settings → Display → Zoom and the View
+    /// menu's Zoom In / Zoom Out / Actual Size, their keys included, all
+    /// come through here, so the picker always names the size on screen.
+    func setFontTier(_ tier: FontTier) {
+        guard tier != fontTier else { return }
+        setDisplay { $0.fontTier = tier.rawValue }
     }
 
     /// Returns the user-customised label for an agent (e.g. `"claude_code"`),
@@ -748,12 +779,15 @@ final class ConfigManager: ObservableObject {
             return (v?.isEmpty == false) ? v : nil
         }
         return AgentLaunchOptions(
-            permissionMode: field("mode"),
+            // A pick for a row no longer offered (codex's Agent, kimi's
+            // Always Ask) is what Default runs now, and reads as Default.
+            permissionMode: AgentAskingMode.normalized(field("mode")),
             model: field("model"),
             effort: field("effort"),
             fastMode: prefs["fast_mode"] == "1",
             serviceTier: field("service_tier"),
-            chatOnly: prefs["chat_only"] == "1"
+            chatOnly: prefs["chat_only"] == "1",
+            nonStop: prefs["non_stop"] == "1"
         )
     }
 
@@ -772,6 +806,7 @@ final class ConfigManager: ObservableObject {
         // Its own key, never a `mode` value — see `AgentLaunchOptions
         // .chatOnly` for why the two must stay apart.
         if options.chatOnly { prefs["chat_only"] = "1" }
+        if options.nonStop { prefs["non_stop"] = "1" }
         entry["launch_prefs"] = prefs
         agents[agentKey] = entry
         raw["agents"] = agents
@@ -1004,6 +1039,79 @@ final class ConfigManager: ObservableObject {
         saveRaw(); rebuildDerived()
     }
 
+    // MARK: - Skills a session preloads
+
+    /// The skills chosen on one session's skill chip, by the name the
+    /// agent calls each one. Nil when the chip was never touched there —
+    /// an empty list is a choice of its own (the user cleared it). A new
+    /// session started from the session's group starts from them while
+    /// it is the group's newest (`NewSessionPlace.newestSession`),
+    /// with the agent's pins added (`agentSkillPreloads`).
+    func agentSessionSkillPicks(for sessionId: String) -> [String]? {
+        guard !sessionId.isEmpty else { return nil }
+        let map = (raw["agent_session_skill_preloads"] as? [String: [String]]) ?? [:]
+        return map[sessionId]
+    }
+
+    func setAgentSessionSkillPicks(_ picks: [String], for sessionId: String) {
+        guard !sessionId.isEmpty else { return }
+        var map = (raw["agent_session_skill_preloads"] as? [String: [String]]) ?? [:]
+        guard map[sessionId] != picks else { return }
+        map[sessionId] = picks
+        raw["agent_session_skill_preloads"] = map
+        saveRaw(); rebuildDerived()
+    }
+
+    /// A branch keeps its parent's chosen skills.
+    func copyAgentSessionSkillPicks(from source: String, to sessionId: String) {
+        guard let picks = agentSessionSkillPicks(for: source) else { return }
+        setAgentSessionSkillPicks(picks, for: sessionId)
+    }
+
+    func clearAgentSessionSkillPicks(for sessionId: String) {
+        var map = (raw["agent_session_skill_preloads"] as? [String: [String]]) ?? [:]
+        guard map.removeValue(forKey: sessionId) != nil else { return }
+        raw["agent_session_skill_preloads"] = map
+        saveRaw(); rebuildDerived()
+    }
+
+    /// The skills every new session of `agentKey` starts with on its chip,
+    /// set in Settings → Agent Skills — the only skills a new session
+    /// starts with: what another session chose is never carried to one.
+    func agentSkillPreloads(for agentKey: String) -> [String] {
+        let agents = (raw["agents"] as? [String: [String: Any]]) ?? [:]
+        let list = (agents[agentKey]?["skill_preloads"] as? [String]) ?? []
+        // One, for an agent that takes one per message — whatever a hand
+        // edit left in the file.
+        return SkillAgent.oneSkillPerMessage(agentKey) ? Array(list.prefix(1)) : list
+    }
+
+    func setAgentSkillPreload(_ name: String, on: Bool, for agentKey: String) {
+        var agents = (raw["agents"] as? [String: [String: Any]]) ?? [:]
+        var entry = agents[agentKey] ?? [:]
+        var list = (entry["skill_preloads"] as? [String]) ?? []
+        // An agent that takes one skill per message starts a session with
+        // one (`SkillAgent.oneSkillPerMessage`), and the file is read as
+        // holding one (`agentSkillPreloads`). Judged on the list as read:
+        // on the raw one, a second name a hand edit left there could not
+        // be switched on — it was "already there" — and came back as the
+        // default the moment the first was switched off.
+        if SkillAgent.oneSkillPerMessage(agentKey) { list = Array(list.prefix(1)) }
+        if on {
+            guard !list.contains(name) else { return }
+            // The new pick replaces the old.
+            if SkillAgent.oneSkillPerMessage(agentKey) { list.removeAll() }
+            list.append(name)
+        } else {
+            guard list.contains(name) else { return }
+            list.removeAll { $0 == name }
+        }
+        entry["skill_preloads"] = list
+        agents[agentKey] = entry
+        raw["agents"] = agents
+        saveRaw(); rebuildDerived()
+    }
+
     // MARK: - Per-session launch options (the composer's explicit picks)
 
     /// The user's explicit composer picks (mode / model / effort) for
@@ -1035,13 +1143,16 @@ final class ConfigManager: ObservableObject {
             fullId = nil
         }
         return AgentLaunchOptions(
-            permissionMode: field("mode"),
+            // A pick for a row no longer offered (codex's Agent, kimi's
+            // Always Ask) is what Default runs now, and reads as Default.
+            permissionMode: AgentAskingMode.normalized(field("mode")),
             model: alias,
             effort: field("effort"),
             modelFullId: fullId,
             fastMode: prefs["fast_mode"] == "1",
             serviceTier: field("service_tier"),
-            chatOnly: prefs["chat_only"] == "1"
+            chatOnly: prefs["chat_only"] == "1",
+            nonStop: prefs["non_stop"] == "1"
         )
     }
 
@@ -1062,6 +1173,7 @@ final class ConfigManager: ObservableObject {
         if options.fastMode { prefs["fast_mode"] = "1" }
         if let tier = options.serviceTier, !tier.isEmpty { prefs["service_tier"] = tier }
         if options.chatOnly { prefs["chat_only"] = "1" }
+        if options.nonStop { prefs["non_stop"] = "1" }
         map[sessionId] = prefs
         raw["agent_session_launch_prefs"] = map
         saveRaw(); rebuildDerived()
@@ -1102,6 +1214,30 @@ final class ConfigManager: ObservableObject {
             raw.removeValue(forKey: "kimi_tool_policy_restores")
         } else {
             raw["kimi_tool_policy_restores"] = map
+        }
+        saveRaw()
+    }
+
+    /// The kimi sessions an ACP turn has bound to ACP's runtime and that
+    /// have not been handed back yet (`KimiRuntimeBinding.restore`). Written
+    /// before the turn binds, cleared once the session is handed back,
+    /// and read at launch and on session open to heal a session a crash
+    /// left without its file and command tools in kimi's own terminal.
+    /// One JSON key, `kimi_runtime_binding_restores`; goes with the rest
+    /// of config on a factory reset.
+    func kimiBindingRestores() -> Set<String> {
+        Set((raw["kimi_runtime_binding_restores"] as? [String]) ?? [])
+    }
+
+    func setKimiBindingRestore(_ owed: Bool, for sessionId: String) {
+        guard !sessionId.isEmpty else { return }
+        var ids = kimiBindingRestores()
+        let changed = owed ? ids.insert(sessionId).inserted : ids.remove(sessionId) != nil
+        guard changed else { return }
+        if ids.isEmpty {
+            raw.removeValue(forKey: "kimi_runtime_binding_restores")
+        } else {
+            raw["kimi_runtime_binding_restores"] = ids.sorted()
         }
         saveRaw()
     }
@@ -1167,10 +1303,17 @@ final class ConfigManager: ObservableObject {
     /// name. Groups are keyed by name, so any of these left behind makes
     /// the renamed group read as a different one: unfiled rows, an
     /// unfolded header, or a header that drops below every dragged one.
+    ///
+    /// Filings are ONE map for every agent, keyed by row, and another
+    /// agent may have a group of the same name. `otherAgentsItems` is
+    /// every row key that belongs to another agent; those filings are
+    /// left alone. Moved with this agent's, another agent's rows would
+    /// be filed in a group it does not have — under Ungrouped there.
     @discardableResult
     func renameAgentCustomGroup(_ old: String,
                                 to new: String,
-                                for agentKey: String) -> Bool {
+                                for agentKey: String,
+                                keeping otherAgentsItems: Set<String>) -> Bool {
         let trimmed = new.trimmingCharacters(in: .whitespaces)
         guard !agentKey.isEmpty, !trimmed.isEmpty else { return false }
         let groups = agentCustomGroups(for: agentKey)
@@ -1185,7 +1328,7 @@ final class ConfigManager: ObservableObject {
         raw["agent_custom_groups"] = groupMap
 
         var assignments = (raw["agent_session_groups"] as? [String: String]) ?? [:]
-        for (key, value) in assignments where value == old {
+        for (key, value) in assignments where value == old && !otherAgentsItems.contains(key) {
             assignments[key] = trimmed
         }
         raw["agent_session_groups"] = assignments
@@ -1210,17 +1353,41 @@ final class ConfigManager: ObservableObject {
         return true
     }
 
-    /// Drop a group. Its members become Ungrouped — no session is touched.
-    func deleteAgentCustomGroup(_ name: String, for agentKey: String) {
+    /// Drop a group. Its members become Ungrouped — no session is touched
+    /// here; "Delete the group" removes its sessions through the
+    /// manager's delete before calling this.
+    ///
+    /// `otherAgentsItems` as in `renameAgentCustomGroup`: another agent's
+    /// group of the same name keeps its rows. Its folded state and its
+    /// dragged position go with it, so a group made again under the name
+    /// starts as a new one does.
+    func deleteAgentCustomGroup(_ name: String,
+                                for agentKey: String,
+                                keeping otherAgentsItems: Set<String>) {
         guard !agentKey.isEmpty else { return }
         var groupMap = (raw["agent_custom_groups"] as? [String: [String]]) ?? [:]
         groupMap[agentKey] = agentCustomGroups(for: agentKey).filter { $0 != name }
         raw["agent_custom_groups"] = groupMap
         var assignments = (raw["agent_session_groups"] as? [String: String]) ?? [:]
-        for (key, value) in assignments where value == name {
+        for (key, value) in assignments where value == name && !otherAgentsItems.contains(key) {
             assignments.removeValue(forKey: key)
         }
         raw["agent_session_groups"] = assignments
+
+        var collapsed = (raw["agent_group_collapsed"] as? [String: [String: [String]]]) ?? [:]
+        if var perAgent = collapsed[agentKey], let folded = perAgent["custom"] {
+            perAgent["custom"] = folded.filter { $0 != name }
+            collapsed[agentKey] = perAgent
+            raw["agent_group_collapsed"] = collapsed
+        }
+        // Written directly, as a rename does: dropping a name is not a
+        // drag, and must not stamp the drag time.
+        var orders = (raw["agent_group_order"] as? [String: [String: [String]]]) ?? [:]
+        if var perAgent = orders[agentKey], let order = perAgent["custom"] {
+            perAgent["custom"] = order.filter { $0 != name }
+            orders[agentKey] = perAgent
+            raw["agent_group_order"] = orders
+        }
         saveRaw(); rebuildDerived()
     }
 

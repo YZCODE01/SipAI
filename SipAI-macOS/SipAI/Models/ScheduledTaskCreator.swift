@@ -25,10 +25,14 @@ enum ScheduledTaskCreator {
         var schedule: String
         var prompt: String
         var cwd: URL
-        /// Permission mode for the unattended run; the popover
-        /// defaults it to bypassPermissions, since nobody is there to
-        /// answer an approval.
-        var mode: String
+        /// The mode each run runs in — the composer's chip as it stands
+        /// (nil: Default, the agent's own default setting).
+        var mode: String?
+        /// The composer's Chat only, carried as such.
+        var chatOnly: Bool = false
+        /// The composer's Non-stop switch: on, a question a run asks is
+        /// answered for the user; off, it waits on a card like any turn's.
+        var nonStop: Bool = false
         var model: String?
         var effort: String?
         /// The composer's speed, like its model and effort: claude's fast
@@ -36,10 +40,14 @@ enum ScheduledTaskCreator {
         /// `ScheduledTaskDefinition.fastMode` / `.serviceTier`.
         var fastMode: Bool = false
         var serviceTier: String? = nil
+        /// The skills each run loads — the composer's chip, carried like
+        /// its model and effort.
+        var skills: [String] = []
         /// Which CLI the task runs under. Written to the frontmatter,
         /// and read back by `ScheduledTaskScheduler.fire` — a task
-        /// created from a codex session must not fire under claude.
-        var agent: String = "claude_code"
+        /// created from a codex session must not fire under claude, so
+        /// every request names its agent.
+        var agent: String
     }
 
     struct Success {
@@ -104,10 +112,13 @@ enum ScheduledTaskCreator {
         def.scheduleExpression = r.schedule
         def.workingDirectory = r.cwd
         def.mode = r.mode
+        def.chatOnly = r.chatOnly
+        def.nonStop = r.nonStop
         def.model = r.model
         def.effort = r.effort
         def.fastMode = r.fastMode
         def.serviceTier = r.serviceTier
+        def.skills = r.skills
         def.agent = r.agent
         def.prompt = r.prompt
 

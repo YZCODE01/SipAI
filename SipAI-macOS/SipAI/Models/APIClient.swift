@@ -1,7 +1,7 @@
 // APIClient.swift
 // Makes chat requests against OpenAI-compatible providers and Anthropic.
-// The OpenAI-style paths STREAM on the wire and deliver the reply whole:
-// a reasoning model thinks for minutes before a non-streaming reply's
+// Every path STREAMS on the wire and delivers the reply whole: a
+// reasoning model thinks for minutes before a non-streaming reply's
 // first byte, and middleboxes that drop byte-silent connections (local
 // proxies, corporate gateways, provider edges) kill that request long
 // before any client timeout. The UI contract is unchanged — one piece.
@@ -394,28 +394,130 @@ final class APIClient {
 
     // MARK: - Anthropic
 
+    /// The output cap sent when a model's own maximum is unknown: a model
+    /// the list does not name, a list that could not be read, a server
+    /// that is not Anthropic's.
+    static let anthropicFallbackCap = 16384
+
+    /// Streaming-first, for the same reason as `callOpenAIChat`, and the
+    /// reply is read by block TYPE, never by position: current Claude
+    /// models think by default, and their `thinking` blocks arrive AHEAD
+    /// of the `text` (with an empty `thinking` field under the default
+    /// `display: "omitted"`). A reader that takes the first block as the
+    /// answer turns every reply the model thought about into a decode
+    /// error — and adaptive thinking skips easy questions, so it fails on
+    /// the hard ones only.
+    ///
+    /// `max_tokens` is a hard limit on thinking plus text, so it is the
+    /// model's own published maximum (`anthropicOutputCap`): a fixed cap
+    /// lets a long think end the reply before its first word. Anthropic
+    /// counts only the tokens a reply generates against its output rate
+    /// limit, so a large cap costs nothing by itself.
+    ///
+    /// A server that refuses `stream` (an Anthropic-style proxy) gets the
+    /// plain request, read the same way.
     private func callAnthropic(messages: [ChatMessage], system: String?,
                                modelId: String, baseURL: String, apiKey: String,
                                attachments: [ChatAttachment] = []) async throws -> (String, Bool, TokenUsage?) {
         let msgs = Self.anthropicMessages(messages, attachments: attachments)
+        let cap = await Self.anthropicOutputCap(modelId: modelId, baseURL: baseURL, apiKey: apiKey)
         var body: [String: Any] = [
             "model": modelId,
-            "max_tokens": 16384,
+            "max_tokens": cap,
             "messages": msgs,
+            "stream": true,
         ]
         if let s = system, !s.isEmpty { body["system"] = s }
         let url = try Self.endpointURL(base: baseURL, path: "/messages")
-        let json = try await postJSON(url: url, body: body, headers: [
+        let headers = [
             "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
+            "anthropic-version": ProviderHTTP.anthropicVersion,
             "Content-Type": "application/json",
-        ])
-        guard let content = json["content"] as? [[String: Any]],
-              let first = content.first, let text = first["text"] as? String else {
-            throw APIError.decode("Anthropic: missing content[0].text")
+        ]
+        do {
+            let acc = try await postSSE(url: url, body: body, headers: headers,
+                                        fold: Self.foldAnthropicLine)
+            if let message = acc.errorMessage {
+                throw APIError.transport(message)
+            }
+            return try Self.anthropicReply(text: acc.text, stopReason: acc.finishReason,
+                                           usage: acc.usage)
+        } catch APIError.http(let code, let errBody)
+            where code == 400 && errBody.contains("stream") {
+            body.removeValue(forKey: "stream")
+            let json = try await postJSON(url: url, body: body, headers: headers)
+            return try Self.parseAnthropicJSON(json)
         }
-        let truncated = (json["stop_reason"] as? String) == "max_tokens"
-        return (text, truncated, Self.parseUsage(json))
+    }
+
+    /// The plain (non-streaming) reply, used by the fallback: every
+    /// `text` block in order, thinking blocks passed over.
+    nonisolated static func parseAnthropicJSON(_ json: [String: Any]) throws -> (String, Bool, TokenUsage?) {
+        guard let content = json["content"] as? [[String: Any]] else {
+            throw APIError.decode("Anthropic: no content in the reply")
+        }
+        let text = content
+            .filter { ($0["type"] as? String ?? "text") == "text" }
+            .compactMap { $0["text"] as? String }
+            .joined()
+        return try anthropicReply(text: text, stopReason: json["stop_reason"] as? String,
+                                  usage: parseUsage(json))
+    }
+
+    /// A reply is cut off when the cap stopped it, or when it filled the
+    /// model's context window first (Anthropic: "treat the response as
+    /// truncated" — a cap set to the model's own maximum is exactly the
+    /// request that can end that way). No text then is a cut-off reply
+    /// — the model spent the whole of it thinking — and a failure
+    /// otherwise, named by its stop reason (`refusal`, say), never an
+    /// empty bubble that says nothing.
+    nonisolated private static func anthropicReply(text: String, stopReason: String?,
+                                                   usage: TokenUsage?) throws -> (String, Bool, TokenUsage?) {
+        let truncated = stopReason == "max_tokens" || stopReason == "model_context_window_exceeded"
+        if text.isEmpty && !truncated {
+            throw APIError.decode("Anthropic: the reply has no text (stop reason: \(stopReason ?? "none"))")
+        }
+        return (text, truncated, usage)
+    }
+
+    /// Each model's own `max_tokens` ceiling, by base URL and model, for
+    /// this launch. A miss (nil) is kept for ten minutes, so a server
+    /// with no models route is not asked again before every message.
+    private static var anthropicCaps: [String: (cap: Int?, at: Date)] = [:]
+
+    /// The model's published maximum for `max_tokens` (`GET
+    /// /models/{id}`), else `anthropicFallbackCap`. Asked once per model.
+    static func anthropicOutputCap(modelId: String, baseURL: String, apiKey: String) async -> Int {
+        let key = baseURL + "\n" + modelId
+        if let known = anthropicCaps[key],
+           known.cap != nil || Date().timeIntervalSince(known.at) < 600 {
+            return known.cap ?? anthropicFallbackCap
+        }
+        let cap = await fetchAnthropicMaxTokens(modelId: modelId, baseURL: baseURL, apiKey: apiKey)
+        // A lookup cut short by the user's Stop is not a miss: recorded
+        // as one, it would hold the fallback cap for ten minutes on a
+        // model that publishes its own.
+        if cap == nil, Task.isCancelled { return anthropicFallbackCap }
+        anthropicCaps[key] = (cap, Date())
+        return cap ?? anthropicFallbackCap
+    }
+
+    private static func fetchAnthropicMaxTokens(modelId: String, baseURL: String,
+                                                apiKey: String) async -> Int? {
+        var segment = CharacterSet.urlPathAllowed
+        segment.remove("/")
+        guard let id = modelId.addingPercentEncoding(withAllowedCharacters: segment),
+              let url = try? endpointURL(base: baseURL, path: "/models/" + id)
+        else { return nil }
+        var req = URLRequest(url: url, timeoutInterval: 15)
+        req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        req.setValue(ProviderHTTP.anthropicVersion, forHTTPHeaderField: "anthropic-version")
+        guard let (data, resp) = try? await ProviderHTTP.session.data(for: req),
+              (resp as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let cap = json["max_tokens"] as? Int, cap > 0
+        else { return nil }
+        return cap
     }
 
     // MARK: - Request bodies
@@ -577,7 +679,7 @@ final class APIClient {
         let trimmed = base.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, let url = URL(string: trimmed + path) else {
             throw APIError.transport(
-                "Invalid provider base URL \"\(trimmed)\" — fix it in Settings → Chat models.")
+                "Invalid provider base URL \"\(trimmed)\" — fix it in Settings → Chat Settings.")
         }
         return url
     }
@@ -590,8 +692,10 @@ final class APIClient {
     /// streams — no server, no network.
     struct SSEAssembly {
         var text = ""
-        /// "length" (chat completions) or "incomplete" (Responses)
-        /// marks a reply cut by the token ceiling.
+        /// How the reply ended. "length" (chat completions),
+        /// "incomplete" (Responses), and "max_tokens" or
+        /// "model_context_window_exceeded" (Anthropic, whose stop reason
+        /// is kept as sent) mark a reply cut short.
         var finishReason: String?
         var usage: TokenUsage?
         /// A failure the stream itself reported. Checked by the caller
@@ -652,6 +756,45 @@ final class APIClient {
                 ?? json["error"] as? [String: Any]
             acc.errorMessage = (err?["message"] as? String)
                 ?? (json["message"] as? String)
+                ?? "stream error"
+        default:
+            break
+        }
+    }
+
+    /// One Messages API `data:` payload. Each carries its own `type`, so
+    /// the `event:` lines never need to be tracked. Only `text_delta`
+    /// is the reply: `thinking_delta` and `signature_delta` belong to a
+    /// thinking block, `ping` keeps the connection alive, and Anthropic
+    /// may add event types at any time, so anything else is passed over.
+    /// Usage arrives in two halves — input on `message_start`, output
+    /// (cumulative) on `message_delta`.
+    nonisolated static func foldAnthropicLine(_ payload: String, into acc: inout SSEAssembly) {
+        guard let data = payload.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let type = json["type"] as? String
+        else { return }
+        switch type {
+        case "message_start":
+            let usage = (json["message"] as? [String: Any])?["usage"] as? [String: Any]
+            if let input = usage?["input_tokens"] as? Int {
+                acc.usage = TokenUsage(input: input, output: acc.usage?.output ?? 0)
+            }
+        case "content_block_delta":
+            if let delta = json["delta"] as? [String: Any],
+               delta["type"] as? String == "text_delta",
+               let piece = delta["text"] as? String {
+                acc.text += piece
+            }
+        case "message_delta":
+            if let stop = (json["delta"] as? [String: Any])?["stop_reason"] as? String {
+                acc.finishReason = stop
+            }
+            if let output = (json["usage"] as? [String: Any])?["output_tokens"] as? Int {
+                acc.usage = TokenUsage(input: acc.usage?.input ?? 0, output: output)
+            }
+        case "error":
+            acc.errorMessage = ((json["error"] as? [String: Any])?["message"] as? String)
                 ?? "stream error"
         default:
             break

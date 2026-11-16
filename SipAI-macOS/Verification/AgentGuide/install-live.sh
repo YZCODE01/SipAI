@@ -1,6 +1,6 @@
 #!/bin/bash
 # The three install routes for real, under a throwaway HOME, then each
-# delete plan — the measurement behind Settings → Agent Guide's Install
+# delete plan — the measurement behind Settings → Agent Initialization's Install
 # and Delete. Downloads ~500 MB. Nothing outside $HOME_T is touched:
 # Anthropic's and Moonshot's installers put everything under $HOME,
 # and the codex route is SipAI's own layout under $HOME too.

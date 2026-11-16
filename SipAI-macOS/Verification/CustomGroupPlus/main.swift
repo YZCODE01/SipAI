@@ -5,11 +5,13 @@
 //
 //  * A group the user NAMED renders while empty. Dropped as an empty
 //    bucket — which is right for a folder or a date, since those
-//    describe rows — it made "New Group…" look like it had done
+//    describe rows — it made "New group" look like it had done
 //    nothing: the group existed in config and nowhere on screen, so
 //    it could not be given a +, renamed or deleted, and stayed
-//    unreachable until a row was filed into it by hand. Ungrouped is
-//    deliberately NOT in the exception; nobody made it.
+//    unreachable until a row was filed into it by hand. Ungrouped
+//    renders while empty too, in Custom: there the section's first row
+//    makes a group, so Ungrouped's + is the only way to start a session
+//    filed nowhere.
 //
 //  * The + preselects the group's own most recently used folder —
 //    the newest row filed there whose folder still opens. "Newest" is
@@ -98,13 +100,13 @@ check("a named group with no rows still renders",
       "— \"New Group…\" then + is the whole flow; a group nothing can see has no header to carry either")
 check("a named group with rows renders them",
       made.first { $0.key == "Work" }?.items.count == 1)
-check("empty Ungrouped is still dropped",
-      !made.contains { $0.key == AgentSessionGrouping.ungroupedKey },
-      "— nobody named it, and an empty one says nothing")
+check("an empty Ungrouped renders too, holding nothing",
+      made.first { $0.key == AgentSessionGrouping.ungroupedKey }?.items.isEmpty == true,
+      "— grouped by Custom the section's first row makes a group; Ungrouped's + is the only way to start a session in no group")
 // The ORDER of custom groups is pinned by SidebarGroupActivity; here
 // only that an empty named group still takes its place in it.
-check("an empty named group sorts after one holding a session",
-      made.map(\.key) == ["Work", "Personal"])
+check("an empty named group sorts after one holding a session, Ungrouped last",
+      made.map(\.key) == ["Work", "Personal", AgentSessionGrouping.ungroupedKey])
 
 // An assignment naming a group that is gone reads as unfiled, and
 // Ungrouped appears for it — but only because it now holds a row.
@@ -129,10 +131,10 @@ let dateMade = AgentSessionGrouping.buckets(
     assignments: ["s-work": "Work"], now: now)
 check("date mode still drops empty buckets",
       dateMade.count == 1)
-check("a section with no rows at all still shows its named groups",
+check("a section with no rows at all still shows its named groups, and Ungrouped",
       AgentSessionGrouping.buckets([], mode: .custom, customGroups: groups,
-                                   assignments: [:], now: now).count == 2,
-      "— \"New Group…\" on a fresh agent has to produce something to click")
+                                   assignments: [:], now: now).count == 3,
+      "— \"New group\" on a fresh agent has to produce something to click, and a + to start from")
 
 // MARK: - 2. Which folder the + preselects
 
@@ -235,9 +237,20 @@ check("the draft carries the group it was started from",
 check("the header + is offered on custom groups",
       section.contains("startNewSession(inGroup:"),
       "— the reported gap: only folder headers had one")
-check("…gated on the group being one the user NAMED",
-      section.contains("customGroups.contains(group.key)"),
-      "— Ungrouped must not offer one; the section's own row already makes an unfiled session")
+check("…on every custom group, Ungrouped included, through the one rule",
+      section.contains("AgentSessionGrouping.headerActions(mode: mode,")
+        && AgentSessionGrouping.headerActions(mode: .custom, key: "Work",
+                                              customGroups: groups).plus
+        && AgentSessionGrouping.headerActions(mode: .custom,
+                                              key: AgentSessionGrouping.ungroupedKey,
+                                              customGroups: groups).plus,
+      "— Ungrouped carries one like every other custom group: it starts a session filed nowhere")
+check("…and a folder's, but not No directory's, which names no folder to start in",
+      AgentSessionGrouping.headerActions(mode: .folder, key: "/tmp/work",
+                                         customGroups: groups).plus
+        && !AgentSessionGrouping.headerActions(mode: .folder,
+                                               key: AgentSessionGrouping.noDirectoryKey,
+                                               customGroups: groups).plus)
 check("…and on the agent being drivable",
       section.contains("let showsPlus = isReady"),
       "— a read-only section cannot spawn anything")
@@ -312,7 +325,7 @@ check("the filing is NOT left to the view",
 // Three rules of the filing, each easy to get wrong and none of which
 // a compile can catch.
 check("the launch scan still reads \"Scanning…\" under Custom",
-      section.contains("(agents.isScanning || !namedGroupsToDraw)"),
+      section.contains("(agents.isScanning || groupMode != .custom)"),
       "— `sessions` is empty until the first scan lands; without this every group sits at 0 for the length of it")
 check("a rename follows into the pending draft",
       section.contains("appState.pendingClaudeSessionDraft?.customGroup = name"),

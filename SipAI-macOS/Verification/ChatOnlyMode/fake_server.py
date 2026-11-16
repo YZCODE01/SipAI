@@ -27,7 +27,11 @@ The file holds the JSON of the function_call item to emit.
 
 An Anthropic script does the same for the Messages route: its first
 request is answered with ONE tool_use block (the file holds
-{"name": …, "input": {…}}), every later one with text. The harness
+{"name": …, "input": {…}}), every later one with text. A LIST of such
+objects scripts a turn step by step: the first request gets the first,
+a request carrying k tool results the (k+1)-th, and text once the list
+runs out (a request with no tool result after the first is a side
+request, and gets text). The harness
 uses it to prove a Chat only turn's web tools are pre-approved — the
 tool actually runs — rather than refused for want of an approver.
 
@@ -45,6 +49,32 @@ speed it was served at in its usage (`"speed"`), as the API does.
 (kimi) and Responses (codex) routes wait S seconds before answering, so
 a turn can be caught mid-flight — the abort probe, and the
 ExternalTurnWatch harness watching a turn another process runs.
+`--anthropic-delay S` does the same for a Messages request answered with
+text (a scripted tool call still comes at once), so a message can reach
+claude while its answer is being written.
+
+`--chat-script <file>` scripts the chat-completions (kimi) route turn by
+turn. The file holds a list of {"marker": …, "steps": [ … ]}; a request
+whose newest marked user message carries a marker is answered with the
+step whose index is the number of tool results after that message, so a
+turn walks its steps as its tools run, and anything past the last step
+(or unmarked, like a side request for a title) is answered "OK". A step
+is any of: {"text": …} streamed word by word; {"tool_calls": [{"id",
+"name", "arguments": {…}}]}; {"think": …} before either; {"error":
+{"status": n, "body": {…}}}; {"delay": S} before answering. In a text or
+an argument, {PLAN_FILE} is the plan file the request names and {CWD}
+the working folder the request names. `--chat-gap S` waits S seconds
+between the chunks of a scripted text, so a client can be watched
+receiving them one by one.
+
+`--responses-script <file>` does the same for the Responses (codex) route:
+the newest user message carrying a marker picks the entry, and the number
+of tool outputs after it picks the step. A step is any of: {"text": …};
+{"function_call": {"name", "arguments": {…}, "call_id"?, "namespace"?}}
+(an MCP server's tool: "namespace": "mcp__<server>", "name": the tool); {"custom_tool_call":
+{"name", "input", "call_id"?}} (codex's freeform `apply_patch`); {"delay": S}
+before answering; {"error": {"status": n, "body": {…}}}. {CWD} is the
+working folder codex's environment context names.
 
 `--think` opens every reply with a THOUGHT, in each dialect's own shape:
 a `thinking` block (Messages), a `reasoning` item with a summary
@@ -65,9 +95,13 @@ script = None
 anthropic_script = None
 chat_delay = 0.0
 responses_delay = 0.0
+anthropic_delay = 0.0
 think = False
 refuse_fast = None
 rate_limit_fast = None
+chat_script = None
+responses_script = None
+chat_gap = 0.0
 THOUGHT = "HARNESS-THOUGHT: weighing the question before answering."
 args = sys.argv[2:]
 while args:
@@ -86,8 +120,18 @@ while args:
         chat_delay = float(args.pop(0))
     elif a == "--responses-delay":
         responses_delay = float(args.pop(0))
+    elif a == "--anthropic-delay":
+        anthropic_delay = float(args.pop(0))
     elif a == "--think":
         think = True
+    elif a == "--chat-script":
+        with open(args.pop(0)) as f:
+            chat_script = json.load(f)
+    elif a == "--responses-script":
+        with open(args.pop(0)) as f:
+            responses_script = json.load(f)
+    elif a == "--chat-gap":
+        chat_gap = float(args.pop(0))
     elif a == "--refuse-fast":
         refuse_fast = args.pop(0)
     elif a == "--rate-limit-fast":
@@ -98,6 +142,22 @@ counter_lock = threading.Lock()
 counter = [0]
 responses_seen = [0]
 messages_seen = [0]
+anthropic_steps = (None if anthropic_script is None
+                   else anthropic_script if isinstance(anthropic_script, list)
+                   else [anthropic_script])
+
+
+def tool_results_in(body):
+    """How many tool results a Messages request carries: the steps of a
+    scripted turn that have run."""
+    if not isinstance(body, dict):
+        return 0
+    n = 0
+    for message in body.get("messages") or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            n += sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_result")
+    return n
 
 
 def record(method, path, headers, body):
@@ -173,17 +233,25 @@ class Handler(BaseHTTPRequestHandler):
                            headers=[("anthropic-ratelimit-unified-overage-disabled-reason",
                                      refuse_fast)])
             else:
-                self._anthropic(speed="fast" if wants_fast else "standard")
+                self._anthropic(body, speed="fast" if wants_fast else "standard")
         elif path.endswith("/responses"):
-            self._responses(n)
+            step = scripted_responses_step(body) if responses_script else None
+            if step is not None:
+                _responses_step_impl(self, step, body, n)
+            else:
+                self._responses(n)
         elif path.endswith("/chat/completions"):
-            self._chat()
+            step = scripted_chat_step(body) if chat_script else None
+            if step is not None:
+                self._chat_step(step, body)
+            else:
+                self._chat()
         elif path.endswith("/count_tokens"):
             self._json({"input_tokens": 10})
         else:
             self._json({"ok": True})
 
-    def _anthropic(self, speed="standard"):
+    def _anthropic(self, body, speed="standard"):
         def ev(name, obj):
             return "event: %s\ndata: %s\n\n" % (name, json.dumps(obj))
 
@@ -203,7 +271,15 @@ class Handler(BaseHTTPRequestHandler):
         with counter_lock:
             messages_seen[0] += 1
             first = messages_seen[0] == 1
-        if anthropic_script is not None and first:
+        step = None
+        if anthropic_steps:
+            ran = tool_results_in(body)
+            if first:
+                step = 0
+            elif 0 < ran < len(anthropic_steps):
+                step = ran
+        if step is not None:
+            tool = anthropic_steps[step]
             self._sse([
                 ev("message_start", {"type": "message_start", "message": {
                     "id": "msg_fake_tool", "type": "message", "role": "assistant",
@@ -213,12 +289,12 @@ class Handler(BaseHTTPRequestHandler):
             ] + thought(0) + [
                 ev("content_block_start", {"type": "content_block_start", "index": first_index,
                                            "content_block": {"type": "tool_use",
-                                                             "id": "toolu_harness_1",
-                                                             "name": anthropic_script["name"],
+                                                             "id": "toolu_harness_%d" % (step + 1),
+                                                             "name": tool["name"],
                                                              "input": {}}}),
                 ev("content_block_delta", {"type": "content_block_delta", "index": first_index,
                                            "delta": {"type": "input_json_delta",
-                                                     "partial_json": json.dumps(anthropic_script["input"])}}),
+                                                     "partial_json": json.dumps(tool["input"])}}),
                 ev("content_block_stop", {"type": "content_block_stop", "index": first_index}),
                 ev("message_delta", {"type": "message_delta",
                                      "delta": {"stop_reason": "tool_use", "stop_sequence": None},
@@ -226,6 +302,8 @@ class Handler(BaseHTTPRequestHandler):
                 ev("message_stop", {"type": "message_stop"}),
             ])
             return
+        if anthropic_delay > 0:
+            time.sleep(anthropic_delay)
         self._sse([
             ev("message_start", {"type": "message_start", "message": {
                 "id": "msg_fake", "type": "message", "role": "assistant",
@@ -320,6 +398,176 @@ class Handler(BaseHTTPRequestHandler):
             chunks = [chunk(reasoning)] + chunks
         self._sse(chunks)
 
+
+def _text_of(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(p.get("text", "") for p in content if isinstance(p, dict))
+    return ""
+
+
+def scripted_chat_step(body):
+    """The scripted step this request is answered with, or None."""
+    if not isinstance(body, dict):
+        return None
+    messages = body.get("messages") or []
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if m.get("role") != "user":
+            continue
+        text = _text_of(m.get("content"))
+        # The longest marker first: one marker may contain another.
+        for entry in sorted(chat_script, key=lambda e: -len(e["marker"])):
+            if entry["marker"] in text:
+                results = sum(1 for later in messages[i + 1:] if later.get("role") == "tool")
+                steps = entry["steps"]
+                return steps[results] if results < len(steps) else None
+    return None
+
+
+PLAN_FILE_RE = __import__("re").compile(r"(/[^\s\"'`]*?/plans/[A-Za-z0-9._-]+\.md)")
+CWD_RE = __import__("re").compile(r"(?:[Ww]orking directory|cwd)[^/]*(/[^\s\"'`]+)")
+CODEX_CWD_RE = __import__("re").compile(r"<cwd>(/[^<]+)</cwd>")
+
+
+def _fill(value, body_text, cwd_re=CWD_RE):
+    if isinstance(value, str):
+        if "{PLAN_FILE}" in value:
+            m = PLAN_FILE_RE.search(body_text)
+            value = value.replace("{PLAN_FILE}", m.group(1) if m else "/tmp/plan.md")
+        if "{CWD}" in value:
+            m = cwd_re.search(body_text)
+            value = value.replace("{CWD}", m.group(1) if m else "/tmp")
+        return value
+    if isinstance(value, dict):
+        return {k: _fill(v, body_text, cwd_re) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_fill(v, body_text, cwd_re) for v in value]
+    return value
+
+
+def _chat_step_impl(handler, step, body):
+    body_text = json.dumps(body)
+    if step.get("delay"):
+        time.sleep(float(step["delay"]))
+    if "error" in step:
+        err = step["error"]
+        handler._json(err.get("body", {"error": {"message": "scripted failure"}}),
+                      status=int(err.get("status", 500)))
+        return
+    base = {"id": "chatcmpl-fake", "object": "chat.completion.chunk",
+            "created": int(time.time()), "model": "fake-model"}
+    def chunk(delta, finish=None, usage=None):
+        obj = dict(base)
+        obj["choices"] = [{"index": 0, "delta": delta, "finish_reason": finish}]
+        if usage:
+            obj["usage"] = usage
+        return "data: %s\n\n" % json.dumps(obj)
+    # Streamed for real (chunked), so `--chat-gap` reaches the client as
+    # gaps: the server is HTTP/1.1, and a body with neither a length nor
+    # chunks never ends.
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream")
+    handler.send_header("Cache-Control", "no-cache")
+    handler.send_header("Transfer-Encoding", "chunked")
+    handler.end_headers()
+    def emit(text):
+        data = text.encode()
+        handler.wfile.write(b"%x\r\n" % len(data) + data + b"\r\n")
+        handler.wfile.flush()
+    if step.get("think"):
+        emit(chunk({"role": "assistant", "reasoning_content": step["think"]}))
+    finish = "stop"
+    if "tool_calls" in step:
+        calls = _fill(step["tool_calls"], body_text)
+        for k, call in enumerate(calls):
+            emit(chunk({"role": "assistant", "tool_calls": [{
+                "index": k, "id": call.get("id", "call_%d" % k), "type": "function",
+                "function": {"name": call["name"], "arguments": json.dumps(call.get("arguments", {}))}}]}))
+        finish = "tool_calls"
+    else:
+        words = _fill(step.get("text", "OK"), body_text).split(" ")
+        for k, w in enumerate(words):
+            emit(chunk({"role": "assistant", "content": w + (" " if k < len(words) - 1 else "")}))
+            if chat_gap > 0 and k < len(words) - 1:
+                time.sleep(chat_gap)
+    emit(chunk({}, finish=finish, usage={"prompt_tokens": 10, "completion_tokens": 1, "total_tokens": 11}))
+    emit("data: [DONE]\n\n")
+    handler.wfile.write(b"0\r\n\r\n")
+    handler.wfile.flush()
+
+
+Handler._chat_step = lambda self, step, body: _chat_step_impl(self, step, body)
+
+
+def scripted_responses_step(body):
+    """The scripted Responses step this request is answered with, or None."""
+    if not isinstance(body, dict):
+        return None
+    items = body.get("input") or []
+    for i in range(len(items) - 1, -1, -1):
+        it = items[i]
+        if it.get("type") != "message" or it.get("role") != "user":
+            continue
+        text = _text_of(it.get("content"))
+        for entry in sorted(responses_script, key=lambda e: -len(e["marker"])):
+            if entry["marker"] in text:
+                results = sum(1 for later in items[i + 1:]
+                              if later.get("type") in ("function_call_output", "custom_tool_call_output"))
+                steps = entry["steps"]
+                return steps[results] if results < len(steps) else None
+    return None
+
+
+def _responses_step_impl(handler, step, body, n):
+    body_text = json.dumps(body)
+    if step.get("delay"):
+        time.sleep(float(step["delay"]))
+    if "error" in step:
+        err = step["error"]
+        handler._json(err.get("body", {"error": {"message": "scripted failure"}}),
+                      status=int(err.get("status", 500)))
+        return
+    def ev(obj):
+        return "event: %s\ndata: %s\n\n" % (obj["type"], json.dumps(obj))
+    if "function_call" in step:
+        call = _fill(step["function_call"], body_text, CODEX_CWD_RE)
+        item = {"id": "fc_%d" % n, "type": "function_call", "status": "completed",
+                "call_id": call.get("call_id", "call_%d" % n), "name": call["name"],
+                "arguments": json.dumps(call.get("arguments", {}))}
+        # Codex files an MCP server's tools under a namespace
+        # (`mcp__<server>`), and runs a call only when it names it.
+        if call.get("namespace"):
+            item["namespace"] = call["namespace"]
+    elif "custom_tool_call" in step:
+        call = _fill(step["custom_tool_call"], body_text, CODEX_CWD_RE)
+        item = {"id": "ctc_%d" % n, "type": "custom_tool_call", "status": "completed",
+                "call_id": call.get("call_id", "call_%d" % n), "name": call["name"],
+                "input": call.get("input", "")}
+    else:
+        text = _fill(step.get("text", "OK"), body_text, CODEX_CWD_RE)
+        item = {"id": "msg_%d" % n, "type": "message", "role": "assistant", "status": "completed",
+                "content": [{"type": "output_text", "text": text, "annotations": []}]}
+    events = [ev({"type": "response.created",
+                  "response": {"id": "resp_%d" % n, "object": "response",
+                               "created_at": int(time.time()), "status": "in_progress", "output": []}}),
+              ev({"type": "response.output_item.added", "output_index": 0, "item": item})]
+    if item["type"] == "message":
+        events.append(ev({"type": "response.output_text.delta", "item_id": item["id"],
+                          "output_index": 0, "content_index": 0,
+                          "delta": item["content"][0]["text"]}))
+    events.append(ev({"type": "response.output_item.done", "output_index": 0, "item": item}))
+    events.append(ev({"type": "response.completed",
+                      "response": {"id": "resp_%d" % n, "object": "response",
+                                   "created_at": int(time.time()), "status": "completed",
+                                   "output": [item],
+                                   "usage": {"input_tokens": 10,
+                                             "input_tokens_details": {"cached_tokens": 0},
+                                             "output_tokens": 1,
+                                             "output_tokens_details": {"reasoning_tokens": 0},
+                                             "total_tokens": 11}}}))
+    handler._sse(events)
 
 server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
 server.daemon_threads = True

@@ -1,9 +1,10 @@
 // SettingsView.swift
-// Settings, one section at a time in the centre pane: chat models, the
-// chat prompt and roles, the agent guide, files and notes, display,
-// labels, language, updates, help. The way in (the menu over the
-// sidebar's Settings row) and the list of sections the sidebar shows
-// meanwhile are in SettingsNavigation.swift.
+// Settings, one section at a time in the centre pane: chat settings (the
+// chat models, the system prompt and the roles), agent initialization,
+// agent skills, files and notes, display, labels, language, usage,
+// updates, privacy, help. The way in (the menu over the sidebar's Settings row)
+// and the list of sections the sidebar shows meanwhile are in
+// SettingsNavigation.swift.
 
 import SwiftUI
 import AppKit
@@ -17,11 +18,15 @@ struct SettingsView: View {
     @EnvironmentObject var appState: AppState
 
     /// The sections in the order the menu and the sidebar list them —
-    /// `allCases` IS that order. The chat's two sections come first: the
-    /// system prompt and roles reach chat turns alone, never an agent
-    /// session (Chat only included, which carries its own persona).
+    /// `allCases` IS that order. Chat Settings comes first: its system
+    /// prompt and roles reach chat turns alone, never an agent session
+    /// (Chat only included, which carries its own persona).
+    ///
+    /// A raw value is also a link's last component —
+    /// `sipai://settings/<raw value>`, in sentences of the String Catalog
+    /// — so renaming a case strands every link that names it.
     enum Tab: String, CaseIterable, Identifiable {
-        case models, prompt, agents, files, display, labels, language, updates, help
+        case chat, agents, skills, files, display, labels, language, usage, updates, privacy, help
         var id: String { rawValue }
 
         /// `userInfo` key of `.openSettingsTab`, carrying a raw value.
@@ -29,14 +34,16 @@ struct SettingsView: View {
 
         var title: LocalizedStringKey {
             switch self {
-            case .models:    return "Chat models"
-            case .agents:    return "Agent Guide"
-            case .prompt:    return "Chat Prompt and Roles"
+            case .chat:      return "Chat Settings"
+            case .agents:    return "Agent Initialization"
+            case .skills:    return "Agent Skills"
             case .files:     return "Files & Notes"
             case .display:   return "Display"
             case .labels:    return "Labels"
             case .language:  return "Language"
+            case .usage:     return "Usage"
             case .updates:   return "Updates"
+            case .privacy:   return "Privacy"
             case .help:      return "Help"
             }
         }
@@ -112,14 +119,16 @@ struct SettingsView: View {
     @ViewBuilder
     private func pane(_ proxy: ScrollViewProxy) -> some View {
         switch section {
-        case .models:    ModelsPane(switchTab: { appState.settingsSection = $0 })
+        case .chat:      ChatSettingsPane(switchTab: { appState.settingsSection = $0 })
         case .agents:    AgentGuidePane()
-        case .prompt:    PromptAndRolesPane()
+        case .skills:    SkillsPane()
         case .files:     FilesPane()
         case .display:   DisplayPane()
         case .labels:    LabelsPane()
         case .language:  LanguagePane()
+        case .usage:     UsagePane()
         case .updates:   UpdatesPane()
+        case .privacy:   PrivacyPane()
         case .help:
             HelpPane(initialTopic: initialHelpTopic) { id in
                 withAnimation(.easeInOut(duration: 0.25)) {
@@ -132,18 +141,41 @@ struct SettingsView: View {
 
 // MARK: - Panes
 
+/// Settings → Chat Settings: everything that shapes a chat, in the order
+/// a chat needs it — what a chat is and the models it can talk to
+/// (`ModelsPane`), then the system prompt every message carries and the
+/// roles that stand in for it (`PromptAndRolesPane`). None of it reaches
+/// an agent session, Chat only included.
+struct ChatSettingsPane: View {
+    /// The Agent Initialization link in About chats switches Settings to
+    /// that section; the page hands the setter in.
+    var switchTab: (SettingsView.Tab) -> Void = { _ in }
+
+    var body: some View {
+        // The gap the system prompt and the roles keep between them, so
+        // the page's three parts are set apart alike.
+        VStack(alignment: .leading, spacing: 8) {
+            ModelsPane(switchTab: switchTab)
+            Divider().padding(.vertical, 6)
+            PromptAndRolesPane()
+        }
+    }
+}
+
+/// Chat Settings' opening and first part: About chats, then the chat
+/// models and Add Model.
 struct ModelsPane: View {
     @EnvironmentObject var config: ConfigManager
     @State private var addHovered = false
-    /// The "Agent Guide" link in the explanation switches Settings to
-    /// that section; the page hands the setter in.
+    /// The Agent Initialization link in About chats switches Settings to
+    /// that section.
     var switchTab: (SettingsView.Tab) -> Void = { _ in }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             aboutChats
 
-            Text("Chat models", comment: "Settings pane header").sipFont(14, weight: .semibold)
+            Text("Chat models", comment: "Settings → Chat Settings: header of the chat model list").sipFont(14, weight: .semibold)
             ForEach(config.models) { m in
                 ModelSettingsRow(model: m)
             }
@@ -153,8 +185,8 @@ struct ModelsPane: View {
             // the provider → API key → pick-models setup sheet — and the
             // SAME sheet, ContentView's, reached the way the composer
             // reaches it. A sheet of this pane's own would hang off the
-            // main window too, unreported to the update announcer and
-            // untinted by the app's theme; ContentView's is both.
+            // main window too, unreported to the notices beside the logo
+            // and untinted by the app's theme; ContentView's is both.
             HStack {
                 Spacer()
                 Button {
@@ -181,15 +213,16 @@ struct ModelsPane: View {
         }
     }
 
-    /// What a chat is, above the list — the page the chat page's "Learn
-    /// more" opens. Two literals with no interpolation (no agent label
-    /// in either), the second carrying the link to the Agent Guide.
+    /// What a chat is, above the list — the opening of the page the chat
+    /// page's "Learn more" opens. Two literals with no interpolation (no
+    /// agent label in either), the second carrying the link to Agent
+    /// Initialization.
     private var aboutChats: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("About chats", comment: "Settings → Chat models: header of the explanation above the model list")
+            Text("About chats", comment: "Settings → Chat Settings: header of the explanation that opens the section")
                 .sipFont(14, weight: .semibold)
-            Text("A chat sends your message straight to the model provider's API and shows the reply — no server in between, no SipAI account. Each provider bills its own API key per token.",
-                 comment: "Settings → Chat models: explanation, first paragraph")
+            Text("A chat sends your message straight to the model provider's API and shows the reply. Each provider bills its own API key per token.",
+                 comment: "Settings → Chat Settings: explanation, first paragraph")
                 .sipFont(12)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -197,6 +230,7 @@ struct ModelsPane: View {
                 .sipFont(12)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+                .linkPointers(Self.subscriptionParagraph)
                 .environment(\.openURL, OpenURLAction { url in
                     guard url.scheme == "sipai" else { return .systemAction }
                     if url.host == "settings",
@@ -211,11 +245,11 @@ struct ModelsPane: View {
 
     /// The way out for someone who has a subscription and no API key,
     /// with its link styled as a link: blue, underlined. The link is
-    /// handled above, in-app — it switches Settings to the Agent Guide
-    /// rather than leaving for a browser.
+    /// handled above, in-app — it switches Settings to Agent
+    /// Initialization rather than leaving for a browser.
     private static var subscriptionParagraph: AttributedString {
-        var text = AttributedString(localized: "If you would rather use a subscription plan for your conversations, use the **Chat only** mode of a SipAI agent session instead. See [Agent Guide](sipai://settings/agents) for the details.",
-                                    comment: "Settings → Chat models: explanation, second paragraph. Keep the [Agent Guide](sipai://settings/agents) link and the **Chat only** mode name (the mode chip's row).")
+        var text = AttributedString(localized: "If you would rather use a subscription plan for your conversations, use the **Chat only** mode of a SipAI agent session instead. See [Agent Initialization](sipai://settings/agents) for the details.",
+                                    comment: "Settings → Chat Settings: explanation, second paragraph. Keep the [Agent Initialization](sipai://settings/agents) link and the **Chat only** mode name (the mode chip's row).")
         for run in text.runs where run.link != nil {
             text[run.range].underlineStyle = .single
             text[run.range].foregroundColor = SipDesign.blue
@@ -314,6 +348,8 @@ private struct ModelSettingsRow: View {
     }
 }
 
+/// Chat Settings' second and third parts: the system prompt, then the
+/// roles.
 struct PromptAndRolesPane: View {
     @EnvironmentObject var config: ConfigManager
     @Environment(\.sipFontScale) private var fontScale
@@ -495,12 +531,13 @@ struct DisplayPane: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Appearance", comment: "Settings: appearance section header")
                 .sipFont(14, weight: .semibold)
-            Picker("", selection: Binding(
+            Picker(selection: Binding(
                 get: { appState.theme },
                 set: { t in
-                    // AppState drives `.preferredColorScheme` live; the
-                    // config write makes the choice survive relaunch
-                    // (seeded back in SipAIApp.onAppear).
+                    // The window's root applies AppState's theme to the
+                    // whole app (`AppTheme.appearance`); the config write
+                    // makes the choice survive relaunch (seeded back in
+                    // SipAIApp.onAppear).
                     appState.theme = t
                     config.setTheme(t)
                 }
@@ -508,6 +545,10 @@ struct DisplayPane: View {
                 ForEach(AppTheme.allCases) { t in
                     Text(t.localizedName).tag(t)
                 }
+            } label: {
+                // Hidden: the header above draws the name. This is what
+                // VoiceOver calls the picker — without one it has none.
+                Text("Appearance", comment: "Settings: appearance section header")
             }
             .pickerStyle(.segmented)
             .labelsHidden()
@@ -519,21 +560,27 @@ struct DisplayPane: View {
 
             Divider().padding(.vertical, 4)
 
-            Text("Font Size", comment: "Settings: font size section header")
+            // The one size setting: the View menu's Zoom In / Zoom Out /
+            // Actual Size move this same value, so the two places share the
+            // name.
+            Text("Zoom", comment: "Settings: header of the size setting — text size and line spacing; the View menu's Zoom In, Zoom Out and Actual Size change the same setting")
                 .sipFont(14, weight: .semibold)
-            Picker("", selection: Binding(
+            Picker(selection: Binding(
                 get: { config.fontTier },
-                set: { t in config.setDisplay { $0.fontTier = t.rawValue } }
+                set: { config.setFontTier($0) }
             )) {
                 ForEach(FontTier.allCases) { t in
                     Text(t.localizedName).tag(t)
                 }
+            } label: {
+                // Hidden, as Appearance's: VoiceOver's name for the picker.
+                Text("Zoom", comment: "Settings: header of the size setting — text size and line spacing; the View menu's Zoom In, Zoom Out and Actual Size change the same setting")
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .frame(maxWidth: 420, alignment: .leading)
-            Text("Applies to the sidebar, the conversation, the text box and its controls, notes, and Settings. Bigger tiers also widen line spacing; Large text mode doubles it.",
-                 comment: "Settings: font size help text")
+            Text("Applies to the sidebar, the conversation, the text box and its controls, notes, and Settings. Bigger sizes also widen line spacing; Large text mode doubles it. Change it from anywhere with View → Zoom In (⌘+), Zoom Out (⌘−) and Actual Size (⌘0).",
+                 comment: "Settings: help text under the Zoom sizes; names the View menu's three items and their shortcuts")
                 .sipFont(12)
                 .foregroundStyle(.secondary)
 
@@ -542,14 +589,28 @@ struct DisplayPane: View {
             Text("Sidebar", comment: "Settings: header of the sidebar display toggles")
                 .sipFont(14, weight: .semibold)
 
+            // Where a section hidden from its own header's … menu comes back —
+            // that menu's confirmation sends the user here. The names are
+            // the headers' own keys.
+            Text("Show sections", comment: "Settings: label over the switches for the sidebar's Notes, Chats and Chat groups sections (no switch of its own)")
+                .sipFont(14)
+            subToggle("Notes", value: \.showNotesSection)
+            subToggle("Chats", value: \.showChatsSection)
+            subToggle("Chat groups", value: \.showChatGroupsSection)
+            Text("Agent sections are shown and hidden in Settings → Agent Initialization.",
+                 comment: "Settings: help text under the sidebar section switches")
+                .sipFont(12)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 16)
+
             // A row of its own: a switch with a sentence under it, not one
             // of a group's per-surface switches, so it takes neither their
             // indent nor their smaller, dimmer label. The logo and app name
             // it takes the place of are always there — hiding them is not
-            // offered, or the messages would have nowhere to show.
-            toggle("Show update messages", value: \.showUpdateMessages)
-            Text("When SipAI or an agent tool is updated, a short message takes the app name's place for five seconds.",
-                 comment: "Settings: help text under the update-messages toggle")
+            // offered, or the notifications would have nowhere to show.
+            toggle("Show notifications beside the logo", value: \.showSidebarNotices)
+            Text("An update you can install stays beside the logo, with an Update button, until you use it or close it. A session waiting for you shows there for 10 seconds; a finished chat or agent response, and an update that has landed, for 5.",
+                 comment: "Settings: help text under the switch for the notifications beside the sidebar's logo")
                 .sipFont(12)
                 .foregroundStyle(.secondary)
 
@@ -582,6 +643,30 @@ struct DisplayPane: View {
 
             Divider().padding(.vertical, 4)
 
+            // The toolbar window's switch and View → Agent Session Compact
+            // View move this same value (`TranscriptViewWindow.swift`), so
+            // the three places share its words.
+            Text("Agent sessions", comment: "Settings: header of the agent session display switch (Compact view)")
+                .sipFont(14, weight: .semibold)
+            HStack {
+                Text(verbatim: CompactViewWords.switchLabel)
+                    .sipFont(14)
+                Spacer()
+                Toggle(isOn: Binding(
+                    get: { config.display.agentCompactView },
+                    set: { v in config.setDisplay { $0.agentCompactView = v } }
+                )) {
+                    Text(verbatim: CompactViewWords.switchLabel)
+                }
+                .labelsHidden()
+            }
+            Text("Shows each answer’s thinking, tool calls and messages as one line, with its final message under it. Click a line to see its steps. The same switch is in the toolbar, and in View → Agent Session Compact View (⌃⌘O).",
+                 comment: "Settings: help text under the Compact view switch; names the toolbar button and the View menu item with its shortcut")
+                .sipFont(12)
+                .foregroundStyle(.secondary)
+
+            Divider().padding(.vertical, 4)
+
             Text("Typo check", comment: "Settings: spell-checking section header")
                 .sipFont(14, weight: .semibold)
 
@@ -593,15 +678,21 @@ struct DisplayPane: View {
         }
     }
 
+    /// A row's words are drawn beside its switch, and the switch carries
+    /// them again as its own hidden label: that is the name VoiceOver reads
+    /// for it. A switch made with an empty title has no accessible name at
+    /// all, so VoiceOver can announce nothing but its state.
     private func toggle(_ key: LocalizedStringKey, value: WritableKeyPath<DisplaySettings, Bool>) -> some View {
         HStack {
             Text(key)
                 .sipFont(14)
             Spacer()
-            Toggle("", isOn: Binding(
+            Toggle(isOn: Binding(
                 get: { config.display[keyPath: value] },
                 set: { v in config.setDisplay { $0[keyPath: value] = v } }
-            ))
+            )) {
+                Text(key)
+            }
             .labelsHidden()
         }
     }
@@ -613,10 +704,12 @@ struct DisplayPane: View {
                 .sipFont(13)
                 .foregroundStyle(.secondary)
             Spacer()
-            Toggle("", isOn: Binding(
+            Toggle(isOn: Binding(
                 get: { config.display[keyPath: value] },
                 set: { v in config.setDisplay { $0[keyPath: value] = v } }
-            ))
+            )) {
+                Text(key)
+            }
             .labelsHidden()
         }
         .padding(.leading, 16)
@@ -624,7 +717,13 @@ struct DisplayPane: View {
 }
 
 /// "Labels" settings pane — renames the user/AI labels and the label of
-/// every available agent. Contract in CLAUDE.md, "Editing a label".
+/// every available agent. One row edits at a time, and only Save (Return,
+/// or the button) keeps an edit: Escape, a click anywhere else, focus
+/// leaving the field and the pane going away all cancel. The 25-character
+/// cap is enforced here, at the edit, never on load: a longer label already
+/// in the config — written by hand, or by an earlier SipAI — stays whole
+/// until it is edited here, where a clamp on load would cut it short the
+/// next time anything in Display is switched (that writes every label back).
 struct LabelsPane: View {
     @EnvironmentObject var config: ConfigManager
     @EnvironmentObject var agents: AgentManager
@@ -921,7 +1020,7 @@ struct HelpPane: View {
                 question: String(localized: "How do I get an API key?",
                                  comment: "FAQ question"),
                 body: .text(String(localized: """
-Each provider issues keys from its own dashboard. For examples, OpenAI at platform.openai.com/api-keys, Anthropic at console.anthropic.com, Google (Gemini) at aistudio.google.com, DeepSeek at platform.deepseek.com, Alibaba Qwen in the DashScope console, xAI at console.x.ai. You may need to register for their accounts and create a key there, then in SipAI click Add Model (in the chat composer or Settings → Chat models), pick the provider, and paste the key when asked. Some providers issue region-bound keys (e.g. Qwen, Kimi): pick the region that matches where the key was created.
+Each provider issues keys from its own dashboard. For examples, OpenAI at platform.openai.com/api-keys, Anthropic at console.anthropic.com, Google (Gemini) at aistudio.google.com, DeepSeek at platform.deepseek.com, Alibaba Qwen in the DashScope console, xAI at console.x.ai. You may need to register for their accounts and create a key there, then in SipAI click Add Model (in the chat composer or Settings → Chat Settings), pick the provider, and paste the key when asked. Some providers issue region-bound keys (e.g. Qwen, Kimi): pick the region that matches where the key was created.
 """, comment: "FAQ answer: getting an API key"))),
             FAQ(id: 2,
                 question: String(localized: "I added a key but requests fail — what should I check?",
@@ -942,12 +1041,18 @@ Each provider has their dashboard to help users track their API credit usage. Pl
                 question: String(localized: "Why does \(codexLabel) show a 258k context window, and how do I get the larger one?",
                                  comment: "FAQ question; placeholder is the Codex label"),
                 body: .codexContextWindow),
+            FAQ(id: 17,
+                question: String(localized: "Why did \(claudeLabel) say “Prompt is too long”, and why is my message there twice?",
+                                 comment: "FAQ question about a message Claude Code refused as too long and SipAI sent again; placeholder is the Claude Code label"),
+                body: .text(String(localized: """
+Before \(claudeLabel) sends your message, it checks the size of the whole conversation. When a file it reads as a session starts, such as the project's CLAUDE.md, has changed since your last message, it attaches the whole file again. Near the end of a long conversation, that can make the conversation too large for the model, and \(claudeLabel) answers “Prompt is too long” instead of compacting the conversation first. SipAI then sends your message once more. This time \(claudeLabel) compacts the conversation (the “Conversation compacted” row) and answers. That is why your message appears twice, with the notice between. If it is refused again, the turn ends there. SipAI starts \(claudeLabel) afresh for each message, so this can follow any change to such a file; in \(claudeLabel)'s own terminal it can happen when you resume a session.
+""", comment: "FAQ answer: why Claude Code refuses a message as too long and how SipAI sends it again; every placeholder is the Claude Code label"))),
             FAQ(id: 4,
                 question: String(localized: "Can SipAI show how much of my provider plan is used?",
                                  comment: "FAQ question"),
                 body: .text(String(localized: """
-Yes — click the T icon beside the search icon in the toolbar. It appears when at least one of your agent tools is signed in to a plan (a Claude subscription, a ChatGPT plan for Codex, or a Kimi Code membership), and it shows what each plan reports: the current 5-hour session and weekly windows for Claude Code, the weekly and per-model limits for Codex, and the weekly quota and 5-hour window for Kimi Code. The numbers are fetched when you open the window and are as fresh as the time shown at the bottom; click the refresh arrow for a new reading. Each figure comes from the tool's own account query, run on your Mac by the tool itself: Claude Code answers its /usage command, Codex answers over its app server, and Kimi Code answers over its local server. No tokens are spent, SipAI never sees a login token, and nothing is stored or sent anywhere. If every agent runs on an API key there is nothing to show and the icon stays hidden; API usage and cost live on each provider's developer platform.
-""", comment: "FAQ answer: plan consumption"))),
+Yes — click the T icon beside the search icon in the toolbar. It appears when at least one of your agent tools is signed in to a plan (a Claude subscription, a ChatGPT plan for \(codexLabel), or a Kimi Code membership), and it shows what each plan reports: the current 5-hour session and weekly windows for \(claudeLabel), the weekly and per-model limits for \(codexLabel), and the 5-hour and monthly limits for \(kimiLabel), plus a weekly one on older plans. The numbers are fetched when you open the window and are as fresh as the time shown at the bottom; click the refresh arrow for a new reading. Each figure comes from the tool's own account query, run on your Mac by the tool itself: \(claudeLabel) answers its /usage command, \(codexLabel) answers over its app server, and \(kimiLabel) answers over its local server. No tokens are spent. Learn more, beside the window's title, opens Settings → Usage, which shows more of what each tool reports — \(claudeLabel)'s own account of what is using your limits, \(codexLabel)'s credits, limit resets and token history — and links to each tool's own usage page. A free \(codexLabel) limit reset is used from there, once you confirm it; it cannot be undone. If every agent runs on an API key there is nothing to show and the icon stays hidden; Settings → Usage says where each one is billed instead.
+""", comment: "FAQ answer: plan consumption; placeholders are the Codex, Claude Code and Kimi Code labels"))),
             // Its id is `HelpTopic.chatOnly.faqId`, the one number a
             // deep link to this card would use.
             FAQ(id: HelpTopic.chatOnly.faqId,
@@ -956,6 +1061,66 @@ Yes — click the T icon beside the search icon in the toolbar. It appears when 
                 body: .text(String(localized: """
 Chat only is a row in an agent session's mode chip. A turn sent under it carries none of the agent's file or command tools and no MCP servers — except that \(codexLabel) keeps any you added to its own config — so the agent can't read, search or change files or run commands, but, like a chat app, it can still look things up on the web when a question needs current information. It answers in the same session, and the next turn in any other row continues the conversation with the tools back. It draws on whatever the tool is signed in to: \(claudeLabel) uses your Claude plan, \(codexLabel) uses your Codex limits (a ChatGPT plan's Codex allowance, not its chat allowance), \(kimiLabel) uses your Kimi Code membership — and a tool signed in with an API key bills that key. A short exchange costs far less than a full agent turn, and switching rows re-caches the conversation once. To share a file, attach it with the + or drop it on the box: text files and PDF text travel inside the message, and an image goes to the model as an image (on \(kimiLabel), only in a new session's first message). On a new \(kimiLabel) session the first Chat only message arrives all at once; later ones stream. \(kimiLabel) searches the web only when it has a search provider, which a Kimi Code membership login provides; with an API key alone it can open a page but not search.
 """, comment: "FAQ answer: the Chat only mode; placeholders are the three agent labels"))),
+            FAQ(id: 23,
+                question: String(localized: "What does Compact view change in agent sessions?",
+                                 comment: "FAQ question about the Compact view switch for agent sessions"),
+                body: .text(String(localized: """
+Compact view — the switch in the toolbar's agent session window, also in Settings → Display and View → Agent Session Compact View (⌃⌘O) — draws each of the agent's answers as one line, with its final message under it. The line holds everything between your message and that final message: the agent's thinking, its tool calls, the messages it wrote along the way, its questions with your answers, a plan you reviewed, notices such as a compacted conversation, and a background task reporting back with the agent's reply to it. While the agent works, the line shows the newest of these; afterwards, what it did, such as “Edited 2 files · Ran 3 commands · 2 messages”, with an orange mark if a step failed. Click the line to see everything in it, and a step to see its details. A question, a plan or an approval still shows its card while it waits for you, and joins the line once you answer. Your own messages stay as they are, including one you send while the agent works; the error or stop that ends an answer shows with its final message; and the agent's name shows once, at the top of each answer. A Chat only turn looks like this with Compact view on or off. Only the drawing changes: what the agent does, and what is sent to it, stay the same.
+
+How much of the agent's thinking a line shows depends on what each tool saves under its own settings. \(claudeLabel) saves short progress notes by default, and fuller summaries when its showThinkingSummaries setting is on — SipAI then asks for them, as \(claudeLabel)'s own terminal does. \(codexLabel) saves summaries of its thinking only when its config sets model_reasoning_summary. \(kimiLabel) saves its model's thinking whenever the model thinks. A Chat only turn asks \(claudeLabel) and \(codexLabel) for their thinking whatever their settings say.
+""", comment: "FAQ answer: what Compact view does and how much thinking each agent saves; placeholders, in order: the Claude Code label twice, the Codex label, the Kimi Code label, the Claude Code and Codex labels"))),
+            FAQ(id: 15,
+                question: String(localized: "Why does \(codexLabel) sometimes ask a question as plain text instead of on a card?",
+                                 comment: "FAQ question about the questions Codex asks without stopping; placeholder is the Codex label"),
+                body: .text(String(localized: """
+Some of \(codexLabel)'s models ask questions without stopping: \(codexLabel) keeps working while the question waits, and if no answer comes it decides by itself — it carries on with an assumption it tells you about, or ends its turn with the question still open. The question appears on a card. Answer while \(codexLabel) is still working and it reads your answer in the same turn; the timer keeps running, because \(codexLabel) hasn't stopped. When the turn ends, the card goes away, as it does in \(codexLabel)'s own app; whatever you had started to answer moves into the message box under its question, ready to send as your next message. In Chat only, SipAI runs \(codexLabel) as a one-shot command that can't receive anything until it finishes, so the question appears as \(codexLabel)'s own message, its options as a list, and you answer in your next message. \(claudeLabel)'s questions, and the questions \(codexLabel) asks in Plan that pause the turn, are different: they wait until you answer. With Non-stop on, no card is shown.
+""", comment: "FAQ answer: how Codex's questions asked without stopping reach the user in each mode; placeholders are the Codex and Claude Code labels"))),
+            FAQ(id: 16,
+                question: String(localized: "What happens when an MCP server asks for my input?",
+                                 comment: "FAQ question about the cards an MCP server's forms and links put up"),
+                body: .text(String(localized: """
+An MCP server you've added to an agent can pause one of its tools to ask you something: to fill in a short form, to answer yes or no, or to open a link in your browser — to sign in, say. \(claudeLabel), and \(codexLabel) in Default and Plan, show it on a card that names the server, and the timer stops while it waits. Submit sends your answers straight to the server: a required field must be filled in, and a field that takes a number or a date says so. Decline sends nothing, and the tool carries on without it. For a link, open it, finish there, then choose “I’m done, continue”. With Non-stop on, no card is shown and the server is declined.
+
+A card can show up to 8 fields, and up to 12 choices in each. A field can be text, a number, yes or no, or one or several choices. SipAI can't show a form that goes beyond this, so it declines it for you, as if you'd chosen Decline, and no card appears.
+
+In Default and Plan, \(codexLabel) also asks on a card before it runs an MCP tool that might change something. “Allow for this session” lasts until the turn ends, because SipAI starts it afresh for each message. “Always allow” is saved in its own settings, so that tool won't ask again — in SipAI or in \(codexLabel)'s own apps. In Read Only, Workspace Write and Full Access, it can't ask you anything: it declines a server's forms and links itself. In Read Only and Workspace Write it also declines a yes-or-no and won't run an MCP tool that needs approval; in Full Access it accepts a yes-or-no and runs the tool without asking.
+
+\(kimiLabel) doesn't accept forms from MCP servers, so its servers can't ask; when it asks before running an MCP tool, it uses the same card as for its other tools.
+""", comment: "FAQ answer: what each agent does when an MCP server asks for input; placeholders, in order: the Claude Code label, the Codex label three times, the Kimi Code label"))),
+            FAQ(id: 19,
+                question: String(localized: "What happens when an agent runs something in the background?",
+                                 comment: "FAQ question about background tasks an agent starts during a turn"),
+                body: .text(String(localized: """
+\(claudeLabel), \(codexLabel) and \(kimiLabel) can start a long command, such as a build or a test run, in the background and keep working, so the answer may come before the command finishes.
+
+\(claudeLabel) and \(kimiLabel) then keep the turn open until the command ends and they have reported on it. The timer keeps counting and Stop stays; a message you send meanwhile waits above the message box until the turn ends. A line under the answer names what the agent is waiting for, and a short notice says when the background task finished or was stopped. With \(claudeLabel) version 2.1.310 or newer, each task on that line has a Stop of its own, which stops that task alone. Stop under the message box ends the turn and stops the background task with it; so does quitting SipAI. \(claudeLabel) stops a background task that runs past its time limit, and reports that it did. With a \(claudeLabel) older than version 2.1.309, SipAI has \(claudeLabel) run every command in the foreground instead, because an older version stops a background task a few seconds after its answer.
+
+\(codexLabel) calls such a command a background terminal. The turn stays open until the command ends, with the same line naming it, and a Stop beside each command stops that command alone; \(codexLabel) doesn't report on it afterwards, so its result shows in the command's own row. Stop under the message box ends the turn and stops the command with it.
+""", comment: "FAQ answer: what happens to a background task an agent starts; placeholders, in order: the Claude Code, Codex and Kimi Code labels; the Claude Code and Kimi Code labels; the Claude Code label four times; the Codex label twice"))),
+            FAQ(id: 20,
+                question: String(localized: "Can I send a message while the agent is working?",
+                                 comment: "FAQ question about sending a message while an agent's turn runs"),
+                body: .text(String(localized: """
+Yes. While a turn runs, Send puts your message above the message box, where it waits. Steer, beside it, hands it to the running turn: the agent reads it at its next step — after the command it is running, say — and carries on with it in mind, and it appears in the conversation at that point. Left alone, it is sent as your next message the moment the turn ends. × puts it back in the message box, with any files it carries, so you can change it. After Stop nothing is sent by itself: Send, beside the message, sends it.
+
+Steer is offered with \(claudeLabel) version 2.1.310 or newer, and with \(codexLabel) except in Chat only. A message that opens with a command, or loads a skill, waits for the turn's end, because an agent reads those only as a message of their own; so does one sent while the agent only waits for background work. \(kimiLabel) can't take a message during a turn, so its messages always wait.
+""", comment: "FAQ answer: sending a message while a turn runs; placeholders, in order: the Claude Code, Codex and Kimi Code labels"))),
+            FAQ(id: 21,
+                question: String(localized: "Which of \(codexLabel)'s own commands work in SipAI?",
+                                 comment: "FAQ question about Codex's /compact and /review; placeholder is the Codex label"),
+                body: .text(String(localized: """
+Two, as in \(codexLabel)'s own terminal. /compact summarises the conversation now, to make room in its context window. /review asks what to review — your changes against a base branch, your uncommitted changes, a commit, or instructions of your own — then \(codexLabel) reviews it, and the review appears between two notices. Type either alone in the message box. Each runs as a turn of \(codexLabel)'s own, with no message of yours; while a turn runs, it waits above the message box like any message. /compact needs a session with something to summarise, and /review isn't offered in Chat only, because a review reads your files. Any other command is sent to \(codexLabel) as an ordinary message.
+""", comment: "FAQ answer: Codex's /compact and /review in SipAI; placeholder is the Codex label, four times"))),
+            FAQ(id: 22,
+                question: String(localized: "How do cloud sessions work in SipAI?",
+                                 comment: "FAQ question about the agent tools' cloud sessions and the ! commands that reach them"),
+                body: .text(String(localized: """
+SipAI doesn't run cloud sessions of its own. Each tool's cloud commands work here as they do in that tool's own terminal: type the command after ! in an agent session's message box. A line that starts with ! is your own shell command. SipAI hands it to the tool to run its own way — no model, no approval, no sandbox — and the output joins the conversation. For example, !claude -p "…" --cloud <session id> sends a message to a \(claudeLabel) cloud session, !codex cloud list lists your \(codexLabel) cloud tasks, and !codex cloud exec --env <environment> "…" starts one. After a ! command, \(claudeLabel) answers its output unless respondToBashCommands is off in its settings; \(codexLabel) reads it with your next message. While a turn runs, a ! command waits above the message box until the turn ends. ! commands need \(claudeLabel) 2.1.310 or newer and \(codexLabel) 0.165.0 or newer.
+
+Some things differ from the tools' own terminals. A new \(claudeLabel) cloud session (claude --cloud "…") needs a terminal window, which ! doesn't give it — nor does \(claudeLabel)'s own !. Start one in Terminal, in the Claude app or at claude.ai/code. \(claudeLabel)'s screen commands, such as /teleport and /ultraplan, answer "isn't available in this environment" here, and /ultrareview and /code-review ultra skip the confirmation \(claudeLabel)'s terminal shows before a review starts. A ! command in a \(claudeLabel) session runs as in \(claudeLabel)'s terminal — in your own shell, with your aliases and functions, with no input, and in the folder the last one ended in while that stays inside the session's folder — except that the folder doesn't carry over to \(claudeLabel)'s own commands, and a long command runs until it ends or you press Stop, where \(claudeLabel)'s terminal stops it, or moves it to the background, once its Bash timeout (2 minutes by default) runs out. \(codexLabel) runs a ! command here exactly as in its terminal.
+
+A cloud session you bring back with claude --teleport becomes an ordinary session on this Mac, and appears in the sidebar. \(codexLabel) Cloud needs a ChatGPT plan and a \(codexLabel) Cloud environment. \(kimiLabel) has no cloud sessions, and offers apps no way to run a ! command, so in a \(kimiLabel) session a line that starts with ! is sent as an ordinary message. The message box says what Send will do before you send.
+""", comment: "FAQ answer: cloud sessions and ! commands, and what differs from the tools' own terminals; placeholders, in order: the Claude Code label, the Codex label, the Claude Code label, the Codex label, the Claude Code label, the Codex label, the Claude Code label eight times, the Codex label three times, the Kimi Code label twice"))),
             FAQ(id: 5,
                 question: String(localized: "What's the difference between a chat and an agent session?",
                                  comment: "FAQ question"),
@@ -966,26 +1131,50 @@ Chats talk directly to a model over your API key — pure conversation, billed p
                 question: String(localized: "How do I set up the Claude Code or other AI agent providers?",
                                  comment: "FAQ question"),
                 body: .text(String(localized: """
-Open Settings → Agent Guide. Install runs the provider's own installer, Sign In opens the provider's sign-in page (a subscription) or takes an API key, and the provider appears in the sidebar once both are done. Installing or signing in from Terminal works the same way; SipAI notices within a few seconds. Only providers that are installed and signed in are listed — the sidebar's ADD AGENTS row opens the same page.
+Open Settings → Agent Initialization. Install runs the provider's own installer, Sign In opens the provider's sign-in page (a subscription) or takes an API key, and the provider appears in the sidebar once both are done. Installing or signing in from Terminal works the same way; SipAI notices within a few seconds. Only providers that are installed and signed in are listed — the sidebar's ADD AGENTS row opens the same page.
 """, comment: "FAQ answer: agent CLI setup"))),
+            FAQ(id: 13,
+                question: String(localized: "What happens when I share a skill with another agent?",
+                                 comment: "FAQ question about Share With in Settings → Agent Skills"),
+                body: .text(String(localized: """
+Share With, in a skill's … menu in Settings → Agent Skills, gives it to another agent in one click. SipAI keeps one copy of the skill in its own library (~/.sipai/skills, or .sipai/skills in a project) and links it into each agent's skills folder. A skill that sat in one agent's own folder moves into the library first, with a link left where it was, so the agents that had it see no change. Because there is one copy, an edit — in SipAI or in any editor — changes the skill for every agent that has it.
+
+Each agent reads SKILL.md its own way. When the agent you share with couldn't load the file as written, SipAI fixes it in place first: it adds a missing name or description, puts quotes around a value that agent can't read, or writes a list as one sentence. What it can't fix stops the share, with a message saying why. "Only when I call it" carries over in the new agent's own words: \(codexLabel) keeps it in its agents/openai.yaml file, while \(claudeLabel) and \(kimiLabel) both read the disable-model-invocation line in SKILL.md — so setting it for one of those two sets it for the other. Where SipAI can't write it for the new agent, the skill is still shared and the page says that agent may use it on its own. Settings that only one agent understands, such as \(codexLabel)'s agents/openai.yaml or \(claudeLabel)'s allowed-tools, are ignored by the others, so a skill that depends on one may work differently there.
+""", comment: "FAQ answer: what sharing a skill does; placeholders are the Codex, Claude Code and Kimi Code labels"))),
+            FAQ(id: 14,
+                question: String(localized: "How does the skill chip load skills into a session?",
+                                 comment: "FAQ question about the robot chip under an agent session's message box"),
+                body: .text(String(localized: """
+The robot chip under an agent session's message box chooses skills for that session. A ticked skill loads once, with your next message, and stays in the conversation; the chip turns orange while any skill is chosen, and clicking it shows where each one stands. When a long conversation is summarised, \(claudeLabel) and \(codexLabel) are sent the skill again with your next message; \(kimiLabel) keeps it by itself, and is sent it again only when it had to trim your earlier messages to make room. Unticking a skill stops it from being sent again but can't take back what it already put into the conversation — to leave it behind, edit an earlier message or start a new session. \(kimiLabel) loads one skill per message, so its chip holds one skill at a time. The chip also lists the skills of the session folder's subfolders: \(claudeLabel) and \(codexLabel) load them in any mode, and \(kimiLabel) only in a session started in that subfolder. Chat only loads no skills.
+""", comment: "FAQ answer: how the skill chip loads skills; placeholders are the Claude Code, Codex and Kimi Code labels"))),
             FAQ(id: 7,
-                question: String(localized: "Where is my data stored? Does anything leave my Mac?",
+                question: String(localized: "Where is my data stored?",
                                  comment: "FAQ question"),
                 body: .text(String(localized: """
-SipAI is completely a local tool. Chats, notes, roles, and settings live in ~/Library/Application Support/SipAI, and API keys stay in that folder's config.json on your disk. Messages are sent only to the provider of the model you picked — there is no server in between. Agent sessions are stored by the CLIs themselves, under ~/.claude, ~/.codex and ~/.kimi-code. Besides that, SipAI only checks for updates — for itself once a day, and for the agent tools every eight hours — sending nothing about you, and both checks can be turned off in Settings → Updates.
-""", comment: "FAQ answer: data storage and privacy"))),
+Chats, notes, roles, API keys and settings are in ~/Library/Application Support/SipAI. Agent sessions are stored by the agent tools themselves, under ~/.claude, ~/.codex and ~/.kimi-code. For what leaves your Mac, see Settings → Privacy.
+""", comment: "FAQ answer: where SipAI's data and the agent tools' sessions are stored"))),
             FAQ(id: 8,
                 question: String(localized: "What do the system prompt and roles do?",
                                  comment: "FAQ question"),
                 body: .text(String(localized: """
-The system prompt (Settings → Chat Prompt and Roles) is the standing instruction sent with every chat message. Roles are named prompts you can switch between, so the same chat window can answer as a code reviewer, translator, or tutor. One starter role ships with the app as a worked example — edit it, delete it, or add your own.
+The system prompt (Settings → Chat Settings) is the standing instruction sent with every chat message. Roles are named prompts you can switch between, so the same chat window can answer as a code reviewer, translator, or tutor. One starter role ships with the app as a worked example — edit it, delete it, or add your own.
 """, comment: "FAQ answer: system prompt and roles"))),
             FAQ(id: 9,
                 question: String(localized: "How do I organize, rename, or export things?",
                                  comment: "FAQ question"),
                 body: .text(String(localized: """
-Hover any sidebar row and click ⋮ — chats can be renamed, moved into projects, or deleted; notes can be renamed, downloaded as markdown, or deleted; agent sessions can be renamed too. Settings → Files & Notes also lets you pick a dedicated folder: the sidebar browses it, so chats and notes the SipAI command-line tool saves there appear alongside the app's own.
+Hover any sidebar row and open its … menu — chats can be renamed, moved into projects, or deleted; notes can be renamed, downloaded as markdown, or deleted; agent sessions can be renamed too. Settings → Files & Notes also lets you pick a dedicated folder: the sidebar browses it, so chats and notes the SipAI command-line tool saves there appear alongside the app's own.
 """, comment: "FAQ answer: organizing and renaming"))),
+            FAQ(id: 18,
+                question: String(localized: "How do I hide a sidebar section, or mark or delete a whole group?",
+                                 comment: "FAQ question about the … menus on the sidebar's section and group headers"),
+                body: .text(String(localized: """
+The Notes, Chats and Chat groups headers each have a … menu. Hide takes that section off the sidebar; nothing in it is deleted. To show it again, turn it back on in Settings → Display, under Show sections. Agent sections are shown and hidden in Settings → Agent Initialization.
+
+When an agent's sessions are grouped by Folder or Custom, each group's header has a … menu between its count and its +, and everything you can do to the group is in that menu. Mark all as read clears the steady blue dot of every session in the group. Grouped by Folder, Delete all sessions deletes every session in that folder, for every app that reads them, not only SipAI; the folder and your files are not touched. Grouped by Custom, the section's first row is New group, and a session starts from its group's +. A group's … menu renames it; Delete the group deletes the group and every session in it, and Ungroup deletes only the group: its sessions move to Ungrouped. Ungrouped is always shown there, with a + that starts a session in no group and a … menu with Delete all sessions.
+
+Scheduled tasks and their runs are never deleted from these menus; a task's own … menu has its own deletes, and Mark all as read for its runs. Every delete asks first and says what goes.
+""", comment: "FAQ answer: the … menus on the sidebar's section headers (Hide) and on an agent's Folder and Custom group headers (Mark all as read, the deletes, Ungroup)"))),
             FAQ(id: 10,
                 question: String(localized: "macOS keeps asking to let SipAI use a folder — is that normal?",
                                  comment: "FAQ question"),
@@ -993,6 +1182,45 @@ Hover any sidebar row and click ⋮ — chats can be renamed, moved into project
 Being asked once per folder is normal. Agent sessions read and edit files in your working folder, so the first time SipAI opens a project inside Desktop, Documents, Downloads, iCloud Drive, or an external drive, macOS asks permission. Click Allow and the answer is remembered — including after you restart. You can review or change it any time in System Settings → Privacy & Security → Files and Folders. Scheduled tasks run inside SipAI, so they reuse the same permission instead of asking again.
 """, comment: "FAQ answer: folder access permission prompts"))),
         ]
+    }
+}
+
+/// Settings → Privacy, in three short paragraphs: SipAI collects nothing
+/// and keeps its data on this Mac; what reaches an AI provider stays
+/// between the user and that provider; and the update checks are the
+/// only other connections. Each claim is made here once — Help, Chat
+/// Settings and Updates speak to their own subjects and point here — and
+/// holds only while the code keeps it true: a connection SipAI starts by
+/// itself, or a copy of the user's data kept anywhere but this Mac, makes
+/// this page wrong. It names no provider's own page: each user looks up
+/// the policy of the provider they use.
+struct PrivacyPane: View {
+    @Environment(\.sipFontScale) private var fontScale
+    @Environment(\.sipLineSpacingFactor) private var lineSpacingFactor
+
+    var body: some View {
+        VStack(alignment: .leading,
+               spacing: 12 * HelpRhythm.vertical(fontScale, lineSpacingFactor)) {
+            Text("Privacy", comment: "Settings pane header")
+                .sipFont(14, weight: .semibold)
+            paragraph(Text("SipAI collects no data. There is no SipAI account, no SipAI server, and no analytics or tracking. Your chats, notes and settings are stored only on your Mac.",
+                           comment: "Settings → Privacy, first paragraph: SipAI collects nothing and keeps its data on this Mac"))
+            paragraph(Text("What you send to an AI model goes straight from your Mac to its provider, with your API key for a chat or through the provider's own tool for an agent session. It stays between you and that provider. Making a note sends that chat or session to your note model's provider. To learn how a provider handles your data, find its privacy policy online.",
+                           comment: "Settings → Privacy, second paragraph: what reaches an AI provider, and where its privacy policy is"))
+            paragraph(Text("Apart from your AI providers, SipAI goes online only for updates. It checks once a day for a new version of SipAI, and a few times a day for new versions of your agent tools. It downloads SipAI or a tool only when you choose to install or update it. You can turn off both checks in Settings → Updates.",
+                           comment: "Settings → Privacy, third paragraph: the update checks are the only other connections"))
+        }
+        // The tier's line spacing, once, for every wrapped line — the
+        // Help section's prose rule.
+        .lineSpacing(HelpRhythm.lineSpacing(fontScale, lineSpacingFactor))
+    }
+
+    private func paragraph(_ text: Text) -> some View {
+        text
+            .sipFont(HelpRhythm.bodySize)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
     }
 }
 
@@ -1547,7 +1775,7 @@ struct UpdatesPane: View {
             .disabled(!selfUpdating)
             .help(updates.notSelfUpdatingReason)
 
-            Text("SipAI asks updates.sipai.dev once a day whether a newer version exists. Nothing is downloaded until you choose to install it, and no usage data, account or system profile is ever sent.",
+            Text("SipAI asks updates.sipai.dev once a day whether a newer version exists. Nothing is downloaded until you choose to install it.",
                  comment: "Updates pane: what the automatic check does")
                 .sipFont(12)
                 .foregroundStyle(.secondary)
@@ -1595,11 +1823,11 @@ struct UpdatesPane: View {
 
             if updates.isWaitingForQuietMoment {
                 // The user clicked "Install and Relaunch", was told a
-                // turn was running and chose to wait. The line beside the
-                // sidebar's logo said so once, and the badge points here;
-                // this line is for the person who came to find out why
-                // nothing has relaunched yet — and the button is the same
-                // way out the sheet offered.
+                // turn was running and chose to wait. The bubble beside
+                // the sidebar's logo says so with its own Install Now, and
+                // the badge points here; this line is for the person who
+                // came to find out why nothing has relaunched yet — and
+                // the button is the same way out the sheet offered.
                 HStack(spacing: 10) {
                     Text("An update is ready and will be installed once the running agent turn finishes.",
                          comment: "Updates pane: the install is waiting for agent turns to end")
@@ -1641,9 +1869,10 @@ struct UpdatesPane: View {
     /// One row per INSTALLED agent CLI. Nothing is listed for an agent
     /// this machine does not have — a row about a tool that is not here
     /// is an advertisement, not a status. Installing, signing in and
-    /// deleting are Settings → Agent Guide's; this is the difference
-    /// between the version on disk and the newest one released.
-    /// Installed, and not hidden in Settings → Agent Guide. A hidden
+    /// deleting are Settings → Agent Initialization's; this is the
+    /// difference between the version on disk and the newest one
+    /// released. Installed, and not hidden in Settings → Agent
+    /// Initialization. A hidden
     /// tool is asked nothing — no release check, no badge — so a row
     /// for it could only print its version under a claim nobody made.
     private var toolRows: [AgentInfo] {
@@ -1672,7 +1901,7 @@ struct UpdatesPane: View {
             }
             .toggleStyle(.checkbox)
 
-            Text("SipAI asks each tool's own release endpoint — the npm registry, or the vendor's version file — every few hours whether a newer version exists. Nothing about you or your machine is sent. A tool is updated only by running its own update command, or, where that command declines and names the vendor's installer instead, by running that installer pinned to the version shown.",
+            Text("SipAI asks each tool's own release endpoint — the npm registry, or the vendor's version file — every few hours whether a newer version exists. A tool is updated only by running its own update command, or, where that command declines and names the vendor's installer instead, by running that installer pinned to the version shown.",
                  comment: "Updates pane: what the CLI version check does")
                 .sipFont(12)
                 .foregroundStyle(.secondary)
@@ -1768,18 +1997,27 @@ private struct CLIUpdateRow: View {
                 action
             }
 
-            if showingDetail, case .updateFailed(let tail) = status, !tail.isEmpty {
-                Text(verbatim: tail)
-                    .sipFont(11, design: .monospaced)
-                    .textSelection(.enabled)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color.secondary.opacity(0.10))
-                    )
+            // The tool's own words: the updater's output, or what a tool
+            // that cannot start printed when asked its version.
+            if showingDetail {
+                switch status {
+                case .updateFailed(let text), .cannotStart(let text):
+                    if !text.isEmpty {
+                        Text(verbatim: text)
+                            .sipFont(11, design: .monospaced)
+                            .textSelection(.enabled)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .fill(Color.secondary.opacity(0.10))
+                            )
+                    }
+                default:
+                    EmptyView()
+                }
             }
         }
     }
@@ -1822,6 +2060,10 @@ private struct CLIUpdateRow: View {
             }
         case .updateFailed:
             Text("Update did not complete", comment: "Updates pane: the updater ran and the installed version did not change")
+                .sipFont(12)
+                .foregroundStyle(.orange)
+        case .cannotStart:
+            Text("Can’t start", comment: "Updates pane: the installed tool stops with an error when asked its version")
                 .sipFont(12)
                 .foregroundStyle(.orange)
         case .managedElsewhere(_, let manager):
@@ -1878,6 +2120,17 @@ private struct CLIUpdateRow: View {
                          : String(localized: "Finish the running turn before updating this tool.",
                                   comment: "Updates pane: why the Update button is disabled"))
                       : "")
+            }
+        case .cannotStart(let said):
+            // No Update: the tool's own updater is the tool that cannot
+            // start. What it printed names the remedy when it has one.
+            if !said.isEmpty {
+                Button {
+                    showingDetail.toggle()
+                } label: {
+                    Text("Details", comment: "Updates pane: show the updater's own output")
+                }
+                .sipFont(12)
             }
         case .unknown, .versionOnly, .upToDate, .managedElsewhere:
             EmptyView()

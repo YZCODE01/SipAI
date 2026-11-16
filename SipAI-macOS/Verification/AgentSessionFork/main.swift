@@ -223,12 +223,96 @@ check("falls back when nothing is left",
       !AgentSessionFork.branchTitle(from: "<system-reminder>x</system-reminder>").isEmpty)
 
 
+// ---------- 4. the live-row cut over a record claude wrote twice ----------
+print("resolveCutPoint() over a record claude wrote twice")
+// A message claude refused as too long before sending it is sent once
+// more as the same turn, and claude writes the re-sent message's user
+// record a second time, same uuid (the second with a `slug`), when it
+// compacts right before sending it. The reader draws one row per uuid;
+// the live rows' text match must count the same, or the pencil on the
+// OLDER of the two identical live rows (the refused attempt) skips one
+// newer occurrence and lands on the re-sent record's first copy instead
+// of the record it means.
+let doubledDir = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("sipai-fork-doubled-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+try! fm.createDirectory(at: doubledDir, withIntermediateDirectories: true)
+let doubled = doubledDir.appendingPathComponent("doubled.jsonl")
+let doubledLines = [
+    #"{"type":"user","uuid":"u-1","sessionId":"s","message":{"role":"user","content":"First question"}}"#,
+    #"{"type":"assistant","uuid":"a-1","sessionId":"s","message":{"model":"m","role":"assistant","content":[{"type":"text","text":"First answer"}]}}"#,
+    #"{"type":"user","uuid":"u-2","sessionId":"s","message":{"role":"user","content":"Summarise the notes."}}"#,
+    #"{"type":"assistant","uuid":"a-2","sessionId":"s","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Prompt is too long"}]}}"#,
+    #"{"type":"user","uuid":"u-3","sessionId":"s","message":{"role":"user","content":"Summarise the notes."}}"#,
+    #"{"type":"user","uuid":"u-3","sessionId":"s","slug":"x","message":{"role":"user","content":"Summarise the notes."}}"#,
+    #"{"type":"system","subtype":"compact_boundary","uuid":"b-1","sessionId":"s","content":"Conversation compacted","compactMetadata":{"trigger":"auto","preTokens":999245,"postTokens":923}}"#,
+    #"{"type":"assistant","uuid":"a-3","sessionId":"s","message":{"model":"m","role":"assistant","content":[{"type":"text","text":"Here is the summary."}]}}"#,
+]
+try! Data(doubledLines.joined(separator: "\n").utf8 + [0x0A]).write(to: doubled)
+check("the newest live row (the re-send) cuts at the re-sent record",
+      AgentSessionFork.resolveCutPoint(matchingUserText: "Summarise the notes.", in: doubled) == "u-3")
+check("the older identical live row (the refused attempt) cuts at ITS record: the doubled record counts once",
+      AgentSessionFork.resolveCutPoint(matchingUserText: "Summarise the notes.", in: doubled,
+                                       skippingNewest: 1) == "u-2",
+      String(describing: AgentSessionFork.resolveCutPoint(matchingUserText: "Summarise the notes.", in: doubled,
+                                                          skippingNewest: 1)))
+check("no third occurrence to skip to",
+      AgentSessionFork.resolveCutPoint(matchingUserText: "Summarise the notes.", in: doubled,
+                                       skippingNewest: 2) == nil)
+check("two records with different uuids and the same words stay two occurrences",
+      AgentSessionFork.resolveCutPoint(matchingUserText: "First question", in: doubled) == "u-1")
+try? fm.removeItem(at: doubledDir)
+
+// ---------- 5. the live-row cut of a message of attached files alone ----------
+print("resolveCutPoint() over a message of attached files alone")
+// A file rides the message as a marker the readers strip, and a message
+// may be the files alone: the row's cleaned text is "", on the live row
+// and in its record alike. Matched on the text alone every such record
+// reads the same, and an empty text matches nothing — the pencil on such
+// a live row would answer "compacted away". The files the row names are
+// its identity then, read through the same marker reader.
+let filesOnlyDir = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("sipai-fork-filesonly-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+try! fm.createDirectory(at: filesOnlyDir, withIntermediateDirectories: true)
+let notesMarker = AttachmentInline.appendingReferences(
+    [.init(name: "notes.md", path: "/tmp/example-project/notes.md", isFolder: false)], to: "")
+let planMarker = AttachmentInline.appendingReferences(
+    [.init(name: "plan.md", path: "/tmp/example-project/plan.md", isFolder: false)], to: "")
+func jsonLine(_ object: [String: Any]) -> String {
+    String(decoding: try! JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+}
+let filesOnly = filesOnlyDir.appendingPathComponent("files-only.jsonl")
+let filesOnlyLines = [
+    jsonLine(["type": "user", "uuid": "f-1", "sessionId": "s", "message": ["role": "user", "content": "Words first"]]),
+    jsonLine(["type": "assistant", "uuid": "fa-1", "sessionId": "s", "message": ["model": "m", "role": "assistant", "content": [["type": "text", "text": "OK"]]]]),
+    jsonLine(["type": "user", "uuid": "f-2", "sessionId": "s", "message": ["role": "user", "content": notesMarker]]),
+    jsonLine(["type": "assistant", "uuid": "fa-2", "sessionId": "s", "message": ["model": "m", "role": "assistant", "content": [["type": "text", "text": "Read it"]]]]),
+    jsonLine(["type": "user", "uuid": "f-3", "sessionId": "s", "message": ["role": "user", "content": planMarker]]),
+    jsonLine(["type": "assistant", "uuid": "fa-3", "sessionId": "s", "message": ["model": "m", "role": "assistant", "content": [["type": "text", "text": "Read that too"]]]]),
+    jsonLine(["type": "user", "uuid": "f-4", "sessionId": "s", "message": ["role": "user", "content": notesMarker]]),
+    jsonLine(["type": "assistant", "uuid": "fa-4", "sessionId": "s", "message": ["model": "m", "role": "assistant", "content": [["type": "text", "text": "Read it again"]]]]),
+]
+try! Data(filesOnlyLines.joined(separator: "\n").utf8 + [0x0A]).write(to: filesOnly)
+check("claude: a files-only live row cuts at the record naming ITS files",
+      AgentSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["plan.md"], in: filesOnly) == "f-3",
+      String(describing: AgentSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["plan.md"], in: filesOnly)))
+check("claude: … the newest of those, and a skip counts only the rows naming the same files",
+      AgentSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["notes.md"], in: filesOnly) == "f-4"
+        && AgentSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["notes.md"], in: filesOnly,
+                                            skippingNewest: 1) == "f-2",
+      String(describing: AgentSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["notes.md"], in: filesOnly,
+                                                          skippingNewest: 1)))
+check("claude: no words and no files resolve nothing",
+      AgentSessionFork.resolveCutPoint(matchingUserText: "", in: filesOnly) == nil)
+check("claude: a row with words is matched on its words, as before",
+      AgentSessionFork.resolveCutPoint(matchingUserText: "Words first", in: filesOnly) == "f-1")
+try? fm.removeItem(at: filesOnlyDir)
+
 // ====================================================================
 print("")
 print("CODEX — CodexSessionFork, pure rules")
 let codexFixture = fixtures.appendingPathComponent("codex-two-turns.jsonl")
 let codexLines = lines(of: codexFixture)
-let codexParentId = "01a03c71-38e6-7421-9d7e-5b56062e1f11"
+let codexParentId = "01a03c71-38e6-7421-9d7e-4c1b0e2d7f93"
 let turn1 = "01a03c71-391d-76b3-8bcb-8910867572e4"
 let turn2 = "01a03c71-9d50-7140-83cd-25d8b7fa9c28"
 
@@ -379,6 +463,37 @@ check("live-row cut resolution finds the newest match's turn",
       CodexSessionFork.resolveCutPoint(matchingUserText: "Reply with exactly: TWO", in: parentURL) == turn2)
 check("live-row cut resolution: no match is nil",
       CodexSessionFork.resolveCutPoint(matchingUserText: "never sent", in: parentURL) == nil)
+func codexUserLine(ordinal: Int, text: String) -> String {
+    jsonLine(["timestamp": "t", "ordinal": ordinal, "type": "response_item",
+              "payload": ["type": "message", "role": "user", "content": [["type": "input_text", "text": text]]]])
+}
+let filesOnlyRollout = storeSessions.appendingPathComponent("rollout-2026-09-12T00-00-00-01a0eeee-0000-7000-8000-000000000005.jsonl")
+try! Data(([#"{"timestamp":"t","ordinal":0,"type":"session_meta","payload":{"id":"01a0eeee-0000-7000-8000-000000000005","cwd":"/tmp/x"}}"#]
+           + syntheticTurn(ordinal: 1, turnId: "F1", ask: "Words first", answer: "OK")
+           + [#"{"timestamp":"t","ordinal":5,"type":"event_msg","payload":{"type":"task_started","turn_id":"F2"}}"#,
+              codexUserLine(ordinal: 6, text: notesMarker),
+              #"{"timestamp":"t","ordinal":7,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Read it"}]}}"#,
+              #"{"timestamp":"t","ordinal":8,"type":"event_msg","payload":{"type":"task_complete","turn_id":"F2"}}"#,
+              #"{"timestamp":"t","ordinal":9,"type":"event_msg","payload":{"type":"task_started","turn_id":"F3"}}"#,
+              codexUserLine(ordinal: 10, text: planMarker),
+              #"{"timestamp":"t","ordinal":11,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Read that too"}]}}"#,
+              #"{"timestamp":"t","ordinal":12,"type":"event_msg","payload":{"type":"task_complete","turn_id":"F3"}}"#,
+              #"{"timestamp":"t","ordinal":13,"type":"event_msg","payload":{"type":"task_started","turn_id":"F4"}}"#,
+              codexUserLine(ordinal: 14, text: notesMarker),
+              #"{"timestamp":"t","ordinal":15,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Read it again"}]}}"#,
+              #"{"timestamp":"t","ordinal":16,"type":"event_msg","payload":{"type":"task_complete","turn_id":"F4"}}"#])
+          .joined(separator: "\n").utf8 + [0x0A]).write(to: filesOnlyRollout)
+check("codex: a files-only live row cuts at the turn of the record naming ITS files",
+      CodexSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["plan.md"], in: filesOnlyRollout, root: sessionsRoot) == "F3",
+      String(describing: CodexSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["plan.md"], in: filesOnlyRollout, root: sessionsRoot)))
+check("codex: … the newest of those, and a skip counts only the rows naming the same files",
+      CodexSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["notes.md"], in: filesOnlyRollout, root: sessionsRoot) == "F4"
+        && CodexSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["notes.md"], in: filesOnlyRollout,
+                                            root: sessionsRoot, skippingNewest: 1) == "F2",
+      String(describing: CodexSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["notes.md"], in: filesOnlyRollout,
+                                                          root: sessionsRoot, skippingNewest: 1)))
+check("codex: no words and no files resolve nothing",
+      CodexSessionFork.resolveCutPoint(matchingUserText: "", in: filesOnlyRollout, root: sessionsRoot) == nil)
 
 // ====================================================================
 print("")
@@ -452,9 +567,13 @@ if let codex = binary("codex") {
         }
         group.wait()
         if case .forked(let bb) = CodexSessionFork.outcome(from: through) {
+            // The fork fields name the fork it was made from; a codex that
+            // writes `history_base` names the thread the inherited turn
+            // lives in, which the reader follows first. Either way the
+            // conversation is the same.
             let bOrigin = CodexSessionScanner.forkOrigin(of: bb.rolloutURL)
             check("codex forks a fork through its inherited turn; the reader still reads ONE alone",
-                  bOrigin?.parentId == r.threadId
+                  (bOrigin?.parentId == r.threadId || bOrigin?.parentId == codexParentId)
                     && userTexts(CodexSessionScanner.readHistory(of: bb.rolloutURL, root: liveRoot)) == ["Reply with exactly: ONE"],
                   "\(String(describing: bOrigin))")
         } else {
@@ -474,6 +593,54 @@ if let codex = binary("codex") {
         } else {
             check("a turn the fork never had is refused in codex's words", false, "\(String(describing: outside))")
         }
+        // A branch keeps its parent's speed (`CodexKeptSpeed`). Codex forks
+        // at the speed the request names, else at its CONFIG's — never the
+        // parent's — and records it on the branch at once; so SipAI names
+        // the parent's saved speed. The parent gains the record a Fast turn
+        // leaves, in codex's own shape (synthetic values).
+        let lastOrdinal = codexLines.compactMap { object($0)["ordinal"] as? Int }.max() ?? 0
+        let fastRecord: [String: Any] = [
+            "timestamp": "2026-08-25T22:05:00.000Z", "ordinal": lastOrdinal + 1, "type": "event_msg",
+            "payload": [
+                "type": "thread_settings_applied", "thread_id": codexParentId,
+                "thread_settings": [
+                    "model": "gpt-6-astra", "model_provider_id": "openai", "service_tier": "priority",
+                    "approval_policy": "never", "approvals_reviewer": "user",
+                    "active_permission_profile": ["id": ":read-only"],
+                    "cwd": recordedCwd, "runtime_workspace_roots": [recordedCwd],
+                    "collaboration_mode": ["mode": "default",
+                                           "settings": ["model": "gpt-6-astra"]] as [String: Any],
+                    "disabled_plugin_ids": [] as [String],
+                ] as [String: Any],
+            ] as [String: Any],
+        ]
+        if let handle = try? FileHandle(forWritingTo: liveParent),
+           let data = try? JSONSerialization.data(withJSONObject: fastRecord) {
+            handle.seekToEndOfFile()
+            handle.write(data + Data([0x0A]))
+            try? handle.close()
+        }
+        func branchSpeed(keepsSpeed: Bool) -> (found: Bool, tier: String?)? {
+            group.enter()
+            var made: Result<CodexSessionFork.Result, Error>? = nil
+            Task {
+                do {
+                    made = .success(try await CodexSessionFork.fork(
+                        rollout: liveParent, threadId: codexParentId, cutAtTurnId: turn2,
+                        binary: codex, keepsSpeed: keepsSpeed, root: liveRoot))
+                } catch { made = .failure(error) }
+                group.leave()
+            }
+            group.wait()
+            guard case .success(let b)? = made else { return nil }
+            return CodexSessionScanner.savedServiceTier(of: b.rolloutURL)
+        }
+        let keptSpeed = branchSpeed(keepsSpeed: true)
+        check("a branch keeps its parent's speed: the parent's record says priority, and so does the branch's",
+              keptSpeed?.found == true && keptSpeed?.tier == "priority", "\(String(describing: keptSpeed))")
+        let unnamedSpeed = branchSpeed(keepsSpeed: false)
+        check("…where a fork naming no speed takes codex's config instead (none here), not the parent's",
+              unnamedSpeed?.found == true && unnamedSpeed?.tier != "priority", "\(String(describing: unnamedSpeed))")
         codexBranchForLive = (r.threadId, r.rolloutURL, home)
     case .failure(let e)?:
         check("codex forked", false, "\(e)")
@@ -524,6 +691,63 @@ check("bookkeeping alone is not", !KimiSessionFork.prefixHoldsConversation(Array
 let cutProbe = KimiSessionFork.cutIndex(lines: kimiLines, promptId: probeId)!
 check("cutting at the first message leaves no conversation",
       !KimiSessionFork.prefixHoldsConversation(Array(kimiLines[0..<cutProbe])))
+// A first message of attached files alone is a real message: its words
+// strip to nothing, and the files it named are what the user said. A
+// branch at the next message keeps it and its answer, as one cut below a
+// message with words does — judged on words alone, the prefix read as
+// "nothing to branch" and the branch began a session without the file.
+let kimiFileMarker = AttachmentInline.referenceMarker(
+    .init(name: "notes.md", path: "/Users/example-user/notes.md", isFolder: false))
+let kimiFilesOnlyLines: [String] = kimiLines.map { line in
+    var obj = object(line)
+    if KimiSessionScanner.turnPromptId(obj) == probeId {
+        obj["input"] = [["type": "text", "text": kimiFileMarker]]
+    } else if KimiSessionScanner.userMessage(obj)?.id == probeId, var message = obj["message"] as? [String: Any] {
+        message["content"] = [["type": "text", "text": kimiFileMarker]]
+        obj["message"] = message
+    } else {
+        return line
+    }
+    return String(decoding: try! JSONSerialization.data(withJSONObject: obj), as: UTF8.self)
+}
+let kimiFilesOnlyRecord = kimiFilesOnlyLines.map(object).first { KimiSessionScanner.userMessage($0)?.id == probeId } ?? [:]
+check("a message of files alone reads as no words and the file it names",
+      KimiSessionScanner.userMessage(kimiFilesOnlyRecord)?.text == ""
+        && KimiSessionScanner.userMessageFiles(kimiFilesOnlyRecord) == ["notes.md"])
+let kimiFilesOnlyCut = KimiSessionFork.cutIndex(lines: kimiFilesOnlyLines, promptId: againId) ?? 0
+check("a prefix whose only message is files alone, and its answer, is a conversation",
+      KimiSessionFork.prefixHoldsConversation(Array(kimiFilesOnlyLines[0..<kimiFilesOnlyCut])))
+check("…and cutting at that message still leaves none",
+      !KimiSessionFork.prefixHoldsConversation(
+        Array(kimiFilesOnlyLines[0..<(KimiSessionFork.cutIndex(lines: kimiFilesOnlyLines, promptId: probeId) ?? 0)])))
+do {
+    let store = URL(fileURLWithPath: NSTemporaryDirectory())
+        .appendingPathComponent("sipai-fork-filesonly-\(UUID().uuidString)", isDirectory: true)
+    let sourceDir = store.appendingPathComponent("sessions/wd_x_000000000000/session_src", isDirectory: true)
+    try! fm.createDirectory(at: sourceDir.appendingPathComponent("agents/main"), withIntermediateDirectories: true)
+    let sourceWire = KimiSessionScanner.wireFile(inSessionDir: sourceDir)
+    try! Data((kimiFilesOnlyLines.joined(separator: "\n") + "\n").utf8).write(to: sourceWire)
+    var state = object(lines(of: fixtures.appendingPathComponent("kimi-two-turns.state.json")).joined())
+    state["id"] = "session_src"
+    try! JSONSerialization.data(withJSONObject: state).write(to: sourceDir.appendingPathComponent("state.json"))
+    // The writer finds a session's directory under kimi's home.
+    let homeBefore = ProcessInfo.processInfo.environment["KIMI_CODE_HOME"]
+    setenv("KIMI_CODE_HOME", store.path, 1)
+    defer { if let homeBefore { setenv("KIMI_CODE_HOME", homeBefore, 1) } else { unsetenv("KIMI_CODE_HOME") } }
+    do {
+        let branch = try KimiSessionFork.fork(sourceWire: sourceWire, cutAtPromptId: againId,
+                                              title: "files branch", cwd: nil)
+        let branchRecords = lines(of: branch.wireURL).map(object)
+        check("Create Branch at the next message writes a branch holding the file and its answer",
+              branchRecords.contains { KimiSessionScanner.userMessageFiles($0) == ["notes.md"] }
+                && branchRecords.contains { KimiSessionScanner.isAgentOutput($0) }
+                && !branchRecords.contains { KimiSessionScanner.userMessage($0)?.id == againId })
+    } catch {
+        check("Create Branch at the next message writes a branch holding the file and its answer",
+              false, "\(error)")
+    }
+    try? fm.removeItem(at: store)
+}
 check("a user record without turn.prompt still cuts",
       KimiSessionFork.cutIndex(lines: kimiLines.filter { KimiSessionScanner.turnPromptId(object($0)) == nil }, promptId: againId)
         .map { KimiSessionScanner.userMessage(object(kimiLines.filter { KimiSessionScanner.turnPromptId(object($0)) == nil }[$0]))?.id == againId } ?? false)
@@ -568,6 +792,47 @@ check("scheduled-task marker stripped from a user record",
       !stripped.contains("<scheduled-task") && KimiSessionScanner.userMessage(object(stripped))?.text == "Check the logs", stripped)
 check("a record without the marker is returned as it was",
       KimiSessionFork.strippingScheduledTaskMarker(fromUserLine: kimiLines[5]) == kimiLines[5])
+// A run that loaded a skill: its first user record is the skill kimi
+// started, and what the run sent — marker first — is kept beside the
+// skill's text in `origin.skillArgs`, where the reader takes the message's
+// words and the scanner the task's name. Stripped from the content alone,
+// the branch of such a run was filed straight back under its task.
+let markedSkill = #"{"type":"context.append_message","agentId":"main","message":{"role":"user","content":[{"type":"text","text":"User activated the skill \"brief\". <skill-loaded name=\"brief\">BODY</skill-loaded>\nARGUMENTS: <scheduled-task name=\"daily\"></scheduled-task>\nCheck the logs"}],"origin":{"kind":"skill_activation","trigger":"user-slash","skillName":"brief","skillArgs":"<scheduled-task name=\"daily\"></scheduled-task>\nCheck the logs"},"id":"msg_1"},"time":1}"#
+let strippedSkill = KimiSessionFork.strippingScheduledTaskMarker(fromUserLine: markedSkill)
+// Through the scanner itself, over a store holding the run and its
+// branch: the run is its task's, the branch is nobody's.
+do {
+    let skillHome = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("sipai-fork-kimiskill-\(UUID().uuidString)", isDirectory: true)
+    func session(_ id: String, _ first: String) {
+        let dir = skillHome.appendingPathComponent("sessions/wd_t_000000000000/\(id)", isDirectory: true)
+        try! fm.createDirectory(at: dir.appendingPathComponent("agents/main"), withIntermediateDirectories: true)
+        let prompt = #"{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"x"}],"origin":{"kind":"user"},"promptId":"msg_1","time":1}"#
+        try! Data([prompt, first].joined(separator: "\n").utf8 + [0x0A])
+            .write(to: KimiSessionScanner.wireFile(inSessionDir: dir))
+        // A real folder's path: a session in a temp folder is scratch,
+        // and listed only when it IS a scheduled run.
+        var state = fixtureState
+        state["cwd"] = "/Users/someone/project"
+        state["id"] = id
+        try! JSONSerialization.data(withJSONObject: state).write(to: dir.appendingPathComponent("state.json"))
+    }
+    session("session_run", markedSkill)
+    session("session_branch", strippedSkill)
+    let before = ProcessInfo.processInfo.environment["KIMI_CODE_HOME"]
+    setenv("KIMI_CODE_HOME", skillHome.path, 1)
+    let scanned = KimiSessionScanner.scan()
+    if let before { setenv("KIMI_CODE_HOME", before, 1) } else { unsetenv("KIMI_CODE_HOME") }
+    check("a scheduled run that loaded a skill is filed under its task by the marker in the skill's arguments",
+          scanned.first { $0.id == "session_run" }?.scheduledTaskName == "daily",
+          "\(scanned.map { ($0.id, $0.scheduledTaskName ?? "-") })")
+    check("…and a branch of it carries the marker in neither place: its words stay, and it is no run of the task",
+          !strippedSkill.contains("<scheduled-task")
+          && KimiSessionScanner.userMessage(object(strippedSkill))?.text == "Check the logs"
+          && scanned.contains { $0.id == "session_branch" }
+          && scanned.first { $0.id == "session_branch" }?.scheduledTaskName == nil,
+          "\(scanned.map { ($0.id, $0.scheduledTaskName ?? "-") }) \(strippedSkill.prefix(200))")
+    try? fm.removeItem(at: skillHome)
+}
 // A branch of a scheduled run: the marker on the first user record
 // goes; the same tag quoted in a LATER message is the user's own text.
 do {
@@ -608,6 +873,53 @@ do {
     try? fm.removeItem(at: taskHome)
 }
 
+// A branch cut at an Ask turn (an ACP turn) keeps the runtime binding
+// that turn opened with — written before its prompt — and not the
+// hand-back after it. Kimi replays the newest binding, so the branch
+// gets a hand-back of its own, before `forked`, which stays the last.
+let kimiLocalEnvironment = #"{"type":"environment.set_binding","environmentId":"local","agentId":"main","time":1788531929652}"#
+do {
+    let acpHome = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("sipai-fork-kimiacp-\(UUID().uuidString)", isDirectory: true)
+    let adir = acpHome.appendingPathComponent("sessions/wd_t_000000000000/session_acp", isDirectory: true)
+    try! fm.createDirectory(at: adir.appendingPathComponent("agents/main"), withIntermediateDirectories: true)
+    // The fixture's own binding (kimi's `local`), and the one an Ask turn
+    // opening the AGAIN turn would have written before its prompt: the older
+    // record, then the same wire in the record kimi writes now.
+    let ownBinding = kimiLines.first { object($0)["type"] as? String == "runtime.set_binding" }!
+    let workspace = object(ownBinding)["workspaceId"] as! String
+    let cut = KimiSessionFork.cutIndex(lines: kimiLines, promptId: againId)!
+    let awire = KimiSessionScanner.wireFile(inSessionDir: adir)
+    try! JSONSerialization.data(withJSONObject: fixtureState).write(to: adir.appendingPathComponent("state.json"))
+    setenv("KIMI_CODE_HOME", acpHome.path, 1)
+    let shapes: [(name: String, wire: [String], acp: String, record: String, own: String)] = [
+        ("the older record", kimiLines,
+         #"{"type":"runtime.set_binding","workspaceId":""# + workspace
+            + #"","runtimeId":"acp:session_acp","agentId":"main","time":2}"#,
+         "\"runtime.set_binding\"", #""runtimeId":"local""#),
+        ("kimi's record", kimiLines.map { $0 == ownBinding ? kimiLocalEnvironment : $0 },
+         #"{"type":"environment.set_binding","environmentId":"acp:session_acp","cwd":"/w","agentId":"main","time":2}"#,
+         "\"environment.set_binding\"", #""environmentId":"local""#),
+    ]
+    for shape in shapes {
+        let acpWireLines = Array(shape.wire[0..<cut]) + [shape.acp] + Array(shape.wire[cut...])
+        try! Data(acpWireLines.joined(separator: "\n").utf8 + [0x0A]).write(to: awire)
+        let ar = try! KimiSessionFork.fork(sourceWire: awire, cutAtPromptId: againId, title: "t", cwd: nil)
+        let abranch = lines(of: ar.wireURL)
+        let branchBindings = abranch.filter { $0.contains(shape.record) }
+        check("\(shape.name): a branch cut at an Ask turn is handed back to its own runtime, before kimi's `forked` record",
+              branchBindings.count == 3 && branchBindings.last?.contains(shape.own) == true
+                && abranch.dropLast().last == branchBindings.last
+                && (abranch.last?.hasPrefix(#"{"type":"forked","agentId":"main","time":"#) ?? false),
+              "\(branchBindings)")
+        // …and a branch with no ACP binding is the prefix, untouched.
+        try! Data(shape.wire.joined(separator: "\n").utf8 + [0x0A]).write(to: awire)
+        let plain = try! KimiSessionFork.fork(sourceWire: awire, cutAtPromptId: againId, title: "t", cwd: nil)
+        check("\(shape.name): a branch whose prefix was never bound to ACP gains nothing",
+              Array(lines(of: plain.wireURL).dropLast()) == Array(shape.wire[0..<cut]))
+    }
+    try? fm.removeItem(at: acpHome)
+}
+
 print("fork() over a throwaway store")
 let kimiHome = URL(fileURLWithPath: NSTemporaryDirectory())
     .appendingPathComponent("sipai-fork-kimihome-\(UUID().uuidString)", isDirectory: true)
@@ -622,17 +934,12 @@ let kimiSourceId = "session_bea09b4a-d30f-4b35-ba66-4077f8708fa7"
 let kimiSourceDir = bucket.appendingPathComponent(kimiSourceId, isDirectory: true)
 try! fm.createDirectory(at: kimiSourceDir.appendingPathComponent("agents/main"), withIntermediateDirectories: true)
 let kimiSourceWire = KimiSessionScanner.wireFile(inSessionDir: kimiSourceDir)
-// The wire's `runtime.set_binding` names the workspace bucket the
-// session was recorded under, and kimi refuses to touch a session whose
-// binding and bucket disagree ("runtime binding workspace … does not
-// match session workspace …", measured). The fixture is re-bound to the
-// bucket built here; a SipAI branch never needs this because it stays
-// in its source's bucket.
+// The fixture's binding is the older record, naming the bucket it was
+// captured in. The store holds the record kimi writes now, which names no
+// bucket: `kimi fork` below appends one of its own after `forked` to a wire
+// that has none, and its copy would no longer be the source plus that record.
 try! Data(kimiLines.map { line -> String in
-    var o = object(line)
-    guard o["type"] as? String == "runtime.set_binding" else { return line }
-    o["workspaceId"] = kimiBucket(for: kimiCwd)
-    return String(decoding: try! JSONSerialization.data(withJSONObject: o, options: [.withoutEscapingSlashes]), as: UTF8.self)
+    object(line)["type"] as? String == "runtime.set_binding" ? kimiLocalEnvironment : line
 }.joined(separator: "\n").utf8 + [0x0A]).write(to: kimiSourceWire)
 let boundLines = lines(of: kimiSourceWire)
 var kimiSourceState = fixtureState
@@ -672,6 +979,86 @@ check("the branch's history is PROBE alone",
       userTexts(KimiSessionScanner.readHistory(of: kresult.wireURL)) == ["Reply with the single word: PROBE"])
 check("live-row cut resolution finds AGAIN's prompt id",
       KimiSessionFork.resolveCutPoint(matchingUserText: "Reply with the single word: AGAIN", in: kimiSourceWire) == againId)
+// The same wire with AGAIN's words swapped for a marker alone: the
+// record's cleaned text is "", and the file it names is what identifies it.
+let filesOnlyDirForKimi = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("sipai-fork-kimi-filesonly-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
+try! fm.createDirectory(at: filesOnlyDirForKimi, withIntermediateDirectories: true)
+/// The kimi fixture's wire with the user messages `ids` names swapped for
+/// a marker alone.
+func kimiWire(swapping ids: Set<String>, to url: URL) {
+    try! Data(kimiLines.map { line -> String in
+        guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+              let message = obj["message"] as? [String: Any],
+              let id = message["id"] as? String, ids.contains(id),
+              var content = message["content"] as? [[String: Any]], !content.isEmpty else { return line }
+        content[0]["text"] = notesMarker
+        var swapped = obj
+        var newMessage = message
+        newMessage["content"] = content
+        swapped["message"] = newMessage
+        return jsonLine(swapped)
+    }.joined(separator: "\n").utf8 + [0x0A]).write(to: url)
+}
+let kimiFilesOnlyWire = filesOnlyDirForKimi.appendingPathComponent("wire.jsonl")
+kimiWire(swapping: [againId], to: kimiFilesOnlyWire)
+check("kimi: a files-only live row cuts at the prompt of the record naming ITS files",
+      KimiSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["notes.md"], in: kimiFilesOnlyWire) == againId,
+      String(describing: KimiSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["notes.md"], in: kimiFilesOnlyWire)))
+check("kimi: another file's name resolves nothing there",
+      KimiSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["plan.md"], in: kimiFilesOnlyWire) == nil)
+check("kimi: no words and no files resolve nothing",
+      KimiSessionFork.resolveCutPoint(matchingUserText: "", in: kimiFilesOnlyWire) == nil)
+// Chat only spells a file as an inlined block, not a path marker; a turn
+// of such a file alone is looked up the same way — by the file it names —
+// when its Chat only record is kept (`AgentRunner.recordChatOnlyTurnIfNeeded`).
+// By its words alone (""), each writer finds nothing.
+let inlinedNotes = AttachmentInline.block(name: "notes.md", text: "The notes' own text.", truncated: false)
+let chatOnlyClaude = filesOnlyDirForKimi.appendingPathComponent("chatonly-claude.jsonl")
+try! Data([
+    jsonLine(["type": "user", "uuid": "c-1", "sessionId": "s", "message": ["role": "user", "content": "Words first"]]),
+    jsonLine(["type": "assistant", "uuid": "ca-1", "sessionId": "s", "message": ["model": "m", "role": "assistant", "content": [["type": "text", "text": "OK"]]]]),
+    jsonLine(["type": "user", "uuid": "c-2", "sessionId": "s", "message": ["role": "user", "content": inlinedNotes]]),
+    jsonLine(["type": "assistant", "uuid": "ca-2", "sessionId": "s", "message": ["model": "m", "role": "assistant", "content": [["type": "text", "text": "Read it"]]]]),
+].joined(separator: "\n").utf8 + [0x0A]).write(to: chatOnlyClaude)
+check("claude: a Chat only message of an inlined file alone is found by the file it inlines, and not by its words",
+      AgentSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["notes.md"], in: chatOnlyClaude) == "c-2"
+        && AgentSessionFork.resolveCutPoint(matchingUserText: "", in: chatOnlyClaude) == nil)
+let chatOnlyRollout = storeSessions.appendingPathComponent("rollout-2026-09-12T00-00-00-01a0eeee-0000-7000-8000-000000000006.jsonl")
+try! Data(([#"{"timestamp":"t","ordinal":0,"type":"session_meta","payload":{"id":"01a0eeee-0000-7000-8000-000000000006","cwd":"/tmp/x"}}"#]
+           + syntheticTurn(ordinal: 1, turnId: "C1", ask: "Words first", answer: "OK")
+           + [#"{"timestamp":"t","ordinal":5,"type":"event_msg","payload":{"type":"task_started","turn_id":"C2"}}"#,
+              codexUserLine(ordinal: 6, text: inlinedNotes),
+              #"{"timestamp":"t","ordinal":7,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Read it"}]}}"#,
+              #"{"timestamp":"t","ordinal":8,"type":"event_msg","payload":{"type":"task_complete","turn_id":"C2"}}"#])
+          .joined(separator: "\n").utf8 + [0x0A]).write(to: chatOnlyRollout)
+check("codex: a Chat only message of an inlined file alone is found by the file it inlines, and not by its words",
+      CodexSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["notes.md"], in: chatOnlyRollout, root: sessionsRoot) == "C2"
+        && CodexSessionFork.resolveCutPoint(matchingUserText: "", in: chatOnlyRollout, root: sessionsRoot) == nil)
+let chatOnlyKimi = filesOnlyDirForKimi.appendingPathComponent("wire-chatonly.jsonl")
+try! Data(kimiLines.map { line -> String in
+    guard let obj = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+          let message = obj["message"] as? [String: Any], message["id"] as? String == againId,
+          var content = message["content"] as? [[String: Any]], !content.isEmpty else { return line }
+    content[0]["text"] = inlinedNotes
+    var swapped = obj
+    var newMessage = message
+    newMessage["content"] = content
+    swapped["message"] = newMessage
+    return jsonLine(swapped)
+}.joined(separator: "\n").utf8 + [0x0A]).write(to: chatOnlyKimi)
+check("kimi: a Chat only message of an inlined file alone is found by the file it inlines, and not by its words",
+      KimiSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["notes.md"], in: chatOnlyKimi) == againId
+        && KimiSessionFork.resolveCutPoint(matchingUserText: "", in: chatOnlyKimi) == nil)
+let kimiTwiceWire = filesOnlyDirForKimi.appendingPathComponent("wire-twice.jsonl")
+kimiWire(swapping: [probeId, againId], to: kimiTwiceWire)
+check("kimi: two messages naming the same file — the newest, and a skip reaches the older",
+      KimiSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["notes.md"], in: kimiTwiceWire) == againId
+        && KimiSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["notes.md"], in: kimiTwiceWire,
+                                           skippingNewest: 1) == probeId,
+      String(describing: KimiSessionFork.resolveCutPoint(matchingUserText: "", attachedFiles: ["notes.md"], in: kimiTwiceWire,
+                                                         skippingNewest: 1)))
+try? fm.removeItem(at: filesOnlyDirForKimi)
 do {
     _ = try KimiSessionFork.fork(sourceWire: kimiSourceWire, cutAtPromptId: probeId, title: "x", cwd: kimiCwd)
     check("cutting at the first message throws nothingToBranch", false, "no throw")
@@ -826,8 +1213,18 @@ let guardAt = createBody.range(of: "stillOpen == sourceId")?.lowerBound
 check("lineage, name and row are written BEFORE the moved-on guard",
       lineageAt != nil && guardAt != nil && lineageAt! < guardAt!)
 let scopeBody = body(of: "private func updateHistoryScope(", in: viewText)
+// The own file by its read's reach where the reader gives one (claude's
+// window counts conversation), else by size; the inherited prefix by size.
 check("partiality judges the inherited prefix and the own file each against the budget",
-      scopeBody.contains("ownSize > budget || inheritedHistoryBytes > budget") && !scopeBody.contains("fileSize > UInt64(historyLoadedBudget)"))
+      scopeBody.contains("historyReadReachedStart.map { !$0 } ?? (ownSize > budget)")
+        && scopeBody.contains("capBit || ownUnread || inheritedHistoryBytes > budget")
+        && !scopeBody.contains("fileSize > UInt64(historyLoadedBudget)"))
+// A live row of attached files alone is found by its files, in every writer.
+check("a live row's attached files reach the cut-point match of all three writers",
+      createBody.contains("let attachedFiles = recordUuid == nil ? editedLiveRowFiles : []")
+        && viewText.components(separatedBy: "matchingUserText: originalText, attachedFiles: attachedFiles, in: url,").count == 4)
+check("the pencil's skip counts a files-only row's identical rows by their files",
+      body(of: "private func newerIdenticalLiveRows(", in: viewText).contains("!text.isEmpty || event.attachedFiles == files"))
 
 // ====================================================================
 print("")

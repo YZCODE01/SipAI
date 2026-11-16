@@ -24,8 +24,8 @@ SipAI-macOS/Release/build/
 *.zip
 *.xcarchive/
 
-# Python — approver.py and changelog_to_html.py are the only two here,
-# but either can leave bytecode behind.
+# Python — the app's approver, the release helper and the harnesses'
+# stand-in servers can each leave bytecode behind.
 __pycache__/
 *.py[cod]
 

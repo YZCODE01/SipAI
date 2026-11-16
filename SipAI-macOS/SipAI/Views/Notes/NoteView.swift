@@ -269,7 +269,7 @@ struct NoteView: View {
 ///
 /// Monospaced on purpose: this is the source, and `**bold**`, list
 /// dashes and fence backticks are what the user is aiming at.
-private struct NoteSourceEditor: NSViewRepresentable {
+struct NoteSourceEditor: NSViewRepresentable {
     @Binding var text: String
     var onEscape: () -> Void
     /// `DisplaySettings.spellCheck`, passed by the owning view.

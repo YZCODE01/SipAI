@@ -138,9 +138,12 @@ enum SearchTextExtractor {
         case "kimi":
             items = KimiSessionScanner.readHistory(
                 of: url, maxTurns: .max, byteBudget: searchByteBudget)
-        default:
+        case "claude_code":
             items = AgentSessionScanner.readHistory(
                 of: url, maxTurns: .max, byteBudget: searchByteBudget)
+        default:
+            // No reader for this agent's transcript: nothing to search.
+            items = []
         }
         return flatten(items)
     }
@@ -160,7 +163,9 @@ enum SearchTextExtractor {
                 parts.append(piece)
             case .toolResult(_, let content, _):
                 parts.append(String(content.prefix(perRecordCap)))
-            case .interrupted(let message):
+            case .shellOutput(let output):
+                parts.append(String(output.text.prefix(perRecordCap)))
+            case .interrupted(let message), .error(let message):
                 parts.append(message)
             case .compaction:
                 // The row's text is composed at RENDER time from

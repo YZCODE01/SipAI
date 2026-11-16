@@ -107,6 +107,46 @@ check("major outranks minor: 1.99.99 < 2.0.0", v("1.99.99") < v("2.0.0"))
 check("`==` and `<` agree on a depth mismatch",
       v("2.1") == v("2.1.0") && !(v("2.1") < v("2.1.0")) && !(v("2.1.0") < v("2.1")))
 
+print("CLIStartFailure — the line a tool that cannot start stopped with")
+
+// Node's trace: the file and line, the source, a caret, the error, the
+// stack, and Node's own version last. The error is the line to show.
+check("Node's trace → its error line, not the stack, not Node's version",
+      CLIStartFailure.reason(in: """
+      file:///usr/local/lib/node_modules/@openai/codex/bin/codex.js:108
+        throw new Error(
+              ^
+
+      Error: Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: npm install -g @openai/codex@latest
+          at findCodexExecutable (file:///usr/local/lib/node_modules/@openai/codex/bin/codex.js:108:9)
+
+      Node.js v22.12.0
+      """) == "Error: Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: npm install -g @openai/codex@latest")
+// A launcher that explains itself over several lines, error first.
+check("a launcher's own explanation → its error line, not the last hint",
+      CLIStartFailure.reason(in: """
+      Error: the native binary is not installed.
+
+      Run the postinstall step again, or reinstall the package.
+      """) == "Error: the native binary is not installed.")
+check("an argument parser's lowercase 'error:' counts",
+      CLIStartFailure.reason(in: "error: unexpected argument '--x' found\n\nUsage: tool [OPTIONS]\n")
+        == "error: unexpected argument '--x' found")
+check("a JavaScript error class counts",
+      CLIStartFailure.reason(in: "x.js:1\nTypeError: Cannot read properties of undefined\n    at f (x.js:1:2)\n")
+        == "TypeError: Cannot read properties of undefined")
+check("no error line → the last line said",
+      CLIStartFailure.reason(in: "starting\nsomething went wrong\n") == "something went wrong")
+check("a URL or a stack frame is no error label",
+      CLIStartFailure.reason(in: "file:///x.js:1\n    at f (file:///x.js:1:2)\n")
+        == "at f (file:///x.js:1:2)")
+check("nothing said → nil",
+      CLIStartFailure.reason(in: "  \n\n") == nil)
+let longLine = "Error: " + String(repeating: "x", count: 1000)
+check("a line past the cap is cut, and says so",
+      CLIStartFailure.reason(in: longLine)?.count == CLIStartFailure.lineCap + 1
+        && CLIStartFailure.reason(in: longLine)?.hasSuffix("…") == true)
+
 // MARK: - 2. Reading the installed version off disk
 
 print("installed version — claude's symlink fast path, and the fallback")
@@ -176,8 +216,56 @@ check("a non-symlink binary has no fast path",
       plainPrint.flatMap(AgentCLIProbe.versionFromClaudeVersionsSymlink) == nil)
 let spawned = await AgentCLIProbe.installedVersion(agentKey: "codex",
                                                    fingerprint: plainPrint)
-check("…so the version comes from spawning it", spawned?.text == "0.152.1",
-      "got \(spawned?.text ?? "nil")")
+check("…so the version comes from spawning it", spawned.version?.text == "0.152.1",
+      "got \(spawned.version?.text ?? "nil")")
+check("…and a tool that answered is not one that cannot start", spawned.startFailure == nil)
+
+// A tool that cannot start: npm installs a tool's macOS program as an
+// optional package and ends an install whose download of it failed with
+// exit 0, leaving a launcher that throws on every start. Node's trace
+// ends with NODE's version, and the first dotted number of that output is
+// not the tool's version — read as one, a broken Codex was "22.12.0",
+// newer than any release, and its update had "landed".
+let nodeTrace = """
+file:///usr/local/lib/node_modules/@openai/codex/bin/codex.js:108
+  throw new Error(
+        ^
+
+Error: Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: npm install -g @openai/codex@latest
+    at findCodexExecutable (file:///usr/local/lib/node_modules/@openai/codex/bin/codex.js:108:9)
+    at file:///usr/local/lib/node_modules/@openai/codex/bin/codex.js:113:20
+
+Node.js v22.12.0
+"""
+let crashing = tmp.appendingPathComponent("crashcli")
+try? "#!/bin/sh\ncat >&2 <<'TRACE'\n\(nodeTrace)\nTRACE\nexit 1\n".write(to: crashing,
+                                                                            atomically: true,
+                                                                            encoding: .utf8)
+try? FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                       ofItemAtPath: crashing.path)
+AgentManager.binaries["crashes"] = crashing.path
+let crashed = await AgentCLIProbe.installedVersion(
+    agentKey: "crashes",
+    fingerprint: AgentCLIProbe.fingerprint(agentKey: "crashes"))
+check("a tool that cannot start names no version — not Node's, out of its error",
+      crashed.version == nil, "got \(crashed.version?.text ?? "nil")")
+check("…what it printed comes back instead, the tool's own words in it",
+      crashed.startFailure?.contains("Missing optional dependency @openai/codex-darwin-arm64") == true,
+      crashed.startFailure ?? "nil")
+// The exit status is the evidence, not the words: a tool that prints a
+// version and then fails has not started cleanly either.
+let printsThenFails = tmp.appendingPathComponent("printsthenfails")
+try? "#!/bin/sh\necho 'codex-cli 0.152.1'\nexit 2\n".write(to: printsThenFails,
+                                                            atomically: true, encoding: .utf8)
+try? FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                       ofItemAtPath: printsThenFails.path)
+AgentManager.binaries["printsthenfails"] = printsThenFails.path
+let failedAfter = await AgentCLIProbe.installedVersion(
+    agentKey: "printsthenfails",
+    fingerprint: AgentCLIProbe.fingerprint(agentKey: "printsthenfails"))
+check("a --version that exits non-zero names no version, whatever it printed",
+      failedAfter.version == nil && failedAfter.startFailure == "codex-cli 0.152.1",
+      "\(failedAfter)")
 
 // A CLI that reads stdin must find EOF rather than wait for input the
 // user is not typing. Without the null device this hangs until the
@@ -193,7 +281,7 @@ let readerVersion = await AgentCLIProbe.installedVersion(
     agentKey: "reads_stdin",
     fingerprint: AgentCLIProbe.fingerprint(agentKey: "reads_stdin"))
 check("a CLI that reads stdin still returns (stdin is /dev/null)",
-      readerVersion?.text == "1.2.3", "got \(readerVersion?.text ?? "nil")")
+      readerVersion.version?.text == "1.2.3", "got \(readerVersion.version?.text ?? "nil")")
 
 // The pipe's write end is inherited by whatever the CLI spawns. A
 // helper it leaves running holds end-of-file open long after the CLI
@@ -214,13 +302,17 @@ let orphanVersion = await AgentCLIProbe.installedVersion(
     fingerprint: AgentCLIProbe.fingerprint(agentKey: "orphans"))
 let orphanElapsed = Date().timeIntervalSince(orphanStart)
 check("a CLI that leaves a helper holding the pipe still returns its version",
-      orphanVersion?.text == "4.5.6", "got \(orphanVersion?.text ?? "nil")")
+      orphanVersion.version?.text == "4.5.6", "got \(orphanVersion.version?.text ?? "nil")")
 check("…without waiting for the helper", orphanElapsed < 8,
       String(format: "took %.1f s", orphanElapsed))
 
 // The ceiling is a ceiling: a child that never finishes is stopped by
 // pid and the run RETURNS, rather than the row spinning for the life of
-// the launch. What it printed before the stop is kept.
+// the launch. What it printed before the stop is kept. The ceiling is
+// whole seconds past the time a shell takes to start and print on a
+// busy Mac (a build or another harness running): a ceiling of a second
+// stops the child before it has printed anything, and the last check
+// then reads a tail that was never written as one that was lost.
 let hanging = tmp.appendingPathComponent("hangcli")
 try? "#!/bin/sh\nprintf 'starting\\n'\nsleep 30\n".write(to: hanging,
                                                           atomically: true,
@@ -229,14 +321,116 @@ try? FileManager.default.setAttributes([.posixPermissions: 0o755],
                                        ofItemAtPath: hanging.path)
 let hangStart = Date()
 let hung = await AgentCLIProbe.run(binary: hanging.path, arguments: [],
-                                   ceiling: 1, outputCap: 4096,
+                                   ceiling: 5, outputCap: 4096,
                                    onSpawn: { _ in })
 let hangElapsed = Date().timeIntervalSince(hangStart)
 check("a child that outlives the ceiling is stopped and the run returns",
-      hangElapsed < 8, String(format: "took %.1f s", hangElapsed))
+      hangElapsed < 12, String(format: "took %.1f s", hangElapsed))
 check("…and its exit is not reported as clean", hung.exitCode != 0)
 check("…while what it printed before the stop is kept",
       hung.output.contains("starting"), "output: \(hung.output.prefix(120))")
+
+// MARK: - 2b. Waiting for a child from a thread that did not launch it
+
+print("awaitExit — a stopped child waited for from another thread")
+
+/// The shape that hung Kimi's local server on its way out: a child
+/// launched in one GCD block exits by itself, and another block — as
+/// `KimiWebServerCall.finish` and the Agent Guide's codex session
+/// `close()` run — sees it gone and waits for it with `wait`. Four lanes
+/// at once, each `rounds` children: the hazard shows under concurrency
+/// (measured: between one wait in fifty and one in several hundred, by
+/// load) and seldom in a single lane. Answers how many waits did not
+/// return within 5 s.
+func crossThreadWaits(rounds: Int, stopAtFirst: Bool, _ wait: @escaping (Process) -> Void) -> Int {
+    let lanes = 4
+    let lock = NSLock()
+    var stuck = 0
+    let group = DispatchGroup()
+    for _ in 0..<lanes {
+        group.enter()
+        Thread.detachNewThread {
+            defer { group.leave() }
+            for _ in 0..<rounds {
+                if stopAtFirst, lock.withLock({ stuck > 0 }) { return }
+                let launched = DispatchSemaphore(value: 0)
+                var child: Process?
+                DispatchQueue.global(qos: .utility).async {
+                    let p = Process()
+                    p.executableURL = URL(fileURLWithPath: "/bin/sleep")
+                    p.arguments = ["0.05"]
+                    p.standardOutput = FileHandle.nullDevice
+                    p.standardError = FileHandle.nullDevice
+                    try? p.run()
+                    child = p
+                    launched.signal()
+                }
+                launched.wait()
+                guard let p = child else { continue }
+                let done = DispatchSemaphore(value: 0)
+                DispatchQueue.global(qos: .utility).async {
+                    while p.isRunning { usleep(10_000) }
+                    wait(p)
+                    done.signal()
+                }
+                if done.wait(timeout: .now() + 5) == .timedOut {
+                    lock.withLock { stuck += 1 }
+                }
+            }
+        }
+    }
+    group.wait()
+    return stuck
+}
+let awaitedStuck = crossThreadWaits(rounds: 100, stopAtFirst: false) { p in
+    AgentCLIProbe.stop(p)
+    AgentCLIProbe.awaitExit(p)
+}
+check("a child launched on one thread is waited for on another, every time (4 × 100 rounds)",
+      awaitedStuck == 0, "\(awaitedStuck) wait(s) did not return")
+// The hazard, re-measured: Foundation's own wait from another thread.
+let foundationStuck = crossThreadWaits(rounds: 100, stopAtFirst: true) { $0.waitUntilExit() }
+print(foundationStuck > 0
+      ? "  note (control) Process.waitUntilExit() from another thread still hangs after the child has exited"
+      : "  note (control) Process.waitUntilExit() from another thread did not hang in 4 × 100 rounds — rare rather than gone (between one wait in fifty and one in several hundred, by load); awaitExit is right either way")
+
+// Every wait in the app on Foundation's own call sits in the function that
+// launched the child, with nothing between the launch and the wait that
+// can move it to another thread — a suspension, a queue (a global one, a
+// stored one's `.async`, `asyncAfter`), a task, a thread, an operation
+// queue. A wait for a child launched elsewhere goes through
+// `AgentCLIProbe.awaitExit`.
+var crossThreadWaitSites: [String] = []
+let appRoot = URL(fileURLWithPath: sourceRoot + "/SipAI")
+let swiftFiles = (FileManager.default.enumerator(at: appRoot, includingPropertiesForKeys: nil)?
+    .compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }) ?? []
+for file in swiftFiles {
+    let lines = ((try? String(contentsOf: file, encoding: .utf8)) ?? "").components(separatedBy: "\n")
+        .map { line -> String in
+            guard let comment = line.range(of: "//") else { return line }
+            return String(line[..<comment.lowerBound])
+        }
+    for (index, line) in lines.enumerated() where line.contains("waitUntilExit()") {
+        var start = index
+        while start > 0, !lines[start].contains("func ") { start -= 1 }
+        let body = Array(lines[start..<index])
+        guard let launch = body.lastIndex(where: { $0.contains(".run()") }) else {
+            crossThreadWaitSites.append("\(file.lastPathComponent):\(index + 1) (no launch in its function)")
+            continue
+        }
+        let between = body[(launch + 1)...].joined(separator: "\n")
+        let hops = ["await ", "DispatchQueue", ".async", "Task {", "Task.detached", "Task(priority",
+                    "Thread {", "Thread(block", "Thread.detachNewThread", "OperationQueue"]
+        if hops.contains(where: { between.contains($0) }) {
+            crossThreadWaitSites.append("\(file.lastPathComponent):\(index + 1) (a hop between launch and wait)")
+        }
+    }
+}
+check("every Process.waitUntilExit() in the app waits on the thread that launched its child",
+      !swiftFiles.isEmpty && crossThreadWaitSites.isEmpty, crossThreadWaitSites.joined(separator: ", "))
+check("…and Kimi's local server and the Agent Guide's codex session wait for theirs through awaitExit",
+      source("SipAI/Models/PlanUsage.swift").contains("AgentCLIProbe.stop(p)\n        AgentCLIProbe.awaitExit(p)")
+        && source("SipAI/Models/AgentGuide.swift").contains("AgentCLIProbe.stop(p)\n                AgentCLIProbe.awaitExit(p)"))
 
 // MARK: - 3. What a row may say
 
@@ -293,7 +487,26 @@ check("only updateAvailable and updateFailed offer a button",
       && !CLIUpdateStatus.upToDate(installed: v("1.0"), checkedAt: now).offersUpdate
       && !CLIUpdateStatus.updating.offersUpdate
       && !CLIUpdateStatus.unknown.offersUpdate
-      && !CLIUpdateStatus.managedElsewhere(installed: v("2.1.274"), manager: "Homebrew").offersUpdate)
+      && !CLIUpdateStatus.managedElsewhere(installed: v("2.1.274"), manager: "Homebrew").offersUpdate
+      && !CLIUpdateStatus.cannotStart(said: "Error: x").offersUpdate)
+// A tool that cannot start: no version to compare, so no claim — but the
+// row says so, in the tool's own words. Its own updater is the tool, so
+// there is no button to offer.
+check("a tool that cannot start is said to be one, whatever a check found",
+      AgentCLIUpdateRules.decideStatus(installed: nil, latestKnown: v("0.167.1"),
+                                       lastCheckSucceeded: now, startFailure: "Error: x")
+        == .cannotStart(said: "Error: x"))
+check("…and with no check at all",
+      AgentCLIUpdateRules.decideStatus(installed: nil, latestKnown: nil,
+                                       lastCheckSucceeded: nil, startFailure: "Error: x")
+        == .cannotStart(said: "Error: x"))
+check("a version not read, with nothing said, is still unknown",
+      AgentCLIUpdateRules.decideStatus(installed: nil, latestKnown: v("0.167.1"),
+                                       lastCheckSucceeded: now, startFailure: nil) == .unknown)
+check("a version read outranks a stale failure",
+      AgentCLIUpdateRules.decideStatus(installed: v("0.167.1"), latestKnown: v("0.167.1"),
+                                       lastCheckSucceeded: now, startFailure: "Error: x")
+        == .upToDate(installed: v("0.167.1"), checkedAt: now))
 // A Homebrew-installed claude or kimi: its own updater declines the
 // install (measured on claude 2.1.283 and kimi 2.1.1) and SipAI never
 // runs Homebrew, so whatever a check found is not a claim this row may
@@ -399,6 +612,9 @@ check("managed elsewhere → nothing on offer, whatever a check found, either sw
                                        latest: v("2.1.283"), autoUpdate: false) == nil
       && AgentCLIUpdateRules.badgeVersion(status: .managedElsewhere(installed: v("2.1.274"), manager: "Homebrew"),
                                           latest: v("2.1.283"), autoUpdate: true) == nil)
+check("a tool that cannot start → nothing on offer: no update of its own can run",
+      AgentCLIUpdateRules.badgeVersion(status: .cannotStart(said: "Error: x"),
+                                       latest: v("0.167.1"), autoUpdate: false) == nil)
 
 print("autoUpdateIsDue — one attempt per version, never under a running turn")
 
@@ -426,6 +642,7 @@ check("current → nothing to do",
       !due(.upToDate(installed: v("2.1.258"), checkedAt: now)))
 check("never checked → nothing to act on", !due(.versionOnly(installed: v("2.1.0")), latest: nil))
 check("managed elsewhere never updates by itself", !due(.managedElsewhere(installed: v("2.1.274"), manager: "Homebrew")))
+check("a tool that cannot start never updates by itself", !due(.cannotStart(said: "Error: x")))
 check("no latest known → nothing to act on", !due(behind, latest: nil))
 check("already updating → not twice", !due(.updating))
 
@@ -499,133 +716,11 @@ suite.removePersistentDomain(forName: suiteName)
 CFPreferencesAppSynchronize(suiteName as CFString)
 try? FileManager.default.removeItem(at: badgePrefs)
 
-// MARK: - 5b. The header's queue
+// MARK: - 5b. The bubble beside the logo
 
-print("UpdateAnnouncementQueue — wait your turn, no wordmark in between")
-
-let t0 = Date(timeIntervalSince1970: 1_000_000)
-let lineA = UpdateAnnouncement(text: "A")
-let lineB = UpdateAnnouncement(text: "B")
-let lineC = UpdateAnnouncement(text: "C")
-var q = UpdateAnnouncementQueue()
-check("an empty queue shows the wordmark", q.current == nil && q.endsAt(duration: 5) == nil)
-q.enqueue(lineA, now: t0)
-check("the first line shows at once", q.current == lineA && q.endsAt(duration: 5) == t0.addingTimeInterval(5))
-q.enqueue(lineB, now: t0.addingTimeInterval(1))
-check("a line arriving meanwhile WAITS", q.current == lineA && q.waiting == [lineB])
-q.advance(now: t0.addingTimeInterval(4.9), duration: 5)
-check("an early wake-up cuts nothing short", q.current == lineA)
-q.enqueue(lineC, now: t0.addingTimeInterval(4.95))
-q.advance(now: t0.addingTimeInterval(5), duration: 5)
-check("at five seconds the next line takes over DIRECTLY", q.current == lineB && q.waiting == [lineC])
-check("…with a full turn of its own", q.endsAt(duration: 5) == t0.addingTimeInterval(10))
-q.advance(now: t0.addingTimeInterval(12), duration: 5)
-check("a late wake-up still starts the next line's turn when it appears",
-      q.current == lineC && q.endsAt(duration: 5) == t0.addingTimeInterval(17))
-q.advance(now: t0.addingTimeInterval(17), duration: 5)
-check("an empty queue brings the wordmark back", q.current == nil && q.waiting.isEmpty)
-
-print("UpdateAnnouncer — the real driver, on the real clock")
-
-do {
-    let announcer = UpdateAnnouncer(duration: 0.3)
-    var shown: [(Date, String?)] = []
-    let watch = announcer.$current.dropFirst().sink { shown.append((Date(), $0?.text)) }
-    let began = Date()
-    announcer.announce("A")
-    announcer.announce("B")
-    try? await Task.sleep(nanoseconds: 120_000_000)
-    announcer.announce("C")
-    check("the first line is on screen while the others wait", announcer.current?.text == "A")
-    try? await Task.sleep(nanoseconds: 1_400_000_000)
-    watch.cancel()
-    let texts = shown.map(\.1)
-    check("A, B, C, then the wordmark — never the wordmark in between",
-          texts == ["A", "B", "C", nil], "\(texts)")
-    if texts == ["A", "B", "C", nil] {
-        let gaps = zip(shown.dropFirst(), shown).map { next, prev in next.0.timeIntervalSince(prev.0) }
-        check("each line stays its full time (0.3 s here, 5 s in the app)",
-              gaps.allSatisfy { $0 >= 0.29 && $0 < 0.6 },
-              gaps.map { String(format: "%.2f", $0) }.joined(separator: " "))
-        check("the first line appeared at once",
-              shown[0].0.timeIntervalSince(began) < 0.05)
-    }
-    check("the app's lines stay five seconds", UpdateAnnouncer.defaultDuration == 5)
-}
-
-do {
-    let announcer = UpdateAnnouncer(duration: 0.2)
-    announcer.isEnabled = { false }
-    announcer.announce("Off")
-    check("with Show update messages off, nothing is queued", announcer.current == nil)
-    announcer.isEnabled = { true }
-    var shown: [String?] = []
-    let watch = announcer.$current.dropFirst().sink { shown.append($0?.text) }
-    announcer.announce("Claude Code just updated to 2.1.290")
-    announcer.announce("Claude Code just updated to 2.1.290")
-    try? await Task.sleep(nanoseconds: 50_000_000)
-    announcer.announce("Claude Code just updated to 2.1.290")
-    try? await Task.sleep(nanoseconds: 450_000_000)
-    watch.cancel()
-    // One update, seen by two routes at once (the button's own finish
-    // and the re-stat), is said once.
-    check("the same sentence showing or waiting is not queued twice",
-          shown == ["Claude Code just updated to 2.1.290", nil], "\(shown)")
-}
-
-print("UpdateAnnouncer — a line starts only while someone can see the logo")
-
-do {
-    // An update noticed while Terminal is in front, or one that lands
-    // while a sheet lies over the logo, would otherwise spend its five
-    // seconds where nobody is looking.
-    let away = UpdateAnnouncer(duration: 0.2)
-    away.setAppActive(false)
-    away.announce("Claude Code just updated to 2.1.290")
-    check("SipAI behind another app: the line is held, not shown", away.current == nil)
-    away.announce("Claude Code just updated to 2.1.290")
-    away.setAppActive(true)
-    check("…and starts when SipAI comes to the front", away.current?.text == "Claude Code just updated to 2.1.290")
-    try? await Task.sleep(nanoseconds: 350_000_000)
-    check("…said once, however often it was announced while held", away.current == nil)
-
-    let covered = UpdateAnnouncer(duration: 0.2)
-    covered.setAppActive(true)
-    covered.sheetCoversLockup = { true }
-    covered.setSheetPresented(true)
-    covered.announce("Codex just updated to 0.157.0")
-    covered.announce("Kimi Code just updated to 2.1.2")
-    check("a sheet over the logo holds the lines", covered.current == nil)
-    covered.setSheetPresented(false)
-    check("…closing it starts them, in the order they came",
-          covered.current?.text == "Codex just updated to 0.157.0")
-    try? await Task.sleep(nanoseconds: 250_000_000)
-    check("…the next taking over directly", covered.current?.text == "Kimi Code just updated to 2.1.2")
-
-    // Every manual update is run from Settings, and on most windows the
-    // sheet leaves the sidebar — logo and all — in plain view. Held
-    // there, a manual update was never said when it landed.
-    let beside = UpdateAnnouncer(duration: 0.2)
-    beside.setAppActive(true)
-    beside.sheetCoversLockup = { false }
-    beside.setSheetPresented(true)
-    beside.announce("Codex just updated to 0.157.1")
-    check("a sheet that leaves the logo in view does not hold the line",
-          beside.current?.text == "Codex just updated to 0.157.1")
-
-    let unmeasured = UpdateAnnouncer(duration: 0.2)
-    unmeasured.setAppActive(true)
-    unmeasured.setSheetPresented(true)
-    unmeasured.announce("Codex just updated to 0.157.1")
-    check("with no lockup to measure, a sheet counts as covering it", unmeasured.current == nil)
-
-    let switchedOff = UpdateAnnouncer(duration: 0.2)
-    switchedOff.setAppActive(false)
-    switchedOff.announce("Codex just updated to 0.157.0")
-    switchedOff.isEnabled = { false }
-    switchedOff.setAppActive(true)
-    check("a held line switched off meanwhile is dropped, not shown late", switchedOff.current == nil)
-}
+// The queue that says an update landed, the hold until someone can see
+// the logo, the offers and their × are `SidebarNotices` now, beside the
+// other notices the bubble carries — pinned in Verification/SidebarNotices.
 
 print("UpdateWaitList — a turn sent during an update waits for it")
 
@@ -832,6 +927,8 @@ print("structural")
 
 let model = source("SipAI/Models/AgentCLIUpdates.swift")
 let notices = source("SipAI/Models/UpdateNotices.swift")
+let sidebarNotices = source("SipAI/Models/SidebarNotices.swift")
+let lockup = source("SipAI/Views/Sidebar/SidebarBrandLockup.swift")
 let runner = source("SipAI/Models/AgentRunner.swift")
 let reset = source("SipAI/Models/FactoryReset.swift")
 let content = source("SipAI/Views/ContentView.swift")
@@ -844,6 +941,8 @@ let guideModel = source("SipAI/Models/AgentGuide.swift")
 let app = source("SipAI/SipAIApp.swift")
 check("AgentCLIUpdates.swift is where it is expected", !model.isEmpty)
 check("UpdateNotices.swift is where it is expected", !notices.isEmpty)
+check("SidebarNotices.swift and SidebarBrandLockup.swift are where they are expected",
+      !sidebarNotices.isEmpty && !lockup.isEmpty)
 
 // One environment, not a second spelling of it. Everything the spawn
 // needs — the DYLD strip that keeps a Node SEA from aborting, the
@@ -891,14 +990,34 @@ check("claude's check reads the channel its settings name, off the MainActor",
       model.contains("release = release.onChannel(AgentCLIRelease.claudeChannel(settings: settings))")
       && model.contains("PlanAccountDetector.claudeSettingsFiles.compactMap { try? Data(contentsOf: $0) }"))
 check("who manages an install is read beside its version and reaches the status rule",
-      model.contains("return (version, Self.managedBy(key))")
-      && model.contains("managedBy: s?.managedBy)")
+      model.contains("return (read, Self.managedBy(key))")
+      && model.contains("managedBy: s?.managedBy,")
       && model.contains("AgentInstallSource.current(agentKey: key)?.managedBy(agentKey: key)"))
 check("the row says who manages a tool SipAI cannot update, and offers nothing",
       source("SipAI/Views/Settings/SettingsView.swift").contains("case .managedElsewhere(_, let manager):")
       && source("SipAI/Views/Settings/SettingsView.swift").contains("case .unknown, .versionOnly, .upToDate, .managedElsewhere:\n            EmptyView()"))
 // Foundation raises when terminationStatus is read on a live process.
 check("terminationStatus is read guarded", model.contains("p.isRunning ? nil : p.terminationStatus"))
+// A tool that cannot start: the version read keeps what it said, the
+// status rule hears it, and the row says so with the words under Details.
+check("the version read takes a version only from a --version that exited cleanly",
+      model.contains("guard result.exitCode == 0 else {"))
+check("what a tool that cannot start said is kept beside its version, and reaches the status rule",
+      model.contains("s.startFailure = read.startFailure")
+      && model.contains("startFailure: s?.startFailure)"))
+check("…a failed update stays on the row over a tool that cannot start",
+      model.contains("case .updateAvailable, .cannotStart: failureStands = true"))
+check("…and its details end with what the tool says now",
+      model.contains("if let said = s.startFailure, !trimmed.contains(said) {"))
+let settingsView = source("SipAI/Views/Settings/SettingsView.swift")
+check("the row says a tool cannot start, in orange, with its words under Details",
+      settingsView.contains("case .cannotStart:\n            Text(\"Can’t start\"")
+      && settingsView.contains("case .updateFailed(let text), .cannotStart(let text):")
+      && settingsView.contains("case .cannotStart(let said):"))
+let runnerSource = source("SipAI/Models/AgentRunner.swift")
+check("a Default turn on a tool that cannot start ends with the tool's own words",
+      runnerSource.contains("AgentCLIUpdateMonitor.shared.startFailures[agentKey]")
+      && runnerSource.contains(".flatMap(CLIStartFailure.reason(in:))"))
 
 print("structural — no banner; the badge instead")
 
@@ -914,14 +1033,14 @@ check("…and nothing routes an update notice to the Agent Guide",
 // Add Model is the window's one sheet; Settings is a mode of the main
 // window that keeps the logo in view, so nothing about it holds a line.
 check("the window says when a sheet is up, and the lockup whether it is covered",
-      content.contains(".onChange(of: showingModelSetup) { _, showing in\n            UpdateAnnouncer.shared.setSheetPresented(showing)\n        }")
+      content.contains(".onChange(of: showingModelSetup) { _, showing in\n            SidebarNotices.shared.setSheetPresented(showing)\n        }")
       && content.components(separatedBy: "setSheetPresented(").count == 2
       && content.range(of: #"showingSettings\b"#, options: .regularExpression) == nil
       && sidebar.contains(".background(LockupSheetCheck())")
-      && notices.contains("appActive && !(sheetPresented && sheetCoversLockup())"))
-check("the announcer follows SipAI in and out of the front",
-      notices.contains("NSApplication.didBecomeActiveNotification")
-      && notices.contains("NSApplication.didResignActiveNotification"))
+      && sidebarNotices.contains("appActive && !(sheetPresented && sheetCoversLockup())"))
+check("the notices follow SipAI in and out of the front",
+      sidebarNotices.contains("NSApplication.didBecomeActiveNotification")
+      && sidebarNotices.contains("NSApplication.didResignActiveNotification"))
 // Beside "Settings" in the sidebar and beside "Updates" in Settings.
 if let from = sidebar.range(of: "Text(\"Settings\", comment: \"Sidebar: open settings\")") {
     let after = sidebar[from.upperBound...].prefix(400)
@@ -969,16 +1088,14 @@ check("SipAI's own update feeds the badge from Sparkle's three answers",
       && sparkle.contains("func updaterDidNotFindUpdate(_ updater: SPUUpdater)")
       && sparkle.contains("userDidMake choice: SPUUserUpdateChoice")
       && sparkle.contains("guard choice == .skip else { return }")
-      && sparkle.contains("if let availableUpdate { items.append(.app(version: availableUpdate.version)) }")
+      && sparkle.contains("items.append(.app(version: availableUpdate.version, display: availableUpdate.display))")
       && sparkle.contains("UpdateBadge.shared.setAppItems(items)"))
-// SipAI's held install: said once beside the logo, marked on the badge,
-// endable from Settings → Updates.
+// SipAI's held install: standing beside the logo with Install Now for as
+// long as it lasts, marked on the badge, endable from Settings → Updates.
 if let from = sparkle.range(of: "private func beginHold() {") {
     let body = sparkle[from.upperBound...].prefix(1200)
-    check("a held SipAI install is said beside the logo and raises the badge",
-          body.contains("publishBadge()")
-          && body.contains("UpdateAnnouncer.shared.announce(")
-          && body.contains("will install once the running turn finishes."))
+    check("a held SipAI install stands beside the logo, offered anew, and raises the badge",
+          body.contains("SidebarNotices.shared.reopen(key: UpdateBadgeItem.appInstallKey)\n        publishBadge()"))
 } else {
     check("beginHold is where it is expected", false)
 }
@@ -995,7 +1112,7 @@ check("the relaunch an update installed says \"SipAI just updated to …\"",
       sparkle.contains("func noteLaunch()")
       && sparkle.contains("CopyLaunchRecord.note(")
       && sparkle.contains(".compareVersion(build, toVersion: than) == .orderedDescending")
-      && sparkle.contains("String(localized: \"\\(name) just updated to \\(currentVersion)\"")
+      && sparkle.contains("SidebarNotices.shared.post(.updated(name: \"SipAI\", version: currentVersion))")
       && app.contains("updateController.noteLaunch()"))
 check("…is compared by Sparkle's own comparator, on the build number",
       sparkle.contains("SUStandardVersionComparator.default\n            .compareVersion(version, toVersion: currentBuild) == .orderedDescending"))
@@ -1099,23 +1216,23 @@ print("structural — the header's line")
 // No user-visible sentence in this app names an agent outright.
 check("the line names the agent through agentLabel",
       model.contains("config?.agentLabel(for: key, defaultName: name)")
-      && model.contains("String(localized: \"\\(label) just updated to \\(version.text)\""))
-check("the line takes the wordmark's place, on the cup's baseline, moving nothing",
-      sidebar.contains("HStack(alignment: .lastTextBaseline, spacing: 10)")
-      && sidebar.contains("Self.wordmark\n                .hidden()")
-      && sidebar.contains(".overlay(alignment: .leadingLastTextBaseline)"))
-check("each line is a new identity, so the next one rolls in over the last",
-      sidebar.contains(".id(line.id)") && sidebar.contains("value: line?.id)"))
-check("Settings → Display → Show update messages governs the lines, on by default",
-      sidebar.contains("showsUpdateMessages ? announcer.current : nil")
-      && sidebar.contains("SidebarBrandLockup(showsUpdateMessages: config.display.showUpdateMessages)")
-      && app.contains("return display.showUpdateMessages\n")
-      && source("SipAI/Models/ConfigManager.swift").contains("s.showUpdateMessages = d[\"update_messages\"] as? Bool ?? true")
-      && source("SipAI/Models/ConfigManager.swift").contains("d[\"update_messages\"] = s.showUpdateMessages")
-      && settings.contains("toggle(\"Show update messages\", value: \\.showUpdateMessages)\n"))
-// The logo and app name are always drawn: the update lines take the
-// name's place, and a switch that hid them left the lines nowhere to go.
-// So there is no such switch, nothing reads one, and the update switch
+      && model.contains("SidebarNotices.shared.post(.updated(name: label(for: key), version: version.text))"))
+check("the bubble takes the wordmark's place, on the cup's baseline, moving nothing",
+      lockup.contains("HStack(alignment: .lastTextBaseline, spacing: Self.markGap)")
+      && lockup.contains("Self.wordmark\n                .hidden()")
+      && lockup.contains(".overlay(alignment: .leadingLastTextBaseline)"))
+check("each notice is a new identity, so the next one rolls in over the last",
+      lockup.contains(".id(notice.id)") && lockup.contains("value: animationKey)"))
+check("Settings → Display → Show notifications beside the logo governs the bubble, on by default",
+      lockup.contains("showsNotices && (notice != nil || offer != nil)")
+      && sidebar.contains("SidebarHeader(showsNotices: config.display.showSidebarNotices)")
+      && app.contains("configManager?.display.showSidebarNotices ?? true")
+      && source("SipAI/Models/ConfigManager.swift").contains("s.showSidebarNotices = d[\"update_messages\"] as? Bool ?? true")
+      && source("SipAI/Models/ConfigManager.swift").contains("d[\"update_messages\"] = s.showSidebarNotices")
+      && settings.contains("toggle(\"Show notifications beside the logo\", value: \\.showSidebarNotices)\n"))
+// The logo and app name are always drawn: the bubble takes the name's
+// place, and a switch that hid them left the notices nowhere to go. So
+// there is no such switch, nothing reads one, and the notices' switch
 // depends on nothing.
 let displayPane: Substring = {
     guard let a = settings.range(of: "struct DisplayPane: View {"),
@@ -1124,7 +1241,7 @@ let displayPane: Substring = {
     return settings[a.lowerBound..<b.upperBound]
 }()
 let messagesRow: Substring = {
-    guard let a = displayPane.range(of: "toggle(\"Show update messages\""),
+    guard let a = displayPane.range(of: "toggle(\"Show notifications beside the logo\""),
           let b = displayPane.range(of: "Divider()", range: a.upperBound..<displayPane.endIndex)
     else { return "" }
     return displayPane[a.lowerBound..<b.lowerBound]
@@ -1135,17 +1252,18 @@ check("the logo and app name cannot be hidden: no switch, no setting, drawn unco
         && source("SipAI/Models/ConfigManager.swift").contains("d.removeValue(forKey: \"sidebar_brand\")")
         && !app.contains("showSidebarBrand") && !sidebar.contains("showSidebarBrand")
         && !sidebar.contains("if config.display.showSidebarBrand"),
-      "— with the logo off, the update messages had nowhere to show")
-check("Show update messages is a row of its own — the plain toggle, no indent, never disabled",
-      !displayPane.contains("subToggle(\"Show update messages\"")
+      "— with the logo off, the notices had nowhere to show")
+check("Show notifications beside the logo is a row of its own — the plain toggle, no indent, never disabled",
+      !displayPane.contains("subToggle(\"Show notifications beside the logo\"")
         && !messagesRow.isEmpty && !messagesRow.contains(".padding(.leading")
         && !messagesRow.contains(".disabled("),
       "— its row and its sentence were indented, smaller and dimmer, as if it were one of a group's switches")
-check("Reduce Motion gets a cross-fade", sidebar.contains("guard !reduceMotion else { return .opacity }"))
+check("Reduce Motion gets a cross-fade", lockup.contains("guard !reduceMotion else { return .opacity }"))
 // Visible on every screen; a clock in it would re-render the window
 // once a second forever.
 check("the header and the badge carry no clock",
-      !sidebar.contains("TimelineView") && !notices.contains("Timer.scheduledTimer"))
+      !sidebar.contains("TimelineView") && !lockup.contains("TimelineView")
+      && !notices.contains("Timer.scheduledTimer") && !sidebarNotices.contains("Timer.scheduledTimer"))
 
 // A key that is not registered outlives a reset that promised to clear
 // every setting — and the copy in memory has to follow the key.
@@ -1188,7 +1306,7 @@ check("no interpolated Text literal reaches the rows, the badge or the header",
       && !hasInterpolatedTextLiteral(codeOnly(sidebar)))
 check("versions are printed verbatim",
       settings.contains("Text(verbatim: cliUpdates.installed[agent.key]?.text"))
-check("the header's line is drawn verbatim", sidebar.contains("Text(verbatim: line.text)"))
+check("the bubble's line is drawn verbatim", lockup.contains("Text(verbatim: notice.line)"))
 
 // Cadence: nothing here polls.
 check("release checks are 8-hourly, not per-minute",
@@ -1204,7 +1322,7 @@ check("opening the pane does not re-check within the hour",
 if let data = FileManager.default.contents(atPath: sourceRoot + "/SipAI/Resources/Localizable.xcstrings"),
    let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
    let strings = root["strings"] as? [String: Any] {
-    for key in ["Agent Guide", "Command-line tools", "Up to date", "New version %@", "Updating…",
+    for key in ["Agent Initialization", "Command-line tools", "Up to date", "New version %@", "Updating…",
                 "Cancelling…",
                 "Update did not complete", "Details", "Update",
                 "Finish the running turn before updating this tool.",
@@ -1218,9 +1336,9 @@ if let data = FileManager.default.contents(atPath: sourceRoot + "/SipAI/Resource
                 "This tool updates by itself once the running turn finishes.",
                 "%@ is updating. Your message will be sent when the update finishes.",
                 "SipAI %@ will install once the running turn finishes.",
-                "Show update messages",
-                "When SipAI or an agent tool is updated, a short message takes the app name's place for five seconds.",
-                "Managed by %@",
+                "Show notifications beside the logo",
+                "An update you can install stays beside the logo, with an Update button, until you use it or close it. A session waiting for you shows there for 10 seconds; a finished chat or agent response, and an update that has landed, for 5.",
+                "Managed by %@", "Can’t start", "%@ can’t start: %@",
                 "The tool's own updater leaves this copy to %@, which SipAI does not run. Update it there, in Terminal."] {
         let entry = strings[key] as? [String: Any]
         let zh = ((entry?["localizations"] as? [String: Any])?["zh-Hans"]
@@ -1331,10 +1449,12 @@ if ProcessInfo.processInfo.environment["SIPAI_CLIUPD_LIVE"] == "1" {
             continue
         }
         AgentManager.binaries[agent.key] = path
-        let installed = await AgentCLIProbe.installedVersion(
+        let read = await AgentCLIProbe.installedVersion(
             agentKey: agent.key,
             fingerprint: AgentCLIProbe.fingerprint(agentKey: agent.key))
-        check("\(agent.key): --version parses", installed != nil)
+        let installed = read.version
+        check("\(agent.key): --version parses", installed != nil,
+              read.startFailure.flatMap(CLIStartFailure.reason(in:)) ?? "")
 
         var request = URLRequest(url: release.latestURL,
                                  cachePolicy: .reloadIgnoringLocalCacheData,

@@ -401,7 +401,7 @@ enum NoteHTML {
     static func inlineHTML(_ text: String) -> String {
         var codes: [String] = []
         var maths: [String] = []
-        var links: [(label: String, href: String?)] = []
+        var links: [(label: String, href: String?, file: FileLinkTarget?)] = []
 
         var t = shieldPattern(text, pattern: #"`([^`\n]+)`"#, kind: "C") { m in
             codes.append(m[0]); return codes.count - 1
@@ -415,12 +415,16 @@ enum NoteHTML {
         t = shieldPattern(t, pattern: #"(?<![\\$])\$(?!\s)([^$\n]+?)(?<!\s)\$(?!\$)"#, kind: "M") { m in
             maths.append(m[0]); return maths.count - 1
         }
-        t = shieldPattern(t, pattern: #"\[([^\]\n]+)\]\(([^)\s]+)\)"#, kind: "L") { m in
-            links.append((label: m[0], href: gatedHref(m[1])))
+        // A target in angle brackets may hold spaces and parentheses
+        // (CommonMark's form, and what Codex writes for such a path).
+        t = shieldPattern(t, pattern: #"\[([^\]\n]+)\]\((?:<([^<>\n]*)>|([^)\s]+))\)"#, kind: "L") { m in
+            let target = m[1].isEmpty ? m[2] : m[1]
+            let href = gatedHref(target)
+            links.append((label: m[0], href: href, file: href == nil ? FileLinkTarget(target) : nil))
             return links.count - 1
         }
         t = shieldPattern(t, pattern: #"(?<![\w@])https?://[^\s<>)\]]+"#, kind: "L") { m in
-            links.append((label: m[0], href: gatedHref(m[0])))
+            links.append((label: m[0], href: gatedHref(m[0]), file: nil))
             return links.count - 1
         }
 
@@ -441,13 +445,32 @@ enum NoteHTML {
             let inner = escape(link.label)
             // A refused scheme keeps its LABEL and loses the
             // destination, matching `MarkdownInline.safeLink`. Dropping
-            // the run would delete text the reader can see.
-            let html = link.href.map {
-                "<a href=\"\(escape($0))\">\(inner)</a>"
-            } ?? inner
+            // the run would delete text the reader can see. A target that
+            // names a file is drawn as the transcript draws it.
+            let html: String
+            if let href = link.href {
+                html = "<a href=\"\(escape(href))\">\(inner)</a>"
+            } else if let file = link.file {
+                html = fileLinkHTML(words: inner, target: file)
+            } else {
+                html = inner
+            }
             t = t.replacingOccurrences(of: token("L", i), with: html)
         }
         return t
+    }
+
+    /// A link to a file on this Mac: the words, then the path in brackets
+    /// in the quieter colour, both opening it through the app's own scheme
+    /// (`FileLinkURL`), the full path on hover. A note has no folder, so a
+    /// relative path is shown as text.
+    private static func fileLinkHTML(words: String, target: FileLinkTarget) -> String {
+        let shown = "(\(escape(target.displayed(base: nil))))"
+        guard let path = target.resolvedPath(base: nil),
+              let url = FileLinkURL.make(path: path, missing: false)
+        else { return "\(words) <span class=\"sipai-file-path\">\(shown)</span>" }
+        let open = "href=\"\(escape(url.absoluteString))\" title=\"\(escape(path))\""
+        return "<a \(open)>\(words)</a> <a class=\"sipai-file-path\" \(open)>\(shown)</a>"
     }
 
     /// http / https / mailto only — the same gate the SwiftUI renderer
@@ -564,6 +587,7 @@ extension NoteHTML {
         #sipai-note > *:first-child { margin-top: 0; }
         p { margin: 0.62em 0; }
         a { color: var(--link); text-decoration: underline; }
+        .sipai-file-path { color: var(--dim); text-decoration: none; }
         hr { border: 0; border-top: 1px solid var(--rule); margin: 1.5em 0; }
         ul, ol { margin: 0.55em 0; padding-left: 1.65em; }
         li { margin: 0.22em 0; }
@@ -657,6 +681,48 @@ extension NoteHTML {
           document.documentElement.setAttribute('data-sipai-ready', '1');
           var n = document.getElementById('sipai-note');
           return n ? Math.ceil(n.getBoundingClientRect().height) : 0;
+        })();
+        """
+    }
+
+    /// Sets the page's body size in place, keeping the line being read
+    /// under the top of the window — the preview's answer to a change of
+    /// text size (View → Zoom In / Zoom Out / Actual Size). A reload would
+    /// put the reader back at the top of the note. Everything else on the
+    /// page is sized in `em` from the body, KaTeX's output included, so
+    /// one size moves the whole document.
+    ///
+    /// The anchor is the innermost block under the top edge — a list item
+    /// rather than its whole list — kept at the same share of its height;
+    /// where the edge falls between blocks, the next block keeps its
+    /// distance from it. Answers true once applied. Run by the app with
+    /// `evaluateJavaScript`, which the document's CSP does not govern.
+    static func resizeScript(bodyPointSize: CGFloat) -> String {
+        // Formatted without a locale: a decimal comma would not parse.
+        let size = String(format: "%.2fpx", Double(bodyPointSize))
+        return """
+        (function () {
+          var body = document.body;
+          if (!body) { return false; }
+          var blocks = document.querySelectorAll('#sipai-note > *, #sipai-note li, #sipai-note tr');
+          var under = null, below = null;
+          for (var i = 0; i < blocks.length; i++) {
+            var r = blocks[i].getBoundingClientRect();
+            if (r.top <= 0 && r.bottom > 0) { under = blocks[i]; }
+            else if (r.top > 0) { below = blocks[i]; break; }
+          }
+          var anchor = under || below, share = 0, lead = 0;
+          if (anchor) {
+            var before = anchor.getBoundingClientRect();
+            if (under) { share = before.height > 0 ? -before.top / before.height : 0; }
+            else { lead = before.top; }
+          }
+          body.style.fontSize = '\(size)';
+          if (anchor) {
+            var after = anchor.getBoundingClientRect();
+            window.scrollBy(0, under ? after.top + share * after.height : after.top - lead);
+          }
+          return true;
         })();
         """
     }

@@ -32,10 +32,10 @@
 // an agent nobody has measured a release endpoint for shows its version
 // and no verdict at all. Absence of a claim is the honest state, and it
 // is a different thing from "up to date". A tool that is behind is told
-// by the Settings badge (`UpdateBadge`), which asks for nothing until
-// the user looks; one that has been updated — by the button, by itself,
-// or from a terminal — is told once, beside the sidebar's logo
-// (`UpdateAnnouncer`).
+// by the Settings badge (`UpdateBadge`) and stands beside the sidebar's
+// logo with an Update button until that is used or closed; one that has
+// been updated — by the button, by itself, or from a terminal — is told
+// once, there too (`SidebarNotices`).
 
 import AppKit
 import Combine
@@ -147,12 +147,19 @@ enum CLIUpdateStatus: Equatable {
     /// against `latest` is against the wrong channel), no button (it
     /// could never move the version) and no badge.
     case managedElsewhere(installed: CLIVersion, manager: String)
+    /// The tool is there and cannot start: asked its version, it stopped
+    /// with an error (`AgentCLIProbe.installedVersion`). What it printed
+    /// is the row's Details — the tool's own words, which name the remedy
+    /// when it has one ("Reinstall Codex: npm install -g …"). No version,
+    /// so no claim; and no button, since the tool's own updater is the
+    /// tool that cannot start.
+    case cannotStart(said: String)
 
     /// Whether an Update button belongs on this row at all.
     var offersUpdate: Bool {
         switch self {
         case .updateAvailable, .updateFailed: return true
-        case .unknown, .versionOnly, .upToDate, .updating, .managedElsewhere: return false
+        case .unknown, .versionOnly, .upToDate, .updating, .managedElsewhere, .cannotStart: return false
         }
     }
 }
@@ -182,11 +189,18 @@ enum AgentCLIUpdateRules {
     /// outranks whatever a check found — the updater would not apply
     /// it here, and for claude's stable cask the comparison itself is
     /// against the wrong channel.
+    ///
+    /// `startFailure` is what the tool printed when asked its version
+    /// and it could not start. With no version read, that is the row's
+    /// whole story; a version read outranks it.
     static func decideStatus(installed: CLIVersion?,
                              latestKnown: CLIVersion?,
                              lastCheckSucceeded: Date?,
-                             managedBy: String? = nil) -> CLIUpdateStatus {
-        guard let installed else { return .unknown }
+                             managedBy: String? = nil,
+                             startFailure: String? = nil) -> CLIUpdateStatus {
+        guard let installed else {
+            return startFailure.map { .cannotStart(said: $0) } ?? .unknown
+        }
         if let managedBy { return .managedElsewhere(installed: installed, manager: managedBy) }
         guard let latestKnown, let lastCheckSucceeded else {
             return .versionOnly(installed: installed)
@@ -274,7 +288,7 @@ enum AgentCLIUpdateRules {
             return autoUpdate ? nil : latest.text
         case .updateFailed:
             return latest?.text
-        case .unknown, .versionOnly, .upToDate, .updating, .managedElsewhere:
+        case .unknown, .versionOnly, .upToDate, .updating, .managedElsewhere, .cannotStart:
             return nil
         }
     }
@@ -497,10 +511,10 @@ struct AgentCLIRelease {
     /// a project's file is not in hand for a row about the binary), and
     /// `latest` when unset. Claude's own settings schema allows
     /// `latest`, `stable` and `rc`, and each is an npm dist-tag of its
-    /// package — `stable` stood at 2.1.274 while `latest` was 2.1.283
-    /// (2026-09-28). Checked against `latest`, a stable-channel install
-    /// read as behind, and its `claude update` answered "up to date" for
-    /// as long as the two tags differed. Anything else reads as claude's
+    /// package; `stable` trails `latest` by several releases at a time.
+    /// Checked against `latest`, a stable-channel install would read as
+    /// behind while its own `claude update` answers "up to date", for as
+    /// long as the two tags differ. Anything else reads as claude's
     /// default. Homebrew installs choose their channel by CASK NAME and
     /// are never claimed against (`AgentInstallSource.managedBy`).
     static func claudeChannel(settings: [Data]) -> String {
@@ -618,9 +632,13 @@ enum AgentCLIProbe {
     /// launch.
     static let versionCeiling: TimeInterval = 10
 
-    /// Claude's download is ~330 MB and npm's is a full dependency
-    /// resolve; this is a backstop against a hung child, not a
-    /// prediction. Measured runs: 35 s, 23 s, 4 s.
+    /// A backstop against an updater that hangs, not a prediction of how
+    /// long an update takes: Claude Code's and Codex's downloads are each
+    /// well over a hundred megabytes, so a slow connection takes far
+    /// longer than a fast one. The ceiling gives way to an update while
+    /// the updater has the tool taken apart (`run`'s `ceilingYields`):
+    /// stopped then, npm finishes its download anyway and puts the old
+    /// version back, so the stop would cost the update and save nothing.
     static let updateCeiling: TimeInterval = 15 * 60
 
     /// What of an updater's output is kept for the failure display.
@@ -646,7 +664,8 @@ enum AgentCLIProbe {
         )
     }
 
-    /// The installed version, preferring the spawn-free route.
+    /// The installed version, preferring the spawn-free route — or, for
+    /// a tool that cannot start, what it printed instead.
     ///
     /// Claude's native install names its versions: `~/.local/bin/claude`
     /// is a symlink into `…/claude/versions/`, and the target's
@@ -655,19 +674,31 @@ enum AgentCLIProbe {
     /// on the agent whose row is refreshed most often. Anything else
     /// (a shim, a Node SEA, a Rust binary) falls through to asking the
     /// binary itself, which is the answer that cannot be wrong.
+    ///
+    /// Only a `--version` that exits cleanly names a version. A tool
+    /// that cannot start prints an error instead, and Node's error trace
+    /// ends with Node's own version ("Node.js v22.12.0"): read for its
+    /// first dotted number, a broken Codex is "22.12.0", newer than any
+    /// release — its update "landed" and its row says up to date. The
+    /// output comes back as `startFailure`, the tool's own words for
+    /// why (`CLIStartFailure`).
     nonisolated static func installedVersion(
         agentKey: String,
         fingerprint: CLIBinaryFingerprint?
-    ) async -> CLIVersion? {
-        guard let fingerprint else { return nil }
-        if let fast = versionFromClaudeVersionsSymlink(fingerprint) { return fast }
+    ) async -> (version: CLIVersion?, startFailure: String?) {
+        guard let fingerprint else { return (nil, nil) }
+        if let fast = versionFromClaudeVersionsSymlink(fingerprint) { return (fast, nil) }
         await ShellEnvironment.prepare()
         let result = await run(binary: fingerprint.path,
                                arguments: ["--version"],
                                ceiling: versionCeiling,
                                outputCap: 4096,
                                onSpawn: { _ in })
-        return CLIVersion.parse(result.output)
+        guard result.exitCode == 0 else {
+            let said = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (nil, said.isEmpty ? nil : said)
+        }
+        return (CLIVersion.parse(result.output), nil)
     }
 
     /// `…/claude/versions/2.1.258` → 2.1.258.
@@ -733,12 +764,21 @@ enum AgentCLIProbe {
     /// so the capture is awaited first, exactly as `AgentRunner.runOnce`
     /// does before it builds a child's environment. Normally a no-op
     /// (`warmUp()` at launch), never a stalled thread when it is not.
+    ///
+    /// `ceilingYields` is asked once, when the ceiling comes: true lets
+    /// the child run to its own end, never stopped by the ceiling after
+    /// that. An update passes "the tool's binary is missing": npm moves
+    /// the tool's link aside for its whole download, and a SIGTERM then
+    /// makes it finish the download and roll the install back — so the
+    /// stop would leave the tool missing for as long, and the update
+    /// lost. A probe, an install and a delete pass nothing.
     nonisolated static func run(binary: String,
                                 arguments: [String],
                                 ceiling: TimeInterval,
                                 outputCap: Int,
                                 extraEnvironment: [String: String] = [:],
                                 currentDirectory: String? = nil,
+                                ceilingYields: (() -> Bool)? = nil,
                                 onSpawn: @escaping (Process) -> Void) async -> RunResult {
         await ShellEnvironment.prepare()
         var environment = AgentRunner.buildEnvironment()
@@ -777,7 +817,8 @@ enum AgentCLIProbe {
                 onSpawn(p)
 
                 let output = drain(pipe.fileHandleForReading, of: p,
-                                   ceiling: ceiling, outputCap: outputCap)
+                                   ceiling: ceiling, ceilingYields: ceilingYields,
+                                   outputCap: outputCap)
                 // Never read `terminationStatus` on a live process —
                 // Foundation raises. `drain` has waited the child out,
                 // but the guard costs nothing and the rule is absolute.
@@ -814,16 +855,30 @@ enum AgentCLIProbe {
     /// So the read is polled. Once the child has exited, a pipe that
     /// stays silent for `orphanGrace` is abandoned; at the ceiling the
     /// child is stopped by PID and the drain ends whatever the pipe is
-    /// doing. Closing our read end on the way out is what frees an
-    /// orphan blocked in `write()`: its next write fails instead of
-    /// waiting on a reader that has gone. Draining continuously is
-    /// still what keeps a talkative child from blocking in `write()`
-    /// while it is alive.
+    /// doing — unless `ceilingYields` says otherwise, once, and then the
+    /// child runs to its own end. Closing our read end on the way out
+    /// is what frees an orphan blocked in `write()`: its next write
+    /// fails instead of waiting on a reader that has gone. Draining
+    /// continuously is still what keeps a talkative child from blocking
+    /// in `write()` while it is alive.
     nonisolated private static func drain(_ handle: FileHandle,
                                           of p: Process,
                                           ceiling: TimeInterval,
+                                          ceilingYields: (() -> Bool)?,
                                           outputCap: Int) -> String {
-        let deadline = Date().addingTimeInterval(ceiling)
+        var deadline: Date? = Date().addingTimeInterval(ceiling)
+        /// Whether the ceiling has come and the child is to be stopped.
+        /// A ceiling that gives way does so for the rest of the run: npm
+        /// links the new version during its last step, and a SIGTERM that
+        /// lands there still rolls the whole install back.
+        func ceilingStops() -> Bool {
+            guard let due = deadline, Date() >= due else { return false }
+            if ceilingYields?() == true {
+                deadline = nil
+                return false
+            }
+            return true
+        }
         let fd = handle.fileDescriptor
         var buffer = [UInt8](repeating: 0, count: 16 * 1024)
         var tail = Data()
@@ -862,7 +917,7 @@ enum AgentCLIProbe {
                 quietSinceExit = nil
                 continue
             }
-            if Date() >= deadline {
+            if ceilingStops() {
                 stop(p)
                 break
             }
@@ -877,11 +932,11 @@ enum AgentCLIProbe {
         // End-of-file from a child that is still running (it closed
         // its own stdio) is not a reason to kill it: give it the rest
         // of the ceiling to exit on its own, and only then stop it.
-        while p.isRunning && Date() < deadline {
+        while p.isRunning && !ceilingStops() {
             Thread.sleep(forTimeInterval: 0.1)
         }
         stop(p)
-        p.waitUntilExit()
+        awaitExit(p)
         try? handle.close()
         return String(data: tail, encoding: .utf8)
             ?? String(decoding: tail, as: UTF8.self)
@@ -908,6 +963,26 @@ enum AgentCLIProbe {
             Thread.sleep(forTimeInterval: 0.1)
         }
         if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+    }
+
+    /// Wait for a child `stop` has dealt with to be gone — from any
+    /// thread. Never `Process.waitUntilExit()` for a child launched on
+    /// another thread: called from a thread that did not launch the
+    /// child, it can sleep in its run loop for good although the child
+    /// has exited, been reaped, and `isRunning` already says so
+    /// (measured: between one wait in fifty and one in several hundred
+    /// across GCD worker threads, by load; none on the launching thread).
+    /// Kimi's local server is waited for this way on its way out, and a
+    /// wait that never returned would hold the one-server occupancy:
+    /// every later use of the server would answer "busy". `isRunning` is
+    /// Foundation's own record of the exit, kept whoever waits, and
+    /// Foundation reaps the child without the call. Bounded: a child
+    /// still running when `stop` returned has been SIGKILLed.
+    nonisolated static func awaitExit(_ p: Process) {
+        let until = Date().addingTimeInterval(terminateGrace)
+        while p.isRunning && Date() < until {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
     }
 }
 
@@ -938,6 +1013,14 @@ enum CodexAppServerCall {
         #"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
     ]
 
+    /// The same handshake declaring codex's experimental methods — what
+    /// `collaborationMode/list` needs. Every other call keeps the plain
+    /// one.
+    static let experimentalHandshake: [String] = [
+        #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"sipai","title":"SipAI","version":"1"},"capabilities":{"experimentalApi":true}}}"#,
+        #"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+    ]
+
     /// The request id whose answer ends the wait. Every request handed
     /// to `run` carries it.
     static let answerId = 2
@@ -954,22 +1037,26 @@ enum CodexAppServerCall {
     /// whatever answered by then is returned. Empty for a codex with
     /// no app-server or one that exited first.
     nonisolated static func run(binary: String, requests: [String],
-                                awaiting: Set<Int>) async -> [Int: [String: Any]] {
+                                awaiting: Set<Int>,
+                                experimental: Bool = false) async -> [Int: [String: Any]] {
         await ShellEnvironment.prepare()
         let environment = AgentRunner.buildEnvironment()
+        let opening = experimental ? experimentalHandshake : handshake
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 continuation.resume(returning: drive(binary: binary,
                                                      requests: requests,
                                                      awaiting: awaiting,
-                                                     environment: environment))
+                                                     environment: environment,
+                                                     handshake: opening))
             }
         }
     }
 
     nonisolated private static func drive(binary: String, requests: [String],
                                           awaiting: Set<Int>,
-                                          environment: [String: String]) -> [Int: [String: Any]] {
+                                          environment: [String: String],
+                                          handshake: [String]) -> [Int: [String: Any]] {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: binary)
         p.arguments = ["app-server"]
@@ -1075,16 +1162,18 @@ enum CodexAppServerCall {
 /// The one token-free way to make codex refetch its model catalog.
 ///
 /// `model/list` is what fills the TUI's picker at bootstrap: answered
-/// from `models_cache.json` while that is current for the running
-/// client, fetched from the server — and written back to that file —
-/// when it is not. One request in, one answer out, and codex decides
-/// whether the network is involved. The answer names models but
-/// carries no context windows, so the cache file stays the source for
-/// those, and `CodexCatalog`'s fingerprint over it is what moves the
-/// picker. What the answer IS read for is each model's service tiers
-/// and their default (`CodexCatalog.listedTiers(fromAnswer:)`): it is
-/// the installed binary's own view, where the cache may be another
-/// codex client's.
+/// from `models_cache.json` while that is under five minutes old, of the
+/// running client's version and its sign-in, fetched from the server —
+/// and written back to that file — when it is not, and from codex's
+/// BUILT-IN list when that fetch fails or does not finish in five
+/// seconds. One request in, one answer out, and codex decides whether
+/// the network is involved. The answer names models but carries no
+/// context windows, so the cache file stays the source for those, and
+/// `CodexCatalog`'s fingerprint over it is what moves the picker. What
+/// the answer IS read for is each model's service tiers, their default
+/// and the default effort (`CodexCatalog.listedTiers(fromAnswer:)`),
+/// where `CodexCatalog.preferred` lets it speak: a built-in answer must
+/// not stand in for the account's list.
 enum CodexModelListRefresh {
     static let request =
         #"{"jsonrpc":"2.0","id":2,"method":"model/list","params":{}}"#
@@ -1099,6 +1188,45 @@ enum CodexModelListRefresh {
     /// The answer object itself, or nil when there was none.
     nonisolated static func answer(binary: String) async -> [String: Any]? {
         await CodexAppServerCall.run(binary: binary, request: request)
+    }
+}
+
+// MARK: - Codex collaboration modes
+
+/// The collaboration modes the installed codex lists — what offers the
+/// Plan row. `collaborationMode/list` is one of codex's experimental
+/// methods, so it is asked with the experimental handshake; no model is
+/// called. NO answer is nil: unknown, never "no Plan mode". A REFUSAL is
+/// an answer — a codex that does not know the method lists no mode this
+/// app can ask for — and reads as an empty list: left unknown, a saved
+/// Plan pick would wait on a verdict that is never coming.
+enum CodexCollaborationModes {
+    static let request =
+        #"{"jsonrpc":"2.0","id":2,"method":"collaborationMode/list","params":{}}"#
+
+    /// The modes by name (`plan`, `default`), in codex's order: empty for
+    /// a refusal, nil for no answer at all.
+    nonisolated static func modes(fromAnswer answer: [String: Any]?) -> [String]? {
+        if let data = (answer?["result"] as? [String: Any])?["data"] as? [Any] {
+            return data.compactMap { ($0 as? [String: Any])?["mode"] as? String }
+        }
+        return refused(answer) ? [] : nil
+    }
+
+    /// Codex answered the request with a JSON-RPC error.
+    nonisolated static func refused(_ answer: [String: Any]?) -> Bool {
+        answer?["error"] is [String: Any]
+    }
+
+    /// The modes, and whether they are codex's LIST rather than its
+    /// refusal — a refusal may be a passing one, so it is not kept as the
+    /// binary's last word (`CodexCatalog.ensureCollaborationModesLoaded`).
+    nonisolated static func run(binary: String) async -> (modes: [String]?, listed: Bool) {
+        let answers = await CodexAppServerCall.run(binary: binary, requests: [request],
+                                                   awaiting: [CodexAppServerCall.answerId],
+                                                   experimental: true)
+        let answer = answers[CodexAppServerCall.answerId]
+        return (modes(fromAnswer: answer), !refused(answer) && answer != nil)
     }
 }
 
@@ -1182,12 +1310,19 @@ enum CodexConfigWrite {
 // MARK: - Codex config read
 
 extension CodexConfigRead {
-    /// Codex's merged config for a turn in `cwd`, or nil for a codex
-    /// with no app-server, one that refused, or no answer inside the
-    /// ceiling.
-    nonisolated static func run(binary: String, cwd: String) async -> [String: Any]? {
-        guard let line = request(cwd: cwd, id: CodexAppServerCall.answerId) else { return nil }
-        return config(fromAnswer: await CodexAppServerCall.run(binary: binary, request: line))
+    /// Codex's merged config for a turn in `cwd` — nil for a codex with
+    /// no app-server, one that refused, or no answer inside the ceiling —
+    /// and its requirements, asked in the same process.
+    nonisolated static func run(binary: String, cwd: String) async
+    -> (config: [String: Any]?, requirements: [String: Any]?) {
+        let configId = CodexAppServerCall.answerId
+        let requirementsId = configId + 1
+        guard let line = request(cwd: cwd, id: configId) else { return (nil, nil) }
+        let answers = await CodexAppServerCall.run(
+            binary: binary, requests: [line, requirementsRequest(id: requirementsId)],
+            awaiting: [configId, requirementsId])
+        return (config(fromAnswer: answers[configId]),
+                requirements(fromAnswer: answers[requirementsId]))
     }
 }
 
@@ -1258,6 +1393,11 @@ final class AgentCLIUpdateMonitor: ObservableObject {
     /// the ones that make no claim about it.
     @Published private(set) var installed: [String: CLIVersion] = [:]
 
+    /// What a tool that cannot start printed when asked its version, per
+    /// agent key — beside `installed`, which has no entry for it. The
+    /// Default turn that cannot tell how to run says it in these words.
+    @Published private(set) var startFailures: [String: String] = [:]
+
     /// Agents whose CLI is installed, in registry order. The rows.
     @Published private(set) var installedAgents: [AgentInfo] = []
 
@@ -1266,7 +1406,7 @@ final class AgentCLIUpdateMonitor: ObservableObject {
     /// down — the status stays `.updating` for exactly that long.
     @Published private(set) var cancelling: Set<String> = []
 
-    /// Agents the user unticked in Settings → Agent Guide. Nothing
+    /// Agents the user unticked in Settings → Agent Initialization. Nothing
     /// about a hidden tool is shown, asked or run: no badge, no release
     /// check, no automatic update. The installed VERSION is still read
     /// (a stat), because the Guide's dimmed row names it. Fed by
@@ -1324,6 +1464,9 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         /// than at the next 8-hour tick.
         var attemptedAt: Date?
         var readingVersion = false
+        /// What the tool printed when asked its version and it could not
+        /// start (`AgentCLIProbe.installedVersion`); nil while it answers.
+        var startFailure: String?
     }
 
     private var state: [String: AgentState] = [:]
@@ -1394,7 +1537,7 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         Task { await self.refreshRemote(force: false) }
     }
 
-    /// Settings → Agent Guide appeared. Local only, and deliberately:
+    /// Settings → Agent Initialization appeared. Local only, and deliberately:
     /// that pane prints the installed version and offers Install, Sign
     /// In, Sign out and Delete — no sentence on it rests on a release
     /// endpoint, so opening it must not send a request the user
@@ -1504,16 +1647,17 @@ final class AgentCLIUpdateMonitor: ObservableObject {
             if state[key]?.readingVersion == true { continue }
             guard current != previous || state[key]?.installed == nil else { continue }
             state[key, default: AgentState()].readingVersion = true
-            let (version, managedBy) = await Task.detached(priority: .utility) {
-                let version = await AgentCLIProbe.installedVersion(agentKey: key,
-                                                                   fingerprint: current)
-                return (version, Self.managedBy(key))
+            let (read, managedBy) = await Task.detached(priority: .utility) {
+                let read = await AgentCLIProbe.installedVersion(agentKey: key, fingerprint: current)
+                return (read, Self.managedBy(key))
             }.value
+            let version = read.version
             var s = state[key] ?? AgentState()
             let versionBefore = s.installed
             s.readingVersion = false
             s.fingerprint = current
             s.installed = version
+            s.startFailure = read.startFailure
             s.managedBy = managedBy
             state[key] = s
             publish()
@@ -1570,17 +1714,17 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         let fingerprint = await Task.detached(priority: .utility) {
             AgentCLIProbe.fingerprint(agentKey: key)
         }.value
-        let (version, managedBy) = await Task.detached(priority: .utility) {
-            let version = await AgentCLIProbe.installedVersion(agentKey: key,
-                                                               fingerprint: fingerprint)
-            return (version, Self.managedBy(key))
+        let (read, managedBy) = await Task.detached(priority: .utility) {
+            let read = await AgentCLIProbe.installedVersion(agentKey: key, fingerprint: fingerprint)
+            return (read, Self.managedBy(key))
         }.value
         var s = state[key] ?? AgentState()
         s.fingerprint = fingerprint
-        s.installed = version
+        s.installed = read.version
+        s.startFailure = read.startFailure
         s.managedBy = managedBy
         state[key] = s
-        return version
+        return read.version
     }
 
     /// Who has to update this install when the CLI's own updater
@@ -1777,15 +1921,16 @@ final class AgentCLIUpdateMonitor: ObservableObject {
                              exitCode: nil)
                 return
             }
-            let startedAt = Date()
             let result = await AgentCLIProbe.run(
                 binary: binary,
                 arguments: release.updateArguments,
                 ceiling: AgentCLIProbe.updateCeiling,
                 outputCap: AgentCLIProbe.outputTailCap,
-                onSpawn: { [weak self] process in
-                    Task { @MainActor [weak self] in
-                        guard let self else { return }
+                ceilingYields: { AgentManager.binaryPath(for: key) == nil },
+                // `self` is held by the task this runs in until the update
+                // ends, so a weak capture here would buy nothing.
+                onSpawn: { process in
+                    Task { @MainActor in
                         // The user may have cancelled between the
                         // decision to spawn and the spawn landing.
                         guard self.state[key]?.cancelRequested != true else {
@@ -1796,8 +1941,7 @@ final class AgentCLIUpdateMonitor: ObservableObject {
                     }
                 })
             state[key]?.updateProcess = nil
-            await awaitRestore(of: key, byGroup: result.processGroup,
-                               until: startedAt.addingTimeInterval(AgentCLIProbe.updateCeiling))
+            await awaitRestore(of: key, byGroup: result.processGroup)
             let after = await readInstalledNow(key)
             let verdict = AgentCLIUpdateRules.updateVerdict(
                 before: before, after: after, latestKnown: state[key]?.latest)
@@ -1851,14 +1995,20 @@ final class AgentCLIUpdateMonitor: ObservableObject {
     /// tool's binary is missing. So the update is not over while the
     /// binary is missing and anything of that group is still alive: the
     /// row keeps its spinner ("Cancelling…"), the tool stays listed, and
-    /// a send keeps waiting. It ends when the binary is back, when
-    /// nothing of the group is left to bring it back, or at the update's
-    /// own ceiling. A binary that is present ends it at once, so a
-    /// long-lived helper the updater leaves behind never holds the row.
-    private func awaitRestore(of key: String, byGroup group: pid_t?,
-                              until deadline: Date) async {
+    /// a send keeps waiting. It ends when the binary is back, or when
+    /// nothing of the group is left to bring it back. A binary that is
+    /// present ends it at once, so a long-lived helper the updater leaves
+    /// behind never holds the row.
+    ///
+    /// No clock of SipAI's ends it. Only the group can put the tool back,
+    /// and how long its download takes is the connection's business; a
+    /// stalled one is npm's to end (its fetch timeout counts idle time).
+    /// A deadline here would end the update with the tool still moved
+    /// aside: gone from the sidebar and from these rows, offered for
+    /// install, while npm goes on putting it back.
+    private func awaitRestore(of key: String, byGroup group: pid_t?) async {
         guard let group else { return }
-        while Date() < deadline {
+        while !Task.isCancelled {
             let present = await Task.detached(priority: .utility) {
                 AgentManager.binaryPath(for: key) != nil
             }.value
@@ -2100,7 +2250,15 @@ final class AgentCLIUpdateMonitor: ObservableObject {
             // nothing, on a row that goes back to offering the same
             // button, is the shape of a bug the user cannot diagnose —
             // and for at least one agent the output IS the answer.
-            let trimmed = tail.trimmingCharacters(in: .whitespacesAndNewlines)
+            var trimmed = tail.trimmingCharacters(in: .whitespacesAndNewlines)
+            // An update that leaves a tool unable to start — npm finished
+            // without its program, and the updater said it worked — ends
+            // with what the tool says now, which is the actual answer.
+            if let said = s.startFailure, !trimmed.contains(said) {
+                let command = AgentManager.registry.first { $0.key == key }?.cmd ?? key
+                let asked = "$ " + command + " --version\n" + said
+                trimmed = trimmed.isEmpty ? asked : trimmed + "\n\n" + asked
+            }
             // An updater that said nothing still gets a sentence. An
             // empty tail is filtered out by `publish`, which would put
             // the row straight back on the same Update button as if
@@ -2151,14 +2309,16 @@ final class AgentCLIUpdateMonitor: ObservableObject {
         updateWaiters.release(key)
     }
 
-    /// "Claude Code just updated to 2.1.290", beside the sidebar's logo.
+    /// "Claude Code updated to 2.1.290", beside the sidebar's logo.
     /// Through the label, like every sentence that names an agent.
     private func announceUpdate(agentKey key: String, version: CLIVersion) {
+        SidebarNotices.shared.post(.updated(name: label(for: key), version: version.text))
+    }
+
+    /// The tool's name as the user sees it (Settings → Labels).
+    private func label(for key: String) -> String {
         let name = AgentManager.registry.first { $0.key == key }?.name ?? key
-        let label = config?.agentLabel(for: key, defaultName: name) ?? name
-        UpdateAnnouncer.shared.announce(
-            String(localized: "\(label) just updated to \(version.text)",
-                   comment: "Sidebar, in place of the SipAI wordmark for a few seconds: a command-line tool (or SipAI itself) has just been updated; placeholders are the tool's label and the new version number"))
+        return config?.agentLabel(for: key, defaultName: name) ?? name
     }
 
     private static func silentUpdaterExplanation(exitCode: Int32?) -> String {
@@ -2210,38 +2370,48 @@ final class AgentCLIUpdateMonitor: ObservableObject {
     private func publish() {
         var newStatuses: [String: CLIUpdateStatus] = [:]
         var newInstalled: [String: CLIVersion] = [:]
+        var newStartFailures: [String: String] = [:]
         for agent in installedAgents {
             let s = state[agent.key]
             if let v = s?.installed { newInstalled[agent.key] = v }
+            if let said = s?.startFailure { newStartFailures[agent.key] = said }
             // No measured endpoint: the row may state the version and
             // nothing else, whatever else happens to be known.
             let base: CLIUpdateStatus
             if AgentCLIRelease.measured(agentKey: agent.key) == nil {
                 base = s?.installed.map { CLIUpdateStatus.versionOnly(installed: $0) }
+                    ?? s?.startFailure.map { CLIUpdateStatus.cannotStart(said: $0) }
                     ?? .unknown
             } else {
                 base = AgentCLIUpdateRules.decideStatus(
                     installed: s?.installed,
                     latestKnown: s?.latest,
                     lastCheckSucceeded: s?.checkedAt,
-                    managedBy: s?.managedBy)
+                    managedBy: s?.managedBy,
+                    startFailure: s?.startFailure)
+            }
+            // A failure is only interesting while the tool is still
+            // behind — or cannot start at all, which is how an update ends
+            // that npm finished without the tool's program. Once it is
+            // current — by our button, its own updater or a terminal —
+            // the row says so and the tail goes with the problem it
+            // described.
+            var failureStands = false
+            switch base {
+            case .updateAvailable, .cannotStart: failureStands = true
+            default: break
             }
             if s?.updating == true {
                 newStatuses[agent.key] = .updating
-            } else if let tail = s?.failureTail, !tail.isEmpty,
-                      case .updateAvailable = base {
-                // A failure is only interesting while the tool is still
-                // behind. Once it is current — by our button, its own
-                // updater or a terminal — the row says so and the tail
-                // goes with the problem it described.
+            } else if let tail = s?.failureTail, !tail.isEmpty, failureStands {
                 newStatuses[agent.key] = .updateFailed(outputTail: tail)
             } else {
                 newStatuses[agent.key] = base
             }
         }
-        // What the Settings badge counts: a hidden tool is on offer to
-        // nobody, and a tool that updates itself only once its update
-        // has failed.
+        // What the Settings badge counts — and the bubble beside the logo
+        // offers: a hidden tool is on offer to nobody, and a tool that
+        // updates itself only once its update has failed.
         let badge: [UpdateBadgeItem] = installedAgents.compactMap { agent in
             guard !hiddenAgents.contains(agent.key),
                   let status = newStatuses[agent.key],
@@ -2249,10 +2419,18 @@ final class AgentCLIUpdateMonitor: ObservableObject {
                     status: status, latest: state[agent.key]?.latest,
                     autoUpdate: autoUpdateEnabled)
             else { return nil }
-            return .cli(agentKey: agent.key, version: version)
+            var failed = false
+            var failure: CLIUpdateFailure? = nil
+            if case .updateFailed(let tail) = status {
+                failed = true
+                failure = CLIUpdateFailure.read(agentKey: agent.key, output: tail)
+            }
+            return .cli(agentKey: agent.key, version: version,
+                        name: label(for: agent.key), failed: failed, failure: failure)
         }
         if statuses != newStatuses { statuses = newStatuses }
         if installed != newInstalled { installed = newInstalled }
+        if startFailures != newStartFailures { startFailures = newStartFailures }
         UpdateBadge.shared.setCLIItems(badge)
     }
 }

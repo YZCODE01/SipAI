@@ -1,7 +1,7 @@
 // AgentGuide.swift
 // SipAI macOS — whether an agent is LISTED, and everything Settings →
-// Agent Guide can do about one that is not: install it, sign it in
-// or out, delete it, hide it.
+// Agent Initialization (the code's Agent Guide) can do about one that
+// is not: install it, sign it in or out, delete it, hide it.
 //
 // One rule holds the whole feature together: an agent is either
 // `listed` (installed, signed in, not hidden) and then everything
@@ -96,6 +96,39 @@ enum AgentAddRow {
         guard !actionable.isEmpty else { return nil }
         let usable = presences.filter { $0 == .listed || $0 == .hiddenByUser }
         return usable.isEmpty ? .addAgents : .addMoreAgents
+    }
+}
+
+// MARK: - The buttons on an agent's card
+
+/// The buttons on an agent's card in Settings → Agent Initialization,
+/// left to right. Delete removes the program alone — sessions, settings
+/// and any sign-in stay — so whether the tool is signed in decides
+/// nothing about it: a tool SipAI can tell how it was installed can be
+/// deleted signed in, hidden or signed out. Left off a signed-out card,
+/// the only ways to remove a tool were signing in first or Terminal. On
+/// that card Sign In comes last, at the trailing end where the action
+/// the card most likely needs sits, with the destructive one before it.
+enum AgentCardButtons {
+    enum Kind: Hashable {
+        case install
+        case signIn
+        case delete
+    }
+
+    nonisolated static func buttons(presence: AgentPresence,
+                                    canInstall: Bool,
+                                    canDelete: Bool) -> [Kind] {
+        switch presence {
+        case .notInstalled:
+            return canInstall ? [.install] : []
+        case .notSignedIn:
+            return canDelete ? [.delete, .signIn] : [.signIn]
+        case .listed, .hiddenByUser:
+            return canDelete ? [.delete] : []
+        case .pending:
+            return []
+        }
     }
 }
 
@@ -196,16 +229,18 @@ enum KimiServerAnswer {
     }
 
     /// `/oauth/userinfo`: an error envelope ("No token for …") is
-    /// signed out; any other data is a membership. nil when the body
-    /// is not the envelope at all.
+    /// signed out; any other data is a membership, named as kimi names
+    /// it (`KimiMembership`). nil when the body is not the envelope at all.
     nonisolated static func userInfoVerdict(body: Data) -> PlanAccountKind? {
         guard let d = data(in: body) else { return nil }
         if let kind = d["kind"] as? String, kind == "error" { return .signedOut }
-        return .plan(name: nil)
+        return .plan(name: KimiMembership.levelName(userInfoBody: body))
     }
 
+    /// One reader of kimi's site answer, the usage probe's — it asks the
+    /// same route in the same server visit.
     nonisolated static func region(body: Data) -> String? {
-        data(in: body)?["region"] as? String
+        KimiUsageAnswer.region(body: body)
     }
 }
 
@@ -302,13 +337,13 @@ enum KimiConfigProviders {
 ///       kimi-k3  ctx=1048576 [tool_use,thinking,image_in]
 ///
 /// The model ids are the first token of each INDENTED line, in kimi's
-/// own order. `catalog add` without `--default-model` leaves
-/// `default_model` unset and every turn then fails with "No model
-/// configured" (measured), so the key sign-in passes the first listed
-/// id — kimi's own flag, kimi's own writer; kimi qualifies a bare id
-/// with the provider itself ("Default model set to moonshotai/…").
-/// An id the provider does not list is REFUSED and nothing is written,
-/// so the flag is only ever given a listed one.
+/// own order — models.dev's, which is no ranking. `catalog add` without
+/// `--default-model` leaves `default_model` unset and every turn then
+/// fails with "No model configured" (measured), so the key sign-in
+/// passes the id the user picked from this list — kimi's own flag,
+/// kimi's own writer; kimi qualifies a bare id with the provider itself
+/// ("Default model set to moonshotai/…"). An id the provider does not
+/// list is REFUSED and nothing is written.
 enum KimiCatalogListing {
     nonisolated static func modelIds(from output: String) -> [String] {
         var ids: [String] = []
@@ -395,13 +430,13 @@ enum AgentInstallSource: Equatable {
     /// where the updater handles the source itself (npm: claude's and
     /// codex's run the package manager; codex's cask: `codex update`
     /// runs `brew upgrade --cask codex`) or SipAI does (its own codex).
-    /// Read out of each CLI's update code, 2026-09-28: claude 2.1.283 on
-    /// a Homebrew install prints "Claude is managed by Homebrew.", the
+    /// Read out of each CLI's update code: on a Homebrew install
+    /// `claude update` prints "Claude is managed by Homebrew.", the
     /// `brew upgrade` line, and exits 0 having run nothing — and the
     /// `claude-code` cask tracks npm's `stable` tag, so even a version
-    /// claim against `latest` is against the wrong channel; kimi
-    /// 2.1.1's `canAutoInstall("homebrew")` is false and its manual
-    /// route is `brew upgrade kimi-code`. Such a row can only state the
+    /// claim against `latest` is against the wrong channel; kimi's
+    /// `canAutoInstall("homebrew")` is false and its manual route is
+    /// `brew upgrade kimi-code`. Such a row can only state the
     /// version and who manages it (`CLIUpdateStatus.managedElsewhere`).
     nonisolated func managedBy(agentKey: String) -> String? {
         switch (agentKey, self) {
@@ -646,9 +681,16 @@ enum KimiSite: String, CaseIterable, Identifiable, Equatable {
         URL(string: "https://\(channelHost)/kimi-code/install.sh")!
     }
 
-    /// Kimi's own key providers on this site.
+    /// The key providers the sign-in sheet offers on this site: the
+    /// platform's own. A key from the Kimi Code Console is the
+    /// membership's (it draws on the membership's quota), and kimi's own
+    /// `/login` takes no such key — it sends its owner to the membership
+    /// sign-in, which takes the account's model list from kimi's own
+    /// server. Imported from models.dev's catalog instead, it starts on a
+    /// model the catalog happens to list first, which a lower plan is
+    /// refused.
     nonisolated var keyProviders: [AgentSignIn.KimiKeyProvider] {
-        AgentSignIn.kimiKeyProviders.filter { $0.site == self }
+        AgentSignIn.kimiKeyProviders.filter { $0.site == self && !$0.isKimiCodeKey }
     }
 
     /// Both installers — the only scripts a kimi update may run: kimi's
@@ -732,13 +774,16 @@ enum AgentSignIn {
     /// the site it belongs to, and the API base the catalog pairs it with
     /// — what a configured `base_url` is recognised by. A key works only
     /// on the platform that issued it, so the sheet lists the chosen
-    /// site's two.
+    /// site's platform key (`KimiSite.keyProviders`). A Kimi Code key
+    /// (`isKimiCodeKey`) is recognised in a config that already holds one
+    /// — its row and its usage page — and never offered.
     struct KimiKeyProvider: Equatable, Identifiable {
         let id: String
         let name: String
         let platform: String
         let site: KimiSite
         let apiBase: String
+        var isKimiCodeKey = false
     }
     static let kimiKeyProviders: [KimiKeyProvider] = [
         KimiKeyProvider(id: "moonshotai", name: "Moonshot AI", platform: "platform.moonshot.ai",
@@ -746,9 +791,9 @@ enum AgentSignIn {
         KimiKeyProvider(id: "moonshotai-cn", name: "Moonshot AI (China)", platform: "platform.moonshot.cn",
                         site: .mainlandCN, apiBase: "https://api.moonshot.cn/v1"),
         KimiKeyProvider(id: "kimi-code-plan-global", name: "Kimi For Coding (kimi.ai)", platform: "kimi.ai",
-                        site: .global, apiBase: "https://api.kimi.ai/coding/v1"),
+                        site: .global, apiBase: "https://api.kimi.ai/coding/v1", isKimiCodeKey: true),
         KimiKeyProvider(id: "kimi-code-plan-cn", name: "Kimi For Coding (kimi.com)", platform: "kimi.com",
-                        site: .mainlandCN, apiBase: "https://api.kimi.com/coding/v1"),
+                        site: .mainlandCN, apiBase: "https://api.kimi.com/coding/v1", isKimiCodeKey: true),
     ]
 
     /// The catalog entry a configured `base_url` is — compared without
@@ -1370,7 +1415,7 @@ final class CodexAppServerSession: @unchecked Sendable {
                     Thread.sleep(forTimeInterval: 0.05)
                 }
                 AgentCLIProbe.stop(p)
-                p.waitUntilExit()
+                AgentCLIProbe.awaitExit(p)
                 try? output.fileHandleForReading.close()
                 continuation.resume()
             }
@@ -1573,6 +1618,9 @@ final class AgentGuideActions: ObservableObject {
     /// is on ("kimi.com" / "kimi.ai"), or the platform the key kimi runs
     /// on comes from ("platform.moonshot.cn"). nil names nothing.
     @Published private(set) var kimiAccountSite: String? = nil
+    /// The catalog's provider of the key kimi runs on, when it is one —
+    /// a Kimi Code key is the membership's, and the row says so.
+    @Published private(set) var kimiAccountKeyProvider: AgentSignIn.KimiKeyProvider? = nil
 
     private weak var agents: AgentManager?
     private weak var config: ConfigManager?
@@ -1631,6 +1679,7 @@ final class AgentGuideActions: ObservableObject {
         switch kind {
         case .plan:
             kimiAccountSite = KimiSite(region: kimiRegion)?.domain
+            kimiAccountKeyProvider = nil
         case .apiKey:
             let file = KimiSessionScanner.configFile
             let base = await Task.detached(priority: .utility) { () -> String? in
@@ -1638,8 +1687,10 @@ final class AgentGuideActions: ObservableObject {
                 return KimiConfigProviders.keyedBaseURL(configText: text)
             }.value
             kimiAccountSite = base.map(AgentSignIn.kimiKeyPlatform(forBaseURL:))
+            kimiAccountKeyProvider = base.flatMap(AgentSignIn.kimiKeyProvider(forBaseURL:))
         case .signedOut, .unknown:
             kimiAccountSite = nil
+            kimiAccountKeyProvider = nil
         }
     }
 
@@ -1973,8 +2024,8 @@ final class AgentGuideActions: ObservableObject {
         Task {
             let tail = await self.installCodexPackage(version: latest, key: key)
             await monitor.refreshLocal()
-            let after = await AgentCLIProbe.installedVersion(agentKey: key,
-                                                             fingerprint: AgentCLIProbe.fingerprint(agentKey: key))
+            let fingerprint = AgentCLIProbe.fingerprint(agentKey: key)
+            let after = await AgentCLIProbe.installedVersion(agentKey: key, fingerprint: fingerprint).version
             self.progress[key] = nil
             monitor.finishExternalUpdate(agentKey: key, before: before,
                                          after: after, tail: tail)
@@ -1989,10 +2040,11 @@ final class AgentGuideActions: ObservableObject {
     /// key route runs at once.
     /// `region` is the kimi site the user picked (`KimiSite.rawValue`),
     /// passed explicitly every time — a default would sign a kimi.ai
-    /// account in on kimi.com. Ignored for the others.
+    /// account in on kimi.com. Ignored for the others. `kimiModel` is the
+    /// model a kimi key starts on, picked on the sheet.
     func signIn(agentKey key: String, method: AgentSignIn.Method,
                 apiKey: String = "", region: String,
-                kimiProviderId: String = "moonshotai") {
+                kimiProviderId: String = "moonshotai", kimiModel: String = "") {
         // One browser notice at a time: the pending Continue is a
         // single slot, and a second sign-in would strand the first's.
         guard progress[key] == nil, pendingContinue == nil else { return }
@@ -2000,7 +2052,8 @@ final class AgentGuideActions: ObservableObject {
         cancelRequested.remove(key)
         Task {
             await self.performSignIn(agentKey: key, method: method, apiKey: apiKey,
-                                     region: region, kimiProviderId: kimiProviderId)
+                                     region: region, kimiProviderId: kimiProviderId,
+                                     kimiModel: kimiModel)
         }
     }
 
@@ -2026,7 +2079,8 @@ final class AgentGuideActions: ObservableObject {
     }
 
     private func performSignIn(agentKey key: String, method: AgentSignIn.Method,
-                               apiKey: String, region: String, kimiProviderId: String) async {
+                               apiKey: String, region: String, kimiProviderId: String,
+                               kimiModel: String) async {
         guard let binary = AgentManager.binaryPath(for: key) else { return }
         progress[key] = Progress(phase: .signingIn)
         defer {
@@ -2052,7 +2106,8 @@ final class AgentGuideActions: ObservableObject {
             }
         case "kimi":
             if method == .apiKey {
-                await signInKimiKey(binary: binary, apiKey: apiKey, providerId: kimiProviderId)
+                await signInKimiKey(binary: binary, apiKey: apiKey, providerId: kimiProviderId,
+                                    model: kimiModel)
             } else {
                 await signInKimiMembership(binary: binary, region: region)
             }
@@ -2273,39 +2328,28 @@ final class AgentGuideActions: ObservableObject {
         await session.shutdown()
     }
 
-    /// `kimi provider catalog add <id> --default-model <first listed id>`
-    /// with the key in `KIMI_REGISTRY_API_KEY`: kimi's own config writer.
-    /// The key rides the ENVIRONMENT, which kimi reads when `--api-key`
-    /// is absent: an argument is readable by every account on the Mac
-    /// (`ps`) for as long as the command runs, an environment only by
-    /// the user's own. A kimi too old to read it says an API key is
+    /// `kimi provider catalog add <id> --default-model <the model picked
+    /// on the sheet>` with the key in `KIMI_REGISTRY_API_KEY`: kimi's own
+    /// config writer. The key rides the ENVIRONMENT, which kimi reads when
+    /// `--api-key` is absent: an argument is readable by every account on
+    /// the Mac (`ps`) for as long as the command runs, an environment only
+    /// by the user's own. A kimi too old to read it says an API key is
     /// missing, and only then is the argument used. The key is never
-    /// logged and is scrubbed from the output tail before display. The
-    /// default model comes from `catalog list <id>` first
-    /// (`KimiCatalogListing`): without one the add succeeds and every
-    /// turn fails "No model configured"; both commands fetch the same
-    /// catalog, so a listing that fails is reported and nothing is
-    /// written.
-    private func signInKimiKey(binary: String, apiKey rawKey: String, providerId: String) async {
+    /// logged and is scrubbed from the output tail before display.
+    /// Without `--default-model` the add succeeds and every turn fails "No
+    /// model configured"; the sheet's pick comes from kimi's own `catalog
+    /// list <id>` (`AgentGuideActions.kimiKeyModels`), and kimi refuses an
+    /// id the provider does not list and writes nothing. The pick is the
+    /// user's, as kimi's own key login asks: the catalog's order is
+    /// models.dev's, no ranking, and its first model is not one every
+    /// account can run.
+    private func signInKimiKey(binary: String, apiKey rawKey: String, providerId: String,
+                               model: String) async {
         let key = "kimi"
         let apiKey = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let listing = await AgentCLIProbe.run(binary: binary,
-                                              arguments: ["provider", "catalog", "list", providerId],
-                                              ceiling: 60,
-                                              outputCap: AgentCLIProbe.outputTailCap,
-                                              onSpawn: { _ in })
-        guard listing.exitCode == 0,
-              let defaultModel = KimiCatalogListing.modelIds(from: listing.output).first else {
-            let said = listing.output.trimmingCharacters(in: .whitespacesAndNewlines)
-            failures[key] = said.isEmpty
-                ? String(localized: "The provider's model list could not be fetched, so nothing was written.",
-                         comment: "Agent Guide: kimi's catalog listing failed before the key sign-in")
-                : said
-            return
-        }
         var result = await AgentCLIProbe.run(binary: binary,
                                              arguments: ["provider", "catalog", "add", providerId,
-                                                         "--default-model", defaultModel],
+                                                         "--default-model", model],
                                              ceiling: 120,
                                              outputCap: AgentCLIProbe.outputTailCap,
                                              extraEnvironment: ["KIMI_REGISTRY_API_KEY": apiKey],
@@ -2316,7 +2360,7 @@ final class AgentGuideActions: ObservableObject {
             result = await AgentCLIProbe.run(binary: binary,
                                              arguments: ["provider", "catalog", "add", providerId,
                                                          "--api-key", apiKey,
-                                                         "--default-model", defaultModel],
+                                                         "--default-model", model],
                                              ceiling: 120,
                                              outputCap: AgentCLIProbe.outputTailCap,
                                              onSpawn: { _ in })

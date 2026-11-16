@@ -192,9 +192,17 @@ MainActor.assumeIsolated {
               CallLog.index(of: "config.reload").map { $0 < i } ?? false } == true)
     check("the badge's seen versions in memory are dropped",
           CallLog.index(of: "badge.forgetSeen") != nil)
+    check("…and the updates closed beside the logo",
+          CallLog.index(of: "notices.forgetClosed") != nil)
+    // The web cache lives outside the data folder, and an earlier SipAI
+    // kept provider requests there — keys and chat text included.
+    check("the web cache is emptied with the rest of the wipe",
+          CallLog.index(of: "webCache.clear").map { i in
+              CallLog.index(of: "config.reload").map { i < $0 } ?? false } == true,
+          "\(CallLog.entries)")
     for key in ["cliUpdateChecksEnabled", "cliAutoUpdateEnabled", "updateBadgeSeen",
                 "sipaiAvailableUpdate", "sipaiLastLaunchedBuilds", "sipaiLastLaunchedBuild",
-                "cliUpdateDismissed"] {
+                "cliUpdateDismissed", "skillsBrowsedFolders", "sidebarNoticeClosed", "kimiPlanRefusedModels"] {
         check("\(key) is among the keys a reset clears",
               FactoryReset.userDefaultsKeys.contains(key))
     }
@@ -213,6 +221,13 @@ MainActor.assumeIsolated {
     check("routing cleared", appState.startedNewChat)
     // Unsent drafts live in RAM alone, so nothing on disk can clear them.
     check("composer drafts cleared", appState.draftsCleared)
+    // The folder Settings → Agent Skills shows is held in memory too, and the
+    // page records the folder it shows as browsed: left standing, the
+    // next visit wrote it back into the history the wipe removed.
+    check("the Skills page's folder in memory is dropped, after the browse history's key is gone",
+          appState.skillsPageForgotten
+          && CallLog.index(of: "appState.forgetSkillsPage").map { i in
+              CallLog.index(of: "config.reload").map { $0 < i } ?? false } == true)
     check("active model cleared", appState.activeModel == nil)
     check("active role cleared", appState.activeRole == nil)
     check("theme back to system", appState.theme == .system)

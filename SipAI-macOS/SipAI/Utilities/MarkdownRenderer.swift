@@ -100,7 +100,7 @@ enum MarkdownRenderer {
     /// the k-th match of this array is the k-th match the highlighter
     /// tints. A block rendered but not represented here (or the reverse)
     /// desynchronises the counter from the highlights.
-    fileprivate static func displayedTexts(_ blocks: [Block]) -> [String] {
+    fileprivate static func displayedTexts(_ blocks: [Block], fileBase: String? = nil) -> [String] {
         var out: [String] = []
         for block in blocks {
             switch block {
@@ -108,16 +108,16 @@ enum MarkdownRenderer {
                  .paragraph(let t),
                  .bulletItem(_, let t),
                  .blockquote(_, let t):
-                out.append(displayedInline(t))
+                out.append(displayedInline(t, fileBase: fileBase))
             case .orderedItem(_, _, let t):
                 // The number is a marker view, not searchable text.
-                out.append(displayedInline(t))
+                out.append(displayedInline(t, fileBase: fileBase))
             case .codeBlock(_, let body):
                 // The language chip above the code is a label, not
                 // content — `CodeBlockView` does not highlight it either.
                 out.append(body)
             case .table(let header, _, let rows):
-                out.append(tableDisplayedText(header: header, rows: rows))
+                out.append(tableDisplayedText(header: header, rows: rows, fileBase: fileBase))
             case .horizontalRule, .blank, .displayMath:
                 // Draws no text a find bar could tint. A display
                 // equation is typeset glyphs, so counting its LaTeX
@@ -136,21 +136,24 @@ enum MarkdownRenderer {
     /// header row first, then each body row, every row padded (and
     /// truncated) to the grid's column count exactly as the view does.
     private static func tableDisplayedText(header: [String],
-                                           rows: [[String]]) -> String {
+                                           rows: [[String]],
+                                           fileBase: String?) -> String {
         let columns = max(header.count, rows.map(\.count).max() ?? 0)
         guard columns > 0 else { return "" }
         func line(_ cells: [String]) -> String {
             (0..<columns).map { c in
-                c < cells.count ? displayedInline(cells[c]) : ""
+                c < cells.count ? displayedInline(cells[c], fileBase: fileBase) : ""
             }.joined(separator: "\n")
         }
         return ([line(header)] + rows.map(line)).joined(separator: "\n")
     }
 
-    private static func displayedInline(_ text: String) -> String {
+    private static func displayedInline(_ text: String, fileBase: String?) -> String {
         // Scale only sets fonts, never characters, so the default is
-        // fine here — this string is measured, not drawn.
-        String(MarkdownInline.attributed(text).characters)
+        // fine here — this string is measured, not drawn. The folder
+        // does change characters (a file link's path is drawn relative
+        // to it), so it is the drawing's.
+        String(MarkdownInline.attributed(text, fileBase: fileBase).characters)
     }
 
     /// Everything `source` draws, joined. What a find bar counts a row's
@@ -159,13 +162,15 @@ enum MarkdownRenderer {
     /// Blocks are joined by a newline, and the find field is
     /// single-line, so no query can straddle two blocks — which is what
     /// lets `MarkdownBlockList` hand each block a simple running offset.
-    static func plainText(_ source: String) -> String {
-        let key = ParseKey(text: source)
+    /// `fileBase` is the folder the drawing reads file links from
+    /// (`\.sipFileLinkBase`), nil where it has none.
+    static func plainText(_ source: String, fileBase: String? = nil) -> String {
+        let key = ParseKey(text: source, fileBase: fileBase)
         plainTextLock.lock()
         let hit = plainTextCache[key]
         plainTextLock.unlock()
         if let hit { return hit }
-        let value = displayedTexts(parse(source)).joined(separator: "\n")
+        let value = displayedTexts(parse(source), fileBase: fileBase).joined(separator: "\n")
         plainTextLock.lock()
         if plainTextCache.count >= parseCacheLimit {
             let drop = max(1, parseCacheLimit / parseCacheEvictionShare)
@@ -186,13 +191,14 @@ enum MarkdownRenderer {
     /// is actually searching — a transcript with no find bar open never
     /// touches this.
     fileprivate static func cachedDisplayedTexts(_ source: String,
-                                                 blocks: [Block]) -> [String] {
-        let key = ParseKey(text: source)
+                                                 blocks: [Block],
+                                                 fileBase: String?) -> [String] {
+        let key = ParseKey(text: source, fileBase: fileBase)
         plainTextLock.lock()
         let hit = blockTextCache[key]
         plainTextLock.unlock()
         if let hit { return hit }
-        let value = displayedTexts(blocks)
+        let value = displayedTexts(blocks, fileBase: fileBase)
         plainTextLock.lock()
         if blockTextCache.count >= parseCacheLimit {
             let drop = max(1, parseCacheLimit / parseCacheEvictionShare)
@@ -260,6 +266,10 @@ enum MarkdownRenderer {
     /// returns whichever result landed here first.
     private struct ParseKey: Hashable {
         let text: String
+        /// The folder file links are read from: part of the key for the
+        /// displayed-text caches, whose characters it changes. The parse
+        /// itself never reads it.
+        var fileBase: String? = nil
     }
     private static var parseCache: [ParseKey: [Block]] = [:]
     /// Insertion order, oldest first — the eviction queue.
@@ -749,6 +759,7 @@ private struct MarkdownBlockList: View {
     @Environment(\.sipSearchSlot) private var searchSlot
     @Environment(\.sipFontScale) private var fontScale
     @Environment(\.sipLineSpacingFactor) private var lineSpacingFactor
+    @Environment(\.sipFileLinkBase) private var fileLinkBase
 
     /// Every fixed gap below is a Default-tier design value times this
     /// — the tier's line pitch over Default's — so the space between
@@ -763,7 +774,7 @@ private struct MarkdownBlockList: View {
     /// base. Empty (and never computed) unless a query is live.
     private var blockSlots: [SearchHighlightSlot] {
         guard searchSlot.isActive else { return [] }
-        let texts = MarkdownRenderer.cachedDisplayedTexts(source, blocks: blocks)
+        let texts = MarkdownRenderer.cachedDisplayedTexts(source, blocks: blocks, fileBase: fileLinkBase)
         var slots: [SearchHighlightSlot] = []
         slots.reserveCapacity(blocks.count)
         var running = 0
@@ -821,6 +832,7 @@ private struct MarkdownBlockList: View {
                 }
             }
         }
+        .opensFileLinks()
     }
 
     private var paragraphGap: CGFloat { compactSpacing ? 1 : 2 }
@@ -859,9 +871,12 @@ private struct HeadingBlock: View {
     @Environment(\.sipFontScale) private var fontScale
     @Environment(\.sipLineSpacingFactor) private var lineSpacingFactor
     @Environment(\.sipMarkdownTextColor) private var textColor
+    @Environment(\.sipFileLinkBase) private var fileLinkBase
+    @State private var filePresenceTick = 0
 
     var body: some View {
-        var attr = MarkdownInline.attributed(text, scale: fontScale)
+        let _ = filePresenceTick
+        var attr = MarkdownInline.attributed(text, scale: fontScale, fileBase: fileLinkBase)
         attr.applySearchHighlight(slot)
         let (size, weight, underline, topPad): (CGFloat, Font.Weight, Bool, CGFloat) = {
             switch level {
@@ -879,6 +894,8 @@ private struct HeadingBlock: View {
             .lineSpacing(size * lineSpacingFactor)
             .foregroundColor(textColor)
             .fixedSize(horizontal: false, vertical: true)
+            .linkPointers(styled)
+            .redrawsOnFilePresence(styled, tick: $filePresenceTick)
             .padding(.top, topPad * gap)
             .padding(.bottom, 2 * gap)
     }
@@ -966,6 +983,8 @@ struct MarkdownInlineText: View {
     @Environment(\.sipFontScale) private var fontScale
     @Environment(\.sipLineSpacingFactor) private var lineSpacingFactor
     @Environment(\.sipMarkdownTextColor) private var textColor
+    @Environment(\.sipFileLinkBase) private var fileLinkBase
+    @State private var filePresenceTick = 0
 
     init(_ text: String, slot: SearchHighlightSlot = .inactive) {
         self.source = text
@@ -973,18 +992,22 @@ struct MarkdownInlineText: View {
     }
 
     private var attributed: AttributedString {
-        var attr = MarkdownInline.attributed(source, scale: fontScale)
+        var attr = MarkdownInline.attributed(source, scale: fontScale, fileBase: fileLinkBase)
         attr.applySearchHighlight(slot)
         return attr
     }
 
     var body: some View {
-        Text(attributed)
+        let _ = filePresenceTick
+        let text = attributed
+        Text(text)
             .font(.system(size: 14 * fontScale))
             .lineSpacing(14 * fontScale * lineSpacingFactor)
             .foregroundColor(textColor)
             .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
+            .linkPointers(text)
+            .redrawsOnFilePresence(text, tick: $filePresenceTick)
     }
 }
 
@@ -999,7 +1022,11 @@ enum MarkdownInline {
     ///   4. Re-inject inline-code spans with the sky-blue monospace style.
     /// `scale` is the font-tier multiplier (`\.sipFontScale`) — static
     /// helpers can't read the environment, so callers pass it through.
-    static func attributed(_ text: String, scale: CGFloat = 1) -> AttributedString {
+    /// `fileBase` is the folder a relative file link is read from
+    /// (`\.sipFileLinkBase`); it changes the characters drawn, so the
+    /// search pass hands the same folder in.
+    static func attributed(_ text: String, scale: CGFloat = 1,
+                           fileBase: String? = nil) -> AttributedString {
         // Shield inline code FIRST — backticked identifiers must reach
         // the screen byte-exact (`session_id` would otherwise render
         // as "sessionᵢd", `x^2` as "x²"). LaTeX then runs on the
@@ -1008,7 +1035,10 @@ enum MarkdownInline {
         // sentinels are untouchable by every LaTeX rule (all need
         // backslashes, ^, _, or $).
         let (skeleton, codeSpans) = extractInlineCode(text)
-        let translated = LatexSymbols.translate(skeleton)
+        // Link targets skip the LaTeX pass: a target it rewrote would
+        // name another address or another file.
+        let (unlinked, targets) = LinkTargetShield.shield(skeleton)
+        let translated = LinkTargetShield.restore(LatexSymbols.translate(unlinked), targets: targets)
 
         // Parse bold / italic / links into a sequence of styled runs.
         var runs = emphasisRuns(in: translated)
@@ -1017,6 +1047,10 @@ enum MarkdownInline {
 
         var attr = AttributedString()
         for run in runs {
+            if let file = run.file {
+                attr.append(file.attributed(words: run.text, base: fileBase))
+                continue
+            }
             var piece = AttributedString(run.text)
             if run.bold {
                 piece.font = Font.system(size: 14 * scale, weight: .semibold)
@@ -1045,6 +1079,9 @@ enum MarkdownInline {
         var italic: Bool = false
         var code: Bool = false
         var link: URL? = nil
+        /// A link whose target is a file on this Mac rather than a web
+        /// address: drawn with its path after the words.
+        var file: FileLinkTarget? = nil
     }
 
     // MARK: Inline code extraction
@@ -1120,11 +1157,15 @@ enum MarkdownInline {
     /// call.
     private static let compiledPatterns: [Pattern] = [
         Pattern(
-            regex: try! NSRegularExpression(pattern: #"\[([^\]]+)\]\(([^)]+)\)"#),
+            regex: MarkdownLinkSyntax.regex,
             build: { m, ns in
                 let label = ns.substring(with: m.range(at: 1))
-                let urlStr = ns.substring(with: m.range(at: 2))
-                return Run(text: label, link: safeLink(urlStr))
+                let target = MarkdownLinkSyntax.target(of: m, in: ns)
+                // A target the gate refuses may still name a file on this
+                // Mac, drawn as `FileLinkTarget` says; any other refused
+                // target keeps its words and loses its destination.
+                let link = safeLink(target)
+                return Run(text: label, link: link, file: link == nil ? FileLinkTarget(target) : nil)
             }
         ),
         Pattern(
@@ -1204,7 +1245,7 @@ enum MarkdownInline {
             // Don't split links / already-styled runs that somehow carry
             // a sentinel — treat the sentinel as opaque text in that
             // corner case by just substituting back.
-            if run.link != nil {
+            if run.link != nil || run.file != nil {
                 if !run.text.contains("\u{E001}") { out.append(run); continue }
                 run.text = restore(run.text, spans: spans)
                 out.append(run)
@@ -1394,6 +1435,8 @@ private struct MarkdownTableView: View {
     var slot: SearchHighlightSlot = .inactive
     @Environment(\.sipFontScale) private var fontScale
     @Environment(\.sipMarkdownTextColor) private var textColor
+    @Environment(\.sipFileLinkBase) private var fileLinkBase
+    @State private var filePresenceTick = 0
 
     private var columnCount: Int {
         max(header.count, rows.map(\.count).max() ?? 0)
@@ -1419,7 +1462,7 @@ private struct MarkdownTableView: View {
                 guard c < line.count else { continue }
                 running += SearchMatching.count(
                     of: slot.query,
-                    in: String(MarkdownInline.attributed(line[c]).characters))
+                    in: String(MarkdownInline.attributed(line[c], fileBase: fileLinkBase).characters))
             }
             out.append(bases)
         }
@@ -1434,6 +1477,7 @@ private struct MarkdownTableView: View {
     }
 
     var body: some View {
+        let _ = filePresenceTick
         let bases = cellBases
         Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
             GridRow {
@@ -1480,7 +1524,7 @@ private struct MarkdownTableView: View {
 
     private func cell(_ text: String, column: Int, isHeader: Bool,
                       slot: SearchHighlightSlot = .inactive) -> some View {
-        var attr = MarkdownInline.attributed(text, scale: fontScale)
+        var attr = MarkdownInline.attributed(text, scale: fontScale, fileBase: fileLinkBase)
         if isHeader {
             attr.font = Font.system(size: 13 * fontScale, weight: .semibold)
         }
@@ -1496,6 +1540,8 @@ private struct MarkdownTableView: View {
             )
             .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)
+            .linkPointers(attr)
+            .redrawsOnFilePresence(attr, tick: $filePresenceTick)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity, maxHeight: .infinity,

@@ -26,14 +26,16 @@ extension SettingsView.Tab {
     /// sidebar list alike.
     var symbol: String {
         switch self {
-        case .models:   return "bubble.left.and.bubble.right"
+        case .chat:     return "bubble.left.and.bubble.right"
         case .agents:   return "terminal"
-        case .prompt:   return "text.quote"
+        case .skills:   return "book.closed"
         case .files:    return "folder"
         case .display:  return "display"
         case .labels:   return "tag"
         case .language: return "globe"
+        case .usage:    return "t.circle"
         case .updates:  return "arrow.triangle.2.circlepath"
+        case .privacy:  return "hand.raised"
         case .help:     return "questionmark.circle"
         }
     }
@@ -97,7 +99,7 @@ struct SettingsLauncherMenu: View {
                     open(tab)
                 } label: {
                     // The sidebar list's own row inset, so the longest
-                    // name — Chat Prompt and Roles — fits a menu over the
+                    // name — Agent Initialization — fits a menu over the
                     // default-width sidebar at every font size.
                     SettingsSectionLabel(tab: tab)
                         .padding(.horizontal, 6)
@@ -145,10 +147,12 @@ struct SettingsLauncherMenu: View {
             move(-1)
             return .handled
         }
-        // Handled whether or not a row is lit. Left to climb, Return
-        // reaches the window, where the newest approval card of the
-        // session behind the scrim owns it as the default action — and
-        // would allow a tool call from a menu about settings.
+        // Handled whether or not a row is lit, so Return never climbs to
+        // the window behind the scrim. The cards a turn waits on read
+        // their keys through a local monitor, which sees a key before
+        // this handler does; ContentView tells them to stand down while
+        // the menu is up (`AppState.overlayHoldsKeys`) — otherwise the
+        // Return that picks a section allowed a tool call.
         .onKeyPress(.return) {
             if let tab = highlighted { open(tab) }
             return .handled

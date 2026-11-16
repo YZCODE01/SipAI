@@ -14,12 +14,15 @@ trap 'rm -rf "$out"' EXIT
 appstate="$root/SipAI/Models/AppState.swift"
 {
   echo "import Foundation"
-  echo "struct ChatAttachment {}"
+  echo "struct AgentAttachment {}"
   echo "@MainActor final class AppState {"
   # The draft section, verbatim: its MARK down to the doc comment of the
   # routing helper that follows it.
   awk '/^    \/\/ MARK: - Composer drafts$/{f=1} /^    \/\/\/ Clear all four routing fields/{f=0} f{print}' "$appstate"
   echo "}"
+  # What a new session keeps beside its text, named by the section.
+  echo "struct ScheduleDraft: Equatable {}"
+  echo "struct NewSessionChipEdits: Equatable {}"
 } > "$out/Extracted.swift"
 grep -q "func setComposerDraft" "$out/Extracted.swift" || {
   echo "FAIL  could not extract the composer-draft section from AppState.swift"

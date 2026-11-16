@@ -1,13 +1,16 @@
 // LeftSidebar.swift
 // Local-files section, root chats, projects, agent sessions, settings.
 // Each section is a DisclosureSection (see ChatListView.swift and
-// AgentSessionsSection.swift) so the user can collapse what they don't need.
+// AgentSessionsSection.swift) so the user can collapse what they don't need;
+// Notes, Chats and Chat groups can also be hidden — their header's ⋮, and
+// the switches in Settings → Display that bring them back.
 // The New Chat action lives inside the Chats section (RootChatsSection),
 // right under its header.
 //
 // Layout strategy — three bands:
 //   1. Brand lockup: logo + "SipAI" wordmark, left-aligned, fixed height
-//      at the top. Always drawn: it is where an update is said.
+//      at the top. Always drawn: the notices beside the logo take the
+//      wordmark's place.
 //   2. Sections column: flexible middle band that gets whatever vertical
 //      room the window has left after bands 1 and 3. Sections render at
 //      their natural height inside a `ScrollView` — when the combined
@@ -41,15 +44,17 @@ struct LeftSidebar: View {
     @State private var localFilesExpanded: Bool = false
     @State private var notesExpanded: Bool = true
     @State private var expandedProjects: Set<String> = []
+    /// The section whose ⋮ → Hide is waiting on its confirmation.
+    @State private var sectionToHide: SectionId? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // 1. Brand lockup — logo + wordmark, left-aligned, and the one
-            // place an update that happened is said (see
-            // `SidebarBrandLockup`). Always drawn, and not a setting: were
-            // it hidden, the update messages would have nowhere to go.
-            // Settings → Display → Show update messages switches those.
-            SidebarBrandLockup(showsUpdateMessages: config.display.showUpdateMessages)
+            // 1. Brand lockup — logo + wordmark, left-aligned, and the place
+            // the bubble beside the cup takes the wordmark's (see
+            // `SidebarNotices`). Always drawn, and not a setting: were it
+            // hidden, the notices would have nowhere to go. Settings →
+            // Display → Show notifications beside the logo switches those.
+            SidebarHeader(showsNotices: config.display.showSidebarNotices)
 
             // 2. Sections column — flexible middle band, clip-on-overflow.
             //
@@ -83,6 +88,63 @@ struct LeftSidebar: View {
             }
         }
         .background(SipDesign.surface)
+        // Here, not on the section: the section leaves the sidebar the
+        // moment the switch is written, and an alert hung on it would
+        // go with it.
+        .alert(hideTitle,
+               isPresented: Binding(get: { sectionToHide != nil },
+                                    set: { if !$0 { sectionToHide = nil } }),
+               presenting: sectionToHide) { id in
+            Button {
+                hideSection(id)
+            } label: {
+                Text("Hide",
+                     comment: "Menu item on the Notes, Chats and Chat groups section headers, and the button confirming it: takes the section off the sidebar")
+            }
+            Button(role: .cancel) { } label: {
+                Text("Cancel", comment: "Dismiss the hide-section confirmation")
+            }
+        } message: { _ in
+            Text("Nothing is deleted. To show it again, turn it on in Settings → Display.",
+                 comment: "Body of the confirmation for a sidebar section's Hide")
+        }
+    }
+
+    /// "Hide “Notes” from the sidebar?" — the section named the way its
+    /// header names it.
+    private var hideTitle: String {
+        guard let id = sectionToHide else { return "" }
+        let name: String
+        switch id {
+        case .notes:
+            name = String(localized: "Notes",
+                          comment: "Sidebar section header for AI-generated notes")
+        case .chats:
+            name = String(localized: "Chats",
+                          comment: "Sidebar section header for chats not in any project")
+        case .chatGroups:
+            name = String(localized: "Chat groups",
+                          comment: "Sidebar section header for chat groups")
+        case .files, .agentClaude, .agentCodex, .agentKimi:
+            return ""
+        }
+        return String(localized: "Hide “\(name)” from the sidebar?",
+                      comment: "Title of the confirmation for a sidebar section's Hide; placeholder is the section's name: Notes, Chats or Chat groups")
+    }
+
+    /// Hide writes the same switch Settings → Display shows, so the two
+    /// can never disagree about whether a section is on.
+    private func hideSection(_ id: SectionId) {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            config.setDisplay {
+                switch id {
+                case .notes: $0.showNotesSection = false
+                case .chats: $0.showChatsSection = false
+                case .chatGroups: $0.showChatGroupsSection = false
+                case .files, .agentClaude, .agentCodex, .agentKimi: break
+                }
+            }
+        }
     }
 
     private var inSettings: Bool { appState.settingsSection != nil }
@@ -143,8 +205,9 @@ struct LeftSidebar: View {
     private static let sectionGap: CGFloat = 15
 
     /// Stable ids for the reorderable top-level sections. Raw values are
-    /// what `sidebar_section_order` persists — do not rename them.
-    private enum SectionId: String {
+    /// what `sidebar_section_order` persists — do not rename them. The
+    /// declaration order is the default order.
+    private enum SectionId: String, CaseIterable {
         case notes
         case files
         case chats
@@ -154,20 +217,35 @@ struct LeftSidebar: View {
         case agentKimi = "agent_kimi"
     }
 
-    /// The sections that exist RIGHT NOW (files needs a dedicated
-    /// folder, every agent must be LISTED), in the user's dragged
-    /// order. Conditional sections keep their saved slot while hidden
-    /// only if the user had dragged them; otherwise they reappear at
-    /// their default position.
+    /// Every section in the user's dragged order, the ones not on screen
+    /// included — what a drag reorders (`sectionOrderBinding`), so a
+    /// section hidden in Settings → Display, or an agent not listed for
+    /// now, keeps its place and comes back to it. Saved for only the
+    /// sections on screen, a hidden one lost its place at the next drag
+    /// and came back below every other section.
+    private var sectionOrder: [SectionId] {
+        SidebarOrdering.apply(SectionId.allCases,
+                              order: config.sidebarSectionOrder,
+                              id: \.rawValue)
+    }
+
+    /// The sections that exist RIGHT NOW (Notes, Chats and Chat groups
+    /// unless hidden in Settings → Display, files needs a dedicated
+    /// folder, every agent must be LISTED), in that order. Filtered out
+    /// of the one order rather than resolved again: a drag computes its
+    /// move on `sectionOrder`, and the rows it crosses must stand in the
+    /// same order there.
     private var orderedSectionIds: [SectionId] {
-        var present: [SectionId] = [.notes]
+        var present: [SectionId] = []
+        if config.display.showNotesSection { present.append(.notes) }
         if config.dedicatedFolder != nil { present.append(.files) }
-        present.append(contentsOf: [.chats, .chatGroups])
+        if config.display.showChatsSection { present.append(.chats) }
+        if config.display.showChatGroupsSection { present.append(.chatGroups) }
         // ONE rule for all three agents, and a fourth joins it here: a
         // section is earned by being LISTED — installed, signed in and
         // not hidden (`AgentPresence`). An agent that is not lists
-        // nothing; Settings → Agent Guide, reached through the ADD row
-        // below, is where it is installed, signed in or unhidden.
+        // nothing; Settings → Agent Initialization, reached through the
+        // ADD row below, is where it is installed, signed in or unhidden.
         //
         // Detection refreshes every few seconds, so installing or
         // signing in from a terminal surfaces the section without a
@@ -175,9 +253,7 @@ struct LeftSidebar: View {
         if agents.presence(for: "claude_code").isListed { present.append(.agentClaude) }
         if agents.presence(for: "codex").isListed { present.append(.agentCodex) }
         if agents.presence(for: "kimi").isListed { present.append(.agentKimi) }
-        return SidebarOrdering.apply(present,
-                                     order: config.sidebarSectionOrder,
-                                     id: \.rawValue)
+        return sectionOrder.filter(present.contains)
     }
 
     /// "ADD AGENTS" / "ADD MORE AGENTS" — owed while any supported
@@ -208,9 +284,9 @@ struct LeftSidebar: View {
                         .foregroundStyle(.secondary)
                     Text(label == .addAgents
                          ? String(localized: "Add agents",
-                                  comment: "Sidebar row when no agent CLI is installed and signed in; opens Settings → Agent Guide. Rendered uppercase like the section headers.")
+                                  comment: "Sidebar row when no agent CLI is installed and signed in; opens Settings → Agent Initialization. Rendered uppercase like the section headers.")
                          : String(localized: "Add more agents",
-                                  comment: "Sidebar row when some but not all supported agents are installed and signed in; opens Settings → Agent Guide. Rendered uppercase like the section headers."))
+                                  comment: "Sidebar row when some but not all supported agents are installed and signed in; opens Settings → Agent Initialization. Rendered uppercase like the section headers."))
                         .font(.system(size: SipFont.sidebarHeader(fontScale), weight: .semibold))
                         .foregroundStyle(.secondary)
                         .textCase(.uppercase)
@@ -243,7 +319,7 @@ struct LeftSidebar: View {
 
     private var sectionOrderBinding: Binding<[String]> {
         Binding(
-            get: { orderedSectionIds.map(\.rawValue) },
+            get: { sectionOrder.map(\.rawValue) },
             set: { config.setSidebarSectionOrder($0) }
         )
     }
@@ -287,17 +363,20 @@ struct LeftSidebar: View {
     private func sectionView(_ id: SectionId) -> some View {
         switch id {
         case .notes:
-            NotesSection(expanded: $notesExpanded)
+            NotesSection(expanded: $notesExpanded,
+                         hide: { sectionToHide = .notes })
         case .files:
             LocalFilesView(expanded: $localFilesExpanded)
         case .chats:
-            RootChatsSection(searchText: "", expanded: $rootChatsExpanded)
+            RootChatsSection(expanded: $rootChatsExpanded,
+                             hide: { sectionToHide = .chats })
         case .chatGroups:
-            ProjectsSection(searchText: "",
-                            expanded: $projectsExpanded,
-                            expandedProjects: $expandedProjects)
+            ProjectsSection(expanded: $projectsExpanded,
+                            expandedProjects: $expandedProjects,
+                            hide: { sectionToHide = .chatGroups })
         case .agentClaude:
-            AgentSessionsSection(expanded: $agentSessionsExpanded)
+            AgentSessionsSection(agentKey: "claude_code",
+                                 expanded: $agentSessionsExpanded)
         case .agentCodex:
             AgentSessionsSection(agentKey: "codex",
                                  expanded: $codexSessionsExpanded)
@@ -310,119 +389,59 @@ struct LeftSidebar: View {
 
 // MARK: - The brand lockup
 
-/// The logo and the wordmark — and, for a few seconds at a time, the
-/// line saying an update has happened (`UpdateAnnouncer`), in the
-/// wordmark's place. Settings → Display → Show update messages turns
-/// the lines off; the view checks it too, so turning it off takes a
-/// line already on screen away at once.
-///
-/// The imageset carries separate light/dark renditions, so the catalog
-/// swaps them with the effective appearance on its own.
-///
-/// Leading is 14 — the same line the section headers sit on (8 from the
-/// section's own inset + 6 from DisclosureSection's). The rendition is
-/// tight-cropped, so the FRAME's inset is the artwork's inset and no
-/// compensation is needed; a rendition that reintroduced transparent
-/// margin would have to be measured and subtracted here, which is how
-/// this drifted off the chevrons before.
-///
-/// `.lastTextBaseline` puts the wordmark's BASELINE on the image's bottom
-/// edge (a non-text view's baseline is its bottom), and the crop puts the
-/// GLASS'S BASE on that same edge — so the cup and the S land on one line
-/// and only the p's descender reaches below it. Both halves are
-/// load-bearing: transparent margin under the cup floats it off the
-/// baseline just as surely as swapping this for `.bottom`, which would
-/// hang the descender off the glass and lift the cap-height letters
-/// clear of it.
-///
-/// The wordmark's FRAME is laid out always, and drawn by nothing: what
-/// shows — the wordmark or a line — is an overlay on that frame, aligned
-/// on its last baseline. So a line of one row or three ends where the
-/// glass stands, exactly as "SipAI" does, and grows upward; and the
-/// header keeps the height the mark gives it, so a message moves nothing
-/// below it.
-///
-/// The wordmark-to-mark ratio here is 28/54 (0.519). Keep the wordmark
-/// on that scale if the mark's height changes again.
-private struct SidebarBrandLockup: View {
-    let showsUpdateMessages: Bool
-    @ObservedObject private var announcer = UpdateAnnouncer.shared
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private var line: UpdateAnnouncement? {
-        showsUpdateMessages ? announcer.current : nil
-    }
+/// The lockup (`SidebarBrandLockup`), fed: the notice on screen and the
+/// update on offer from `SidebarNotices`, and whether that update's button
+/// can be used now. Observes the notices alone, plus what the button's
+/// state reads — a turn starting or ending, an update winding down.
+private struct SidebarHeader: View {
+    let showsNotices: Bool
+    @ObservedObject private var notices = SidebarNotices.shared
+    @ObservedObject private var cliUpdates = AgentCLIUpdateMonitor.shared
+    @EnvironmentObject private var agents: AgentManager
 
     var body: some View {
-        HStack(alignment: .lastTextBaseline, spacing: 10) {
-            Image("SipAI-Logo-54")
-                .resizable()
-                .interpolation(.high)
-                .aspectRatio(contentMode: .fit)
-                .frame(height: 54)
-                // Decorative: the wordmark beside it already carries the
-                // name, and without this VoiceOver reads the asset NAME
-                // ("SipAI-Logo-54") and then the text.
-                .accessibilityHidden(true)
-            Self.wordmark
-                .hidden()
-                .accessibilityHidden(true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .overlay(alignment: .leadingLastTextBaseline) {
-                    if let line {
-                        Text(verbatim: line.text)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(.primary)
-                            .lineLimit(3)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            // A new identity per line, so the next one
-                            // rolls in over the last rather than
-                            // replacing its text in place.
-                            .id(line.id)
-                            .transition(transition)
-                    } else {
-                        Self.wordmark
-                            .transition(transition)
-                    }
-                }
+        SidebarBrandLockup(showsNotices: showsNotices,
+                           notice: notices.current,
+                           offer: notices.offer,
+                           offerBlockedReason: notices.offer.flatMap(blockedReason),
+                           onOpen: { notices.click($0) },
+                           onOfferAction: { notices.act(on: $0) },
+                           onOfferClose: { notices.close($0) })
+            // Laid out under the lockup, so the driver can ask whether a
+            // sheet hides it — the lockup's own frame, never a guess about
+            // the window (`SidebarNotices.sheetCoversLockup`).
+            .background(LockupSheetCheck())
+    }
+
+    /// The Updates pane's own rule for its Update button: never under a
+    /// running turn of that tool, nor while a previous update of it is
+    /// still winding down. SipAI's own button opens Sparkle's window, which
+    /// is never refused here.
+    private func blockedReason(_ item: UpdateBadgeItem) -> String? {
+        switch item.kind {
+        case .cli(let key):
+            if agents.hasTurnInFlight(agentKey: key) {
+                return cliUpdates.updatesAutomaticallyWhenIdle(key)
+                    ? String(localized: "This tool updates by itself once the running turn finishes.",
+                             comment: "Updates pane: why the Update button is disabled, when automatic updates are on")
+                    : String(localized: "Finish the running turn before updating this tool.",
+                             comment: "Updates pane: why the Update button is disabled")
+            }
+            if cliUpdates.updateInFlight(key) {
+                return String(localized: "The last update of this tool is still finishing.",
+                              comment: "Sidebar notice beside the logo: why its Update button is disabled while a cancelled or ending update of that tool winds down")
+            }
+            return nil
+        case .app, .appInstall:
+            return nil
         }
-        .animation(.spring(response: 0.55, dampingFraction: 0.85),
-                   value: line?.id)
-        // Laid out under the lockup, so the announcer can ask whether a
-        // sheet hides it — the lockup's own frame, never a guess about
-        // the window (`UpdateAnnouncer.sheetCoversLockup`).
-        .background(LockupSheetCheck())
-        .padding(.leading, 14)
-        .padding(.trailing, 12)
-        .padding(.top, 10)
-        .padding(.bottom, 12)
-    }
-
-    private static var wordmark: some View {
-        Text(verbatim: "SipAI")
-            .font(.system(size: 28, weight: .semibold))
-            .tracking(-0.4)
-            .foregroundStyle(.primary)
-    }
-
-    /// In from below, out through the top, softened by a blur — the
-    /// header rolls like a departures board, whichever of the two is
-    /// replacing which. With Reduce Motion on, a plain cross-fade.
-    private var transition: AnyTransition {
-        guard !reduceMotion else { return .opacity }
-        return .asymmetric(
-            insertion: .modifier(active: BrandRoll(offset: 14, blur: 3, opacity: 0),
-                                 identity: BrandRoll(offset: 0, blur: 0, opacity: 1)),
-            removal: .modifier(active: BrandRoll(offset: -14, blur: 3, opacity: 0),
-                               identity: BrandRoll(offset: 0, blur: 0, opacity: 1)))
     }
 }
 
-/// An empty view the size of the lockup, through which the announcer
-/// asks whether a sheet is drawn over it. Weakly held: a lockup that is
-/// gone (the sidebar hidden) answers "covered", as it did before
-/// anything could be measured.
+/// An empty view the size of the lockup, through which the driver asks
+/// whether a sheet is drawn over it. Weakly held: a lockup that is gone
+/// (the sidebar hidden) answers "covered", as it did before anything could
+/// be measured.
 private struct LockupSheetCheck: NSViewRepresentable {
     /// Measures and nothing else: every click passes through it.
     final class Probe: NSView {
@@ -431,26 +450,13 @@ private struct LockupSheetCheck: NSViewRepresentable {
 
     func makeNSView(context: Context) -> Probe {
         let view = Probe()
-        UpdateAnnouncer.shared.sheetCoversLockup = { [weak view] in
-            view.map(UpdateAnnouncer.sheetCovers) ?? true
+        SidebarNotices.shared.sheetCoversLockup = { [weak view] in
+            view.map(SidebarNotices.sheetCovers) ?? true
         }
         return view
     }
 
     func updateNSView(_ nsView: Probe, context: Context) {}
-}
-
-private struct BrandRoll: ViewModifier {
-    let offset: CGFloat
-    let blur: CGFloat
-    let opacity: Double
-
-    func body(content: Content) -> some View {
-        content
-            .offset(y: offset)
-            .blur(radius: blur)
-            .opacity(opacity)
-    }
 }
 
 // MARK: - The update badge

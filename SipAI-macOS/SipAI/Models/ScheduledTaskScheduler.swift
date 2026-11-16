@@ -282,7 +282,7 @@ final class ScheduledTaskScheduler: ObservableObject {
                                    writtenAt: Date? = nil,
                                    calendar: Calendar = .current) -> Decision {
         // An agent that is not LISTED — signed out, hidden in Settings
-        // → Agent Guide, or gone — runs nothing: no slot is consumed,
+        // → Agent Initialization, or gone — runs nothing: no slot is consumed,
         // nothing adopted, no missed slot recorded. When it is listed
         // again the ordinary rule sees a slot newer than `lastSlot`
         // and treats it exactly as a task the app was closed for.
@@ -463,7 +463,12 @@ final class ScheduledTaskScheduler: ObservableObject {
         inFlight[taskName] != nil
     }
 
-    private func fire(_ def: ScheduledTaskDefinition, slot: Date?, showRun: Bool) {
+    /// `skills`: what the read of the task's skills found — nil on the
+    /// call that starts a run, which makes that read first and calls
+    /// back with its answer.
+    private func fire(_ def: ScheduledTaskDefinition, slot: Date?, showRun: Bool,
+                      skills resolved: SkillResolution? = nil,
+                      modeWaited: Bool = false) {
         guard inFlight[def.name] == nil else { return }
         guard let agents = agents else { return }
 
@@ -514,7 +519,7 @@ final class ScheduledTaskScheduler: ObservableObject {
             switch presence {
             case .hiddenByUser:
                 state.lastError = String(localized: "\(name) is hidden in SipAI.",
-                                         comment: "Scheduled-run failure: the agent is unticked in Settings → Agent Guide")
+                                         comment: "Scheduled-run failure: the agent is unticked in Settings → Agent Initialization")
             case .notInstalled:
                 state.lastError = String(localized: "\(name) is not installed on this machine.",
                                          comment: "Scheduled-run failure: agent CLI missing")
@@ -527,11 +532,143 @@ final class ScheduledTaskScheduler: ObservableObject {
             return
         }
 
+        // The task's mode runs as picked, and only where the installed CLI
+        // runs it: what decides it, not read yet (the first moments of a
+        // launch, a CLI just updated), is waited for — bounded, the slot
+        // held meanwhile as for the skills below — and a mode the CLI
+        // cannot run fails the run with words. Never swapped for another.
+        switch Self.modeVerdict(def, agent: taskAgent, label: agents.agentLabel(for: taskAgent)) {
+        case .ready:
+            break
+        case .failure(let message):
+            state.lastOutcome = "error"
+            state.lastError = message
+            states[def.name] = state
+            saveState()
+            return
+        case .pending:
+            if modeWaited {
+                state.lastOutcome = "error"
+                state.lastError = Self.modeUncheckedMessage(def, label: agents.agentLabel(for: taskAgent))
+                states[def.name] = state
+                saveState()
+                return
+            }
+            let hold = "mode:" + UUID().uuidString
+            inFlight[def.name] = hold
+            state.lastFiredAt = Date()
+            state.lastOutcome = "running"
+            state.lastError = nil
+            state.lastSessionId = nil
+            states[def.name] = state
+            saveState()
+            Self.readModeGates()
+            Task { @MainActor in
+                let deadline = Date().addingTimeInterval(Self.modeGateWait)
+                while Date() < deadline {
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    guard self.inFlight[def.name] == hold else { return }
+                    if case .pending = Self.modeVerdict(def, agent: taskAgent,
+                                                        label: agents.agentLabel(for: taskAgent)) {
+                        continue
+                    }
+                    break
+                }
+                // Deleted, reset or fired some other way meanwhile.
+                guard self.inFlight[def.name] == hold else { return }
+                self.inFlight[def.name] = nil
+                self.fire(def, slot: slot, showRun: showRun, skills: resolved, modeWaited: true)
+            }
+            return
+        }
+
+        // The task's skills, read fresh for its folder first: one may have
+        // been switched off, unticked or deleted since the last run, and a
+        // run that quietly went without it would answer a different
+        // question. The read is a few file reads and the agents' own
+        // token-free listings; the run waits for it, held in `inFlight`
+        // so nothing fires it twice meanwhile. What it found rides the
+        // call that follows it and is kept nowhere: an answer left
+        // standing would be used, unread, by some later run.
+        //
+        // A Chat only run loads no skills, as a Chat only send from the
+        // composer loads none: it has none of the tools they are for.
+        var triggers: [SkillTrigger] = []
+        if !def.skills.isEmpty, !def.chatOnly {
+            guard let resolved else {
+                let hold = "skills:" + UUID().uuidString
+                inFlight[def.name] = hold
+                // On record before the read, which can take seconds: the
+                // slot is already consumed, and a quit meanwhile must
+                // leave what a run killed mid-turn leaves — a run that
+                // was starting — not a slot spent with nothing to show.
+                state.lastFiredAt = Date()
+                state.lastOutcome = "running"
+                state.lastError = nil
+                state.lastSessionId = nil
+                states[def.name] = state
+                saveState()
+                Task { @MainActor in
+                    let catalog = SkillCatalog.shared
+                    await catalog.refresh(folder: cwd)
+                    // A skill that is none of the folder's own or the
+                    // global ones may be a subfolder's: the subfolder
+                    // that holds it is read too. "Its own" is what the
+                    // folder's own read lists — a subfolder's skill
+                    // already in hand from some earlier read is looked for
+                    // again, so one deleted since is found missing.
+                    await catalog.readSubfolders(
+                        below: cwd,
+                        wanting: Set(def.skills.map { $0.lowercased() })
+                            .subtracting(catalog.ownNames(agent: taskAgent, folder: cwd)),
+                        agent: taskAgent)
+                    // How a codex or kimi run loads its skills rests on
+                    // the installed tool's version (kimi loads one only
+                    // through its own front end; codex is told of a
+                    // subfolder's only through its app-server). Not read
+                    // yet — the first seconds after launch, or after an
+                    // update — it is asked for and waited on, as a mode's
+                    // gate is: resolved on a guess, a codex run would be
+                    // refused a subfolder's skill as if it ran headless,
+                    // and a kimi run on a kimi with no front end would go
+                    // headless without its skill.
+                    if taskAgent == SkillAgent.codex || taskAgent == SkillAgent.kimi,
+                       AskingModeGate.frontEnd(agentKey: taskAgent) == .pending {
+                        Self.readModeGates()
+                        let deadline = Date().addingTimeInterval(Self.modeGateWait)
+                        while Date() < deadline, AskingModeGate.frontEnd(agentKey: taskAgent) == .pending {
+                            try? await Task.sleep(nanoseconds: 500_000_000)
+                            guard self.inFlight[def.name] == hold else { return }
+                        }
+                    }
+                    // Deleted, reset or fired some other way meanwhile.
+                    guard self.inFlight[def.name] == hold else { return }
+                    self.inFlight[def.name] = nil
+                    self.fire(def, slot: slot, showRun: showRun,
+                              skills: Self.resolveSkills(def, agent: taskAgent, folder: cwd,
+                                                         label: agents.agentLabel(for: taskAgent)),
+                              modeWaited: modeWaited)
+                }
+                return
+            }
+            switch resolved {
+            case .failure(let message):
+                state.lastOutcome = "error"
+                state.lastError = message
+                states[def.name] = state
+                saveState()
+                return
+            case .success(let found):
+                triggers = found
+            }
+        }
+
         // A fresh draft per run: each firing is its own session, never a
         // --resume of the last one, so a task's runs stay independent
         // and its context doesn't grow without bound.
         var draft = ClaudeSessionDraft(cwd: cwd, name: def.description,
                                        agentKey: taskAgent)
+        draft.skillPicks = (def.skills.isEmpty || def.chatOnly) ? nil : def.skills
         // Listed under its task, by the name the scanners will give it,
         // from the moment the run has a session id — not from the scan
         // that first reads the marker below off disk.
@@ -541,10 +678,12 @@ final class ScheduledTaskScheduler: ObservableObject {
         let runner = agents.runner(forDraft: draft)
 
         // The task's own picks, speed included — never the composer's.
-        let options = AgentLaunchOptions.scheduledRun(
+        var options = AgentLaunchOptions.scheduledRun(
             agent: taskAgent, mode: def.mode, model: def.model,
             effort: def.effort, fastMode: def.fastMode,
-            serviceTier: def.serviceTier)
+            serviceTier: def.serviceTier, nonStop: def.nonStop,
+            chatOnly: def.chatOnly)
+        options.skillTriggers = triggers
 
         // The marker is what makes the run findable: both scanners read
         // `<scheduled-task name="…">` out of the first user record and
@@ -596,6 +735,120 @@ final class ScheduledTaskScheduler: ObservableObject {
         saveState()
 
         observe(runner: runner, draft: draft, taskName: def.name, showRun: showRun)
+    }
+
+    /// Whether the installed CLI can run a task's mode as the task picks
+    /// it: Chat only behind its gate, an asking mode behind its own.
+    /// Default and every other mode are ready — Default waits for the
+    /// CLI's version at the turn itself (`AgentRunner.frontEndVerdictWait`).
+    enum ModeVerdict {
+        case ready
+        /// What decides it has not been read yet.
+        case pending
+        case failure(String)
+    }
+
+    static func modeVerdict(_ def: ScheduledTaskDefinition, agent: String,
+                            label: String) -> ModeVerdict {
+        if def.chatOnly {
+            guard ChatOnlyGate.settled(agentKey: agent) else { return .pending }
+            return ChatOnlyGate.offered(agentKey: agent)
+                ? .ready
+                : .failure(String(localized: "The installed \(label) can’t run Chat only. Pick another mode for the task.",
+                                  comment: "Scheduled-run failure: the task is Chat only and the installed agent CLI cannot run it; placeholder is the agent label"))
+        }
+        guard let mode = AgentAskingMode.taskMode(agentKey: agent, fileMode: def.mode),
+              AgentAskingMode.isAsking(mode, agentKey: agent) else { return .ready }
+        switch AskingModeGate.hold(agentKey: agent, mode: mode, chatOnly: false) {
+        case nil: return .ready
+        case .pending?: return .pending
+        case .unavailable?:
+            return .failure(String(localized: "The installed \(label) can’t run \(AgentAskingMode.title(for: mode)) mode. Pick another mode for the task.",
+                                   comment: "Scheduled-run failure: the task's mode needs a newer agent CLI than the one installed; placeholders are the agent label and the mode's name"))
+        }
+    }
+
+    /// The record's words when what decides a task's mode could not be read
+    /// in time.
+    static func modeUncheckedMessage(_ def: ScheduledTaskDefinition, label: String) -> String {
+        let mode = def.chatOnly
+            ? AgentComposer.chatOnlyTitle
+            : AgentAskingMode.taskMode(agentKey: def.agent, fileMode: def.mode)
+                .map(AgentAskingMode.title(for:)) ?? ""
+        return String(localized: "SipAI couldn’t check whether the installed \(label) can run \(mode) mode, so the run didn’t start.",
+                      comment: "Scheduled-run failure: what decides whether the agent CLI can run the task's mode could not be read in time; placeholders are the agent label and the mode's name")
+    }
+
+    /// How long a run waits for what decides its mode, when it has not
+    /// been read yet.
+    static let modeGateWait: TimeInterval = 30
+
+    /// Ask for every read the mode gates rest on — each is a no-op when it
+    /// has already landed for the installed binary.
+    static func readModeGates() {
+        ClaudeCapabilities.shared.ensureLoaded()
+        CodexCatalog.shared.ensureLoaded()
+        CodexCatalog.shared.ensureCollaborationModesLoaded()
+        KimiCatalog.shared.ensureLoaded()
+        Task { await AgentCLIUpdateMonitor.shared.refreshLocal() }
+    }
+
+    /// A task's skills as one run will load them, or the sentence its
+    /// record says when one cannot be loaded.
+    enum SkillResolution {
+        case success([SkillTrigger])
+        case failure(String)
+    }
+
+    static func resolveSkills(_ def: ScheduledTaskDefinition, agent: String, folder: URL,
+                              label: String) -> SkillResolution {
+        guard SkillAgent.all.contains(agent) else {
+            return .failure(String(localized: "\(label) can’t load skills for a scheduled run yet.",
+                                   comment: "Scheduled-run failure: the agent has no way to load a skill headless; placeholder is the agent label"))
+        }
+        // A run is ONE message, and kimi's front end takes one skill per
+        // message (`SkillAgent.oneSkillPerMessage`): a second would never
+        // load, so the run does not start with it silently missing.
+        if SkillAgent.oneSkillPerMessage(agent), def.skills.count > 1 {
+            return .failure(String(localized: "\(label) loads one skill per message, so a task can load only one. This task lists \(def.skills.count).",
+                                   comment: "Scheduled-run failure: a Kimi Code task lists more than one skill; placeholders are the agent label and how many it lists"))
+        }
+        // A subfolder's skill is reachable as the run's own mode allows
+        // (`SkillSubfolderReach`); kimi loads one only through its front
+        // end, which the run then goes through in any mode.
+        let frontEnd = AskingModeGate.frontEnd(agentKey: agent)
+        let choices = SkillCatalog.shared.choices(
+            agent: agent, folder: folder,
+            codexSend: AskingModeGate.subfolderSkillSend(
+                agentKey: agent, mode: AgentAskingMode.taskMode(agentKey: agent, fileMode: def.mode),
+                chatOnly: def.chatOnly),
+            kimiCanLoad: frontEnd != .unavailable)
+        // A plugin's skill, or one the agent ships, is known only from the
+        // agent's own list. When that list did not answer, a name not
+        // found is not a skill known to be missing, and the record must
+        // not say it is. Kimi has no list but its folders, which were read.
+        let snapshot = SkillCatalog.shared.snapshot(folder: folder)
+        let listed: Bool? = agent == SkillAgent.claude ? snapshot?.claudeAnswered
+            : agent == SkillAgent.codex ? snapshot?.codexAnswered : (snapshot != nil)
+        var triggers: [SkillTrigger] = []
+        for name in def.skills {
+            guard let choice = choices.first(where: { $0.name.lowercased() == name.lowercased() }) else {
+                if listed != true {
+                    return .failure(String(localized: "\(label) didn’t list its skills, so “\(name)” couldn’t be checked.",
+                                           comment: "Scheduled-run failure: the agent's own skill list did not answer, so a task's skill could not be confirmed; placeholders are the agent label and the skill"))
+                }
+                return .failure(String(localized: "The skill “\(name)” isn’t available to \(label) in \(folder.lastPathComponent).",
+                                       comment: "Scheduled-run failure: a task's skill is missing; placeholders are the skill, the agent label and the folder"))
+            }
+            if let reason = choice.unavailable {
+                return .failure(String(localized: "The skill “\(name)” can’t be loaded: \(reason)",
+                                       comment: "Scheduled-run failure: a task's skill cannot be loaded; placeholders are the skill and why"))
+            }
+            triggers.append(SkillTrigger(name: choice.name, path: choice.codexPath,
+                                         subfolder: choice.subfolder, claudeAddDir: choice.claudeAddDir,
+                                         skillsFolder: choice.skillsFolder))
+        }
+        return .success(triggers)
     }
 
     /// Watch one run to completion: record the session id when it

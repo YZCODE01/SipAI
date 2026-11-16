@@ -8,8 +8,8 @@
 // read DIFFERENT formats: stdout is chat-shaped, the on-disk
 // `wire.jsonl` is not.
 //
-// Two stdout shapes the docs do not mention at all. The first record of
-// a run is a version banner:
+// Three stdout shapes the docs do not mention at all. The first record
+// of a run is a version banner:
 //
 //   {"role":"meta","type":"system.version","version":"…"}
 //
@@ -17,10 +17,18 @@
 // the right outcome — a version banner is not a transcript row. Do not
 // "handle" it into one. The LAST record announces the session id
 // (`session.resume_hint`), which `announcedSessionId` reads; see its
-// doc comment. Note also that kimi's failures do NOT arrive as JSON on
-// stdout: a failed run prints `error: failed to run prompt: …` on
-// STDERR and exits non-zero, i.e. it reaches the user through
-// `AgentRunner.stderrTail`, not through `errorMessage(from:)`.
+// doc comment. And each time kimi retries a model request it could not
+// get an answer to, it says so before the next attempt:
+//
+//   {"role":"meta","type":"turn.step.retrying","next_attempt":2,
+//    "max_attempts":10,"error_name":"APIConnectionError",
+//    "error_message":"Connection error.", …}
+//
+// — the turn's live state, not a row: `retryNotice(line:)` reads it.
+// Note also that kimi's failures do NOT arrive as JSON on stdout: a
+// failed run prints `error: failed to run prompt: …` on STDERR and exits
+// non-zero, i.e. it reaches the user through `AgentRunner.stderrTail`,
+// not through `errorMessage(from:)`.
 //
 // Kimi's stream-json is the plainest of the three: one OpenAI-style
 // CHAT MESSAGE per line, exactly the objects an API request would carry
@@ -70,9 +78,9 @@ enum KimiEventParser {
     /// Read separately from `parse` rather than turned into a
     /// `.systemInit` event, because it is not a transcript row and
     /// `.systemInit` carries claude-specific consequences (starting the
-    /// JSONL tailer, registering the MCP alias) that a kimi runner must
-    /// not take. `AgentRunner` feeds it to `adoptDiscoveredSession`,
-    /// the same landing point the store-diff fallback uses.
+    /// claude JSONL tailer) that a kimi runner must not take.
+    /// `AgentRunner` feeds it to `adoptDiscoveredSession`, the same
+    /// landing point the store-diff fallback uses.
     ///
     /// The `type` is required as well as the key: `session_id` could
     /// plausibly appear on some future meta record that is not an
@@ -85,6 +93,15 @@ enum KimiEventParser {
         let id = (obj["session_id"] as? String)
             ?? (obj["sessionId"] as? String) ?? ""
         return id.isEmpty ? nil : id
+    }
+
+    /// Kimi's own line for a model request it is retrying, if this stdout
+    /// line is that announcement — the same words a turn kimi runs over
+    /// ACP shows off the session's record (`KimiSessionScanner
+    /// .retryNotice`, which reads both spellings).
+    static func retryNotice(line: String) -> String? {
+        guard let obj = decode(line) else { return nil }
+        return KimiSessionScanner.retryNotice(obj)
     }
 
     /// Parse one line of kimi stream-json stdout into zero or more
@@ -149,7 +166,7 @@ enum KimiEventParser {
     /// JSON-decode one stdout line, tolerating what a PTY does to it.
     ///
     /// The runner hands every agent a PTY so its stdout line-flushes
-    /// (see CLAUDE.md → "Agent-session streaming"). Under a PTY,
+    /// (through a pipe, a Node child holds it until it exits). Under a PTY,
     /// lines arrive CRLF-terminated and the FIRST one carries
     /// `^D^H^H` tty-handshake bytes, both of which `JSONSerialization`
     /// rejects SILENTLY — the turn renders nothing at all. Kimi is a
@@ -194,6 +211,43 @@ enum KimiEventParser {
             }
         }
         return parts.joined(separator: "\n")
+    }
+
+    // MARK: - How a tool call ended
+
+    /// A tool result's text as kimi's session record keeps it: the
+    /// output, or — where the output is content blocks (an image read
+    /// hands the model its image between two text blocks) — those blocks'
+    /// text. The image's data is never text.
+    static func toolResultText(_ result: [String: Any]?) -> String {
+        if let output = result?["output"] as? String { return output }
+        if let blocks = result?["output"] as? [Any] { return contentText(blocks) }
+        return contentText(result?["content"])
+    }
+
+    /// Whether kimi's session record says the tool failed.
+    static func toolResultFailed(_ result: [String: Any]?) -> Bool {
+        (result?["isError"] as? Bool) ?? (result?["is_error"] as? Bool)
+            ?? (present(result ?? [:], "error") != nil)
+    }
+
+    /// How one tool call ended, from kimi's session record — the
+    /// `tool.result` loop event — or nil for any other record. A headless
+    /// turn's stdout carries neither a tool's failure (its tool message
+    /// has no flag) nor an image read's text (it prints the content
+    /// blocks as one JSON string, image data and all), so the live row
+    /// takes both from here: `output` is set only where the record's
+    /// output is blocks, the one shape stdout spells differently.
+    static func toolEnding(record: [String: Any]) -> KimiToolEnding? {
+        guard (record["type"] as? String) == "context.append_loop_event",
+              let event = record["event"] as? [String: Any],
+              (event["type"] as? String) == "tool.result",
+              let id = event["toolCallId"] as? String, !id.isEmpty
+        else { return nil }
+        let result = event["result"] as? [String: Any]
+        let blocks = result?["output"] is [Any]
+        return KimiToolEnding(toolCallId: id, output: blocks ? toolResultText(result) : nil,
+                              isError: toolResultFailed(result))
     }
 
     // MARK: - Tool calls
@@ -279,5 +333,24 @@ enum KimiEventParser {
         }
         return String(localized: "Kimi reported an error but gave no detail.",
                       comment: "Fallback message for a kimi error record")
+    }
+}
+
+/// How a kimi tool call ended, as its session record keeps it
+/// (`KimiEventParser.toolEnding(record:)`).
+struct KimiToolEnding: Equatable {
+    let toolCallId: String
+    /// The result's text, where stdout spells it differently from the
+    /// record; nil where the two agree.
+    let output: String?
+    let isError: Bool
+
+    /// The live result row as the record has it, or nil when it already
+    /// says the same.
+    func correcting(_ kind: StreamEventKind) -> StreamEventKind? {
+        guard case .toolResult(let id, let liveOutput, let liveError) = kind, id == toolCallId else { return nil }
+        let text = output ?? liveOutput
+        guard text != liveOutput || isError != liveError else { return nil }
+        return .toolResult(toolUseId: id, output: text, isError: isError)
     }
 }

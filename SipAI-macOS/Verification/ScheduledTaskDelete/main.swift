@@ -236,12 +236,15 @@ let groupSubmenu = body(of: "groupSubmenu(", in: sec)
 check("menu items capitalise only their first word: Add to group, New group…, Remove from group",
       groupSubmenu.contains("Text(\"Add to group\"") && groupSubmenu.contains("Text(\"New group…\"")
         && groupSubmenu.contains("Text(\"Remove from group\"")
-        && sec.contains("Text(\"Rename group…\"") && sec.contains("Text(\"Delete group\"")
+        && sec.contains("Text(\"Rename group…\"") && sec.contains("Text(\"Ungroup\"")
+        && sec.contains("Text(\"Delete the group\"") && sec.contains("Text(\"Delete all sessions\"")
+        && sec.contains("Text(\"Mark all as read\"")
         && code("SipAI-macOS/SipAI/Views/Sidebar/ChatListView.swift").contains("Text(\"New group…\"")
         && [sec, code("SipAI-macOS/SipAI/Views/Sidebar/ChatListView.swift")].allSatisfy { text in
             !["Text(\"Add to Group", "Text(\"New Group…", "Text(\"Remove from Group",
               "Text(\"Rename Group", "Text(\"Delete Group", "Text(\"Delete Definition",
-              "Text(\"Delete All"].contains { text.contains($0) }
+              "Text(\"Delete All", "Text(\"Delete the Group", "Text(\"Mark All"]
+                .contains { text.contains($0) }
         },
       "— title case beside \"Delete definition\" / \"Delete all\" in the same menu")
 let message = body(of: "deleteAllMessage(", in: sec)
@@ -331,7 +334,7 @@ let catalogData = source("SipAI-macOS/SipAI/Resources/Localizable.xcstrings").da
 let strings = ((try? JSONSerialization.jsonObject(with: catalogData)) as? [String: Any])?["strings"]
     as? [String: Any] ?? [:]
 for key in ["Delete definition", "Delete all", "Add to group", "New group…", "Remove from group",
-            "Rename group…", "Delete group",
+            "Rename group…", "Ungroup", "Delete the group",
             "Delete this task's definition?", "Delete this task and all its runs?",
             "“%@” stops running, its definition is removed, and every run it made is removed for every app that reads them — SipAI, the CLI, and the desktop app. This cannot be undone.",
             "“%@” and every run it made are removed for every app that reads them — SipAI, the CLI, and the desktop app. This cannot be undone."] {

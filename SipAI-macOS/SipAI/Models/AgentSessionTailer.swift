@@ -68,6 +68,7 @@ final class AgentSessionTailer: @unchecked Sendable {
 
     /// Transcript being tailed.
     let fileURL: URL
+    private let openRetry: DispatchTimeInterval
 
     /// What wrote it — see `Format`.
     let format: Format
@@ -132,6 +133,8 @@ final class AgentSessionTailer: @unchecked Sendable {
     /// once, in its scanner.
     private var rollout = CodexSessionScanner.RolloutDecoder()
     private var wire = KimiSessionScanner.WireDecoder()
+    /// Claude: the skill loads `readHistory` reads, held the same way.
+    private var claudeSkillLoads = ClaudeSkillLoadReader()
 
     /// Codex and kimi: the writer of the turn now running has been seen
     /// alive. Its disappearance then ends the turn in 3s; a writer never
@@ -142,13 +145,24 @@ final class AgentSessionTailer: @unchecked Sendable {
 
     // MARK: - Init
 
+    /// - Parameter wordlessFailure: kimi: what a turn kimi recorded as
+    ///   failed without words is drawn with (`KimiSessionScanner
+    ///   .WireDecoder.wordlessFailure`).
+    /// - Parameter openRetry: how often a file that is not there yet is
+    ///   looked for again. A draft's transcript appears within a turn; a
+    ///   compressed rollout's plain file only when a codex loads the
+    ///   thread, if ever, so its watcher looks at the sweep's own pace.
     init(fileURL: URL,
          fallbackCwd: URL,
-         format: Format = .claude,
+         format: Format,
+         wordlessFailure: String? = nil,
+         openRetry: DispatchTimeInterval = .milliseconds(500),
          onEvents: @escaping @MainActor ([StreamEvent]) -> Void,
          onExternalInProgressChange: @escaping @MainActor (Bool) -> Void) {
         self.fileURL = fileURL
+        self.openRetry = openRetry
         self.format = format
+        self.wire = KimiSessionScanner.WireDecoder(wordlessFailure: wordlessFailure)
         self.fallbackCwd = fallbackCwd
         self.onEvents = onEvents
         self.onExternalInProgressChange = onExternalInProgressChange
@@ -186,6 +200,7 @@ final class AgentSessionTailer: @unchecked Sendable {
             guard let self = self else { return }
             guard self.source == nil, !self.isStopped else { return }
             self.offset = initialOffset
+            self.rollout.recordedTools.joinedMidTurn = initialOffset > 0
             self.lastActivityAt = Date()
             self.openTurnCheckPending = self.format != .claude
             self.installStaleTimer()
@@ -261,6 +276,7 @@ final class AgentSessionTailer: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self = self, !self.isStopped else { return }
             self.offset = newOffset
+            self.rollout.recordedTools.joinedMidTurn = newOffset > 0
             self.leftoverData.removeAll()
             if self.isSuspended {
                 self.isSuspended = false
@@ -340,12 +356,11 @@ final class AgentSessionTailer: @unchecked Sendable {
         return true
     }
 
-    /// Poll every 0.5s trying to `open(2)` the file. Used only when
-    /// the fd failed to open at start time. Runs on `queue`.
+    /// Poll every `openRetry` trying to `open(2)` the file. Used only
+    /// when the fd failed to open at start time. Runs on `queue`.
     private func installFallbackTimer() {
         let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now() + .milliseconds(500),
-                   repeating: .milliseconds(500))
+        t.schedule(deadline: .now() + openRetry, repeating: openRetry)
         t.setEventHandler { [weak self] in
             guard let self = self, !self.isStopped else { return }
             if self.source != nil { return }  // already installed
@@ -551,6 +566,14 @@ final class AgentSessionTailer: @unchecked Sendable {
         while let nl = leftoverData[cursor...].firstIndex(of: 0x0A) {
             let lineData = leftoverData.subdata(in: cursor..<nl)
             cursor = nl + 1
+            // Claude's request records hold no event and no turn marker,
+            // and are the biggest lines it writes: parsed, every API call
+            // of a watched turn costs a JSON pass over its whole prompt.
+            // One still says the writer is at work.
+            if format == .claude, AgentSessionScanner.isRequestRecord(lineData) {
+                lastActivityAt = Date()
+                continue
+            }
             guard let raw = String(data: lineData, encoding: .utf8)
             else { continue }  // corrupt single line — skip it alone
             let trimmed = raw.trimmingCharacters(in: .whitespaces)
@@ -567,16 +590,17 @@ final class AgentSessionTailer: @unchecked Sendable {
             switch format {
             case .claude:
                 applyProgressTransition(forRawRecord: obj)
-                batch.append(contentsOf: AgentEventParser.parse(
-                    line: trimmed,
-                    fallbackCwd: fallbackCwd,
-                    includeUserMessages: true))
+                batch.append(contentsOf: claudeEvents(forRecord: obj, line: trimmed))
             case .codex:
                 applyMarker(obj)
+                // Another process's turn is never Chat only: a thought is
+                // kept exactly while compact view can draw it.
+                rollout.includeThinking = CompactTranscript.isOn
                 batch.append(contentsOf: rollout.items(forLine: trimmed)
                     .compactMap(Self.liveEvent(for:)))
             case .kimi:
                 applyMarker(obj)
+                wire.includeThinking = CompactTranscript.isOn
                 batch.append(contentsOf: wire.items(forLine: trimmed)
                     .compactMap(Self.liveEvent(for:)))
             }
@@ -702,6 +726,62 @@ final class AgentSessionTailer: @unchecked Sendable {
         }
     }
 
+    /// One claude record as live events, with its skill loads read the
+    /// way the reopened transcript reads them (`ClaudeSkillLoadReader`):
+    /// a skill's expanded text is never a bubble, loads SipAI sent ride
+    /// under the message they came with, and a skill the user typed is
+    /// drawn in the words they typed. Runs on `queue`.
+    private func claudeEvents(forRecord obj: [String: Any], line: String) -> [StreamEvent] {
+        let type = obj["type"] as? String
+        let isToolResult = obj["toolUseResult"] != nil && !(obj["toolUseResult"] is NSNull)
+        guard type == "user", !isToolResult else {
+            var out: [StreamEvent] = []
+            if type == "assistant" || type == "system" || (type == "user" && isToolResult) {
+                out = claudeSkillLoads.flush().compactMap(Self.liveEvent(for:))
+            }
+            return out + AgentEventParser.parse(line: line, fallbackCwd: fallbackCwd,
+                                                includeUserMessages: true,
+                                                includeThinking: CompactTranscript.isOn)
+        }
+        let rawText = AgentSessionScanner.extractText(
+            fromContent: ((obj["message"] as? [String: Any]) ?? [:])["content"] ?? "")
+        let isMeta = (obj["isMeta"] as? Bool) == true
+        let step = claudeSkillLoads.consume(record: obj, rawText: rawText)
+        var out = step.rows.compactMap(Self.liveEvent(for:))
+        if step.absorbed { return out }
+        for event in AgentEventParser.parse(line: line, fallbackCwd: fallbackCwd,
+                                            includeUserMessages: true,
+                                            includeThinking: CompactTranscript.isOn) {
+            guard case .userMessage(let text) = event.kind else {
+                // claude's record of a stop is nobody's message: loads
+                // still waiting become their own row, as on a reopen.
+                if case .interrupted = event.kind {
+                    out.append(contentsOf: claudeSkillLoads.flush().compactMap(Self.liveEvent(for:)))
+                }
+                out.append(event); continue
+            }
+            // A notice, claude's record of a stop and a `!` command are
+            // nobody's message for a load to ride: loads still waiting
+            // become their own row, as on a reopen.
+            if event.isSystemNotice || event.shellCommand
+                || text.hasPrefix(AgentSessionScanner.interruptionPrefix) {
+                out.append(contentsOf: claudeSkillLoads.flush().compactMap(Self.liveEvent(for:)))
+                out.append(event)
+                continue
+            }
+            guard !isMeta else { out.append(event); continue }
+            var item = AgentSessionHistoryItem(kind: .userText(text))
+            item.attachedFiles = event.attachedFiles
+            claudeSkillLoads.attach(to: &item)
+            out.append(item.loadedSkills.isEmpty
+                       ? event
+                       : StreamEvent(kind: event.kind, isSystemNotice: false,
+                                     attachedFiles: event.attachedFiles,
+                                     loadedSkills: item.loadedSkills))
+        }
+        return out
+    }
+
     /// One transcript row, decoded by the reader the reopened transcript
     /// uses, as a live event — so a codex or kimi turn watched live and
     /// the same turn reopened read alike. Thoughts never reach here: the
@@ -712,11 +792,16 @@ final class AgentSessionTailer: @unchecked Sendable {
         case .userText(let text):
             return StreamEvent(kind: .userMessage(text: text),
                                isSystemNotice: item.isSystemNotice,
-                               attachedFiles: item.attachedFiles)
+                               sentIntoTurn: item.sentIntoTurn,
+                               belongsToAnswer: item.belongsToAnswer,
+                               attachedFiles: item.attachedFiles,
+                               loadedSkills: item.loadedSkills,
+                               shellCommand: item.shellCommand)
         case .assistantText(let text):
             return StreamEvent(kind: .assistantText(text: text))
-        case .thinking:
-            return nil
+        case .thinking(let text):
+            // Kept by a reader only where compact view draws it.
+            return StreamEvent(kind: .thinking(text: text))
         case .toolUse(let id, let name, let input):
             return StreamEvent(kind: .toolUse(toolUseId: id, name: name, input: input))
         case .toolResult(let id, let content, let isError):
@@ -725,7 +810,12 @@ final class AgentSessionTailer: @unchecked Sendable {
         case .interrupted(let message):
             return StreamEvent(kind: .interrupted(message: message))
         case .compaction(let pre, let post):
-            return StreamEvent(kind: .compaction(preTokens: pre, postTokens: post))
+            return StreamEvent(kind: .compaction(preTokens: pre, postTokens: post),
+                               compactionKeepsUserMessages: item.compactionKeepsUserMessages)
+        case .error(let message):
+            return StreamEvent(kind: .error(message: message))
+        case .shellOutput(let output):
+            return StreamEvent(kind: .shellOutput(output))
         }
     }
 
@@ -775,13 +865,13 @@ final class AgentSessionTailer: @unchecked Sendable {
             // command/system wrappers as no-signal — the display
             // cleaner keeps command text and would read claude's own
             // bookkeeping as the user starting a turn.
-            let text = AgentSessionScanner.cleanSessionMetaText(
-                AgentSessionScanner.extractText(
-                    fromContent: msg["content"] ?? ""))
+            let raw = AgentSessionScanner.extractText(fromContent: msg["content"] ?? "")
+            let text = AgentSessionScanner.cleanSessionMetaText(raw)
             if text.hasPrefix("[Request interrupted by user") { return false }
-            // Real user text starts a turn; wrapper-only records
-            // (system-reminder etc., injected mid-turn) are no signal.
-            return text.isEmpty ? nil : true
+            // Real user text starts a turn, and so does a message of
+            // attached files alone; wrapper-only records (system-reminder
+            // etc., injected mid-turn) are no signal.
+            return text.isEmpty && AttachmentInline.names(in: raw).isEmpty ? nil : true
         default:
             return nil
         }

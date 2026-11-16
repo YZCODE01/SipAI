@@ -737,15 +737,26 @@ MainActor.assumeIsolated {
     let frequencies = ScheduleTiming.Frequency.allCases.map(\.label)   // the card's row
     let hours = (0..<24).map { String(format: "%02d", $0) + (($0 % 2 == 0) ? " AM" : "") }
     for (name, labels, grid) in [("frequency row", frequencies, false), ("hour grid", hours, true)] {
-        var laid = 0, overlapping = 0
+        var tried = 0, laid = 0, overlapping = 0
         var first = ""
+        // A frame is reported when it CHANGES, so the frames are kept from one width to
+        // the next: one not reported again is still where it was. Cleared before each
+        // width, a frame that did not move — often the chip row's own — goes unreported,
+        // and that width is never measured.
+        Frames.all = [:]
         for tier in [FontTier.small, .standard, .larger, .xlarge] {
             var width: CGFloat = 240
             while width <= 620 {
-                Frames.all = [:]
+                tried += 1
                 host.rootView = AnyView(FlowProbe(labels: labels, width: width, tier: tier, grid: grid))
-                pump(0.012)
-                if let layout = Frames.all["layout"], let below = Frames.all["below"] {
+                // The row below spans the probe, so it moves at every width: its frame says
+                // this width's layout has been reported. A fixed wait is too short on some
+                // displays, and a width that never reports is skipped, not judged on the
+                // frames of the one before.
+                let settle = Date().addingTimeInterval(1)
+                while Frames.all["below"]?.width != width, Date() < settle { pump(0.002) }
+                pump(0.004)
+                if let layout = Frames.all["layout"], let below = Frames.all["below"], below.width == width {
                     laid += 1
                     let lowest = (0..<labels.count).compactMap { Frames.all["chip\($0)"]?.maxY }.max() ?? 0
                     if lowest > layout.maxY + 0.25 || below.minY < lowest - 0.25 {
@@ -761,7 +772,7 @@ MainActor.assumeIsolated {
         }
         check(laid > 1000 && overlapping == 0,
               "\(name): no chip below its own layout, or on the row after it (\(laid) layouts at scale \(Int(window.backingScaleFactor)))",
-              first)
+              first.isEmpty ? "only \(laid) of \(tried) layouts reported their frames" : first)
     }
     window.orderOut(nil)
 }
@@ -1169,6 +1180,40 @@ for (value, on) in [("yes", true), ("on", true), ("1", true), ("false", false), 
     check(ScheduledTaskDefinition.read(name: "s", skillFile: speedSkill)?.fastMode == on,
           "fast_mode: \(value) reads as \(on ? "on" : "off") — only a clear yes turns it on")
 }
+
+// A task's Non-stop and Chat only are its own too: `non_stop: true` and
+// `chat_only: true`, written only when on — a run is Non-stop only when its
+// task says so, never because it is a scheduled run.
+let askSkill = scratch.appendingPathComponent("ask/SKILL.md")
+try? FileManager.default.createDirectory(at: askSkill.deletingLastPathComponent(),
+                                         withIntermediateDirectories: true)
+try? "---\nname: ask\ndescription: Ask\nschedule: 0 9 * * *\nmode: auto\nnon_stop: true\nx-other: kept\n---\n\nGo.\n"
+    .write(to: askSkill, atomically: true, encoding: .utf8)
+if let read = ScheduledTaskDefinition.read(name: "ask", skillFile: askSkill) {
+    check(read.nonStop && !read.chatOnly && read.mode == "auto"
+            && read.passthroughFields.map(\.key) == ["x-other"],
+          "non_stop is read as a key this app owns")
+    _ = read.write(to: askSkill)
+    check(ScheduledTaskDefinition.read(name: "ask", skillFile: askSkill) == read,
+          "a rewrite keeps it")
+    var off = read
+    off.nonStop = false
+    check(off != read && !off.fileContents().contains("non_stop"),
+          "off writes nothing — a task that never ticked it runs asking, and keeps a short file")
+    var chat = read
+    chat.chatOnly = true
+    let chatText = chat.fileContents()
+    check(chatText.contains("chat_only: true") && !chatText.contains("mode:"),
+          "Chat only is written as such, with no mode beside it")
+    try? chatText.write(to: askSkill, atomically: true, encoding: .utf8)
+    check(ScheduledTaskDefinition.read(name: "ask", skillFile: askSkill)?.chatOnly == true,
+          "…and read back")
+} else {
+    check(false, "a SKILL.md carrying non_stop reads at all")
+}
+try? "---\nname: plain\nschedule: 0 9 * * *\n---\n\nGo.\n".write(to: askSkill, atomically: true, encoding: .utf8)
+check(ScheduledTaskDefinition.read(name: "plain", skillFile: askSkill).map { !$0.nonStop && !$0.chatOnly } == true,
+      "a task file that says nothing of them is neither Non-stop nor Chat only")
 
 // MARK: - 13. What a starting run does to the pane
 

@@ -44,6 +44,7 @@ if ! swiftc -O -target arm64-apple-macos15.0 -o "$out/fonttier" \
   "$root/SipAI/Utilities/MathDelimiters.swift" \
   "$root/SipAI/Utilities/MathDisplayBlock.swift" \
   "$root/SipAI/Utilities/MarkdownRenderer.swift" \
+  "$root/SipAI/Utilities/FileLinks.swift" \
   "$root/SipAI/Utilities/CodeBlockActions.swift" \
   "$out/HelpSection.swift" \
   "$here/main.swift" 2>"$out/build.log"; then

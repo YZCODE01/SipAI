@@ -5,8 +5,10 @@
 # Nothing here is part of the app target: this directory sits outside
 # SipAI/, so these files are never compiled into the product.
 #
-# It compiles the REAL ChatManager.swift against a stand-in for
-# SipaiPaths and runs it over a throwaway data directory under $TMPDIR.
+# It compiles the REAL ChatManager.swift — and the REAL notices beside the
+# sidebar's logo it tells of a reply that lands unread — against a
+# stand-in for SipaiPaths, and runs it over a throwaway data directory
+# under $TMPDIR.
 # It never touches ~/Library/Application Support/SipAI. The second pass
 # READS ChatView.swift rather than restating its rules — a third copy of
 # a rule is how a harness comes to pass while the app is broken.
@@ -31,7 +33,9 @@ if ! grep -q "static func placed" "$out/Tier.swift"; then
 fi
 swiftc -O -o "$out/chatturnharness" \
   "$here/Stubs.swift" "$here/main.swift" "$out/Tier.swift" \
-  "$here/../../SipAI/Models/ChatManager.swift"
+  "$here/../../SipAI/Models/ChatManager.swift" \
+  "$here/../../SipAI/Models/UpdateNotices.swift" \
+  "$here/../../SipAI/Models/SidebarNotices.swift"
 # An explicit source root overrides, so the structural pass can be
 # pointed at an older checkout to confirm it still catches the bug.
 "$out/chatturnharness" "${1:-$here/../..}"

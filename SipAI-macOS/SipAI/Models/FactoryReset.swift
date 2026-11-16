@@ -75,6 +75,10 @@ enum FactoryReset {
         // UI state, so it lives here rather than in the config file
         // the CLI shares.
         UpdateBadge.seenDefaultsKey,
+        // The updates closed (or acted on) beside the sidebar's logo, by
+        // version — what keeps a closed one from coming back. Same home,
+        // same reason.
+        SidebarNotices.closedDefaultsKey,
         // The release the last SipAI update check found, and the build
         // each copy last launched as. A reset keeps nothing for the
         // badge, or the "just updated" line, to answer from. The
@@ -92,6 +96,12 @@ enum FactoryReset {
         // The plan-usage window's last account verdict per agent —
         // what decides the toolbar icon before anything runs.
         UsageMonitor.verdictsDefaultsKey,
+        // The folders browsed in Settings → Agent Skills, which its folder menu
+        // lists. Same home, same reason.
+        SkillFolderHistory.defaultsKey,
+        // The Kimi models Moonshot refused for the account's plan, which
+        // the model menu marks. Same home, same reason.
+        KimiPlanRefusals.defaultsKey,
         // Sparkle's own preferences. They are settings the user can
         // change (the automatic-check toggle) or decisions they made
         // (a skipped version), so "every setting goes" covers them —
@@ -157,6 +167,9 @@ enum FactoryReset {
         agents?.stopAllRunningTurns()
 
         failed += wipeDataDirectory()
+        // The web cache sits outside the data folder, and an earlier
+        // SipAI kept provider requests in it.
+        WebCache.clear()
 
         for key in userDefaultsKeys {
             UserDefaults.standard.removeObject(forKey: key)
@@ -186,6 +199,7 @@ enum FactoryReset {
         // updating tools after a reset that promised every setting.
         AgentCLIUpdateMonitor.shared.forgetSwitches()
         UpdateBadge.shared.forgetSeen()
+        SidebarNotices.shared.forgetClosed()
         projects.reload()
         chats.reload()
         notes?.reload()
@@ -201,6 +215,11 @@ enum FactoryReset {
         // reappear in the first composer opened after the reset.
         appState.startNewChat()
         appState.clearComposerDrafts()
+        // The folder Settings → Agent Skills was showing is the same kind of
+        // thing: held in memory, and the page records the folder it
+        // shows as browsed — so left standing, the next visit wrote it
+        // straight back into the history removed above.
+        appState.forgetSkillsPage()
         // Unsaved note edits are the same kind of thing: RAM-only, so
         // the wipe cannot reach them, and a later flush would put a file
         // back into the folder just emptied.

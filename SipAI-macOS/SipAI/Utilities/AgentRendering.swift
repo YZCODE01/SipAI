@@ -60,8 +60,15 @@ enum AgentRendering {
         let inp = input
         switch name {
         case "Read":
-            let fp = shortenPath((inp["file_path"] as? String) ?? "")
-            if let off = asInt(inp["offset"]), let lim = asInt(inp["limit"]) {
+            // Claude names the file `file_path` and the lines `offset` /
+            // `limit`; Kimi Code names them `path` and `line_offset` /
+            // `n_lines`.
+            let fp = shortenPath((inp["file_path"] as? String) ?? (inp["path"] as? String) ?? "")
+            func span(_ offset: String, _ count: String) -> (Int, Int)? {
+                guard let off = asInt(inp[offset]), let lim = asInt(inp[count]) else { return nil }
+                return (off, lim)
+            }
+            if let (off, lim) = span("offset", "limit") ?? span("line_offset", "n_lines") {
                 // Values come straight from session JSONL — clamp
                 // instead of trapping on a corrupt offset near Int.max
                 // (display value only).
@@ -74,8 +81,23 @@ enum AgentRendering {
             let path = shortenPath((inp["path"] as? String) ?? "")
             return "\"\(pat)\"" + (path.isEmpty ? "" : ", \(path)")
         case "Edit", "MultiEdit", "Write", "NotebookEdit":
-            let fp = (inp["file_path"] as? String) ?? (inp["notebook_path"] as? String) ?? ""
+            let fp = (inp["file_path"] as? String) ?? (inp["notebook_path"] as? String)
+                ?? (inp["path"] as? String) ?? ""
             return shortenPath(fp)
+        case "file_change", "patch_apply":
+            // Codex's file change: one file by its path, as an Edit row;
+            // several by their names.
+            let paths = fileChanges(inp).compactMap { $0["path"] as? String }
+            if paths.count == 1 { return shortenPath(paths[0]) }
+            return truncate(paths.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "), 60)
+        case "web_search", "web_search_call":
+            // Codex spells a lookup's terms, page or find-in-page as one
+            // value: `query` on the live feed, `command` reopened.
+            return truncate((inp["query"] as? String) ?? (inp["command"] as? String) ?? "", 60)
+        case "image_view", "view_image":
+            // An image codex viewed: `path` on its item and its record;
+            // `command` on a reopened call codex kept no record of.
+            return shortenPath((inp["path"] as? String) ?? (inp["command"] as? String) ?? "")
         case "Bash":
             let desc = (inp["description"] as? String) ?? (inp["command"] as? String) ?? ""
             return truncate(desc, 60)
@@ -88,6 +110,12 @@ enum AgentRendering {
             return truncate((inp["query"] as? String) ?? "", 60)
         case "Task":
             return truncate((inp["description"] as? String) ?? "", 60)
+        case "Skill":
+            // The skill the model loaded, and what it handed it.
+            let skill = SkillRecords.skillToolName(name: name, input: inp) ?? ""
+            let args = ((inp["args"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return truncate(args.isEmpty ? skill : skill + " — " + args, 60)
         case "ExitPlanMode":
             // The plan's own title — its first heading or line. A bounded
             // split: this runs per visible row per render pass, and the
@@ -100,6 +128,13 @@ enum AgentRendering {
                 if !line.isEmpty { return truncate(line, 60) }
             }
             return ""
+        case MCPBridge.questionTool:
+            // The first question itself — the input's only top-level value
+            // is an array, which the generic rule below would reduce to a
+            // key name.
+            let questions = (inp["questions"] as? [[String: Any]]) ?? []
+            let first = truncate((questions.first?["question"] as? String) ?? "", 60)
+            return questions.count > 1 ? "\(first) (+\(questions.count - 1) more)" : first
         default:
             // Unknown tools (MCP tools, codex tool calls): the value is
             // what tells the reader something — a bare key list doesn't.
@@ -119,16 +154,42 @@ enum AgentRendering {
         }
     }
 
-    /// Display name used in the header: Edit/MultiEdit → "Update".
-    ///
-    /// Codex names its tool rows after its own stdout item types
-    /// (`command_execution`), so those are mapped to the same
-    /// vocabulary claude's rows use rather than shown raw.
+    /// A tool row's title. Where the row's name is SipAI's own word for
+    /// it, the word follows SipAI's language: Codex's events carry only a
+    /// machine label (`command_execution`, `file_change`, `imageView`), so
+    /// SipAI names them as Claude's rows read, and shows Claude's Edit as
+    /// "Update", its terminal's word. A tool shown by its own name — `Read`,
+    /// `Bash`, an MCP tool's — keeps it in every language. Each word has a
+    /// key of its own: the catalog's plain "Update" is the update button's
+    /// word, and reads differently there.
     static func displayToolName(_ name: String) -> String {
-        if let codex = CodexCapabilities.toolDisplay(for: name) {
-            return codex.title
+        switch name {
+        case "command_execution":
+            return String(localized: "tool.title.shell", defaultValue: "Shell",
+                          comment: "Title of a tool row: a command Codex ran")
+        case "file_change", "patch_apply", "Edit", "MultiEdit":
+            return String(localized: "tool.title.update", defaultValue: "Update",
+                          comment: "Title of a tool row: files the agent edited")
+        case "web_search", "web_search_call":
+            return String(localized: "tool.title.search", defaultValue: "Search",
+                          comment: "Title of a tool row: a web search Codex ran")
+        case "image_view", "view_image":
+            // Codex's terminal's own words for it.
+            return String(
+                localized: "tool.title.viewed-image", defaultValue: "Viewed image",
+                comment: "Title of a tool row: an image Codex looked at; the file's path is beside it")
+        case "todo_list":
+            return String(localized: "tool.title.todo", defaultValue: "Todo",
+                          comment: "Title of a tool row: Codex's to-do list")
+        case MCPBridge.questionTool:
+            return String(localized: "tool.title.question", defaultValue: "Question",
+                          comment: "Title of a tool row: a question the agent asked the user")
+        case "mcp_tool_call":
+            // The protocol's name, the same in every language.
+            return "MCP"
+        default:
+            return name
         }
-        return (name == "Edit" || name == "MultiEdit") ? "Update" : name
     }
 
     /// SF Symbol for a tool's activity chip in the normal (desktop-style)
@@ -136,19 +197,20 @@ enum AgentRendering {
     /// plug-in puzzle piece.
     static func toolSymbol(_ name: String) -> String {
         if name.hasPrefix("mcp__") { return "puzzlepiece.extension" }
-        if let codex = CodexCapabilities.toolDisplay(for: name) {
-            return codex.symbol
-        }
         switch name {
-        case "Bash", "BashOutput", "KillShell": return "terminal"
-        case "Edit", "MultiEdit", "NotebookEdit": return "pencil"
+        case "Bash", "BashOutput", "KillShell", "command_execution": return "terminal"
+        case "Edit", "MultiEdit", "NotebookEdit", "file_change", "patch_apply": return "pencil"
         case "Write": return "square.and.pencil"
         case "Read": return "doc.text"
         case "Grep", "Glob": return "magnifyingglass"
-        case "WebFetch", "WebSearch", "FetchURL": return "globe"
+        case "WebFetch", "WebSearch", "FetchURL", "web_search", "web_search_call": return "globe"
         case "Task", "Agent": return "person.2"
-        case "TodoWrite": return "checklist"
+        case "TodoWrite", "todo_list": return "checklist"
+        case "Skill": return "book.closed"
         case "ExitPlanMode", "EnterPlanMode": return "map"
+        case "image_view", "view_image": return "photo"
+        case "mcp_tool_call": return "puzzlepiece.extension"
+        case MCPBridge.questionTool: return "questionmark.bubble"
         default: return "wrench.and.screwdriver"
         }
     }
@@ -203,12 +265,38 @@ enum AgentRendering {
         return out
     }
 
+    /// The summary beside a row's title, from its input — and, for a
+    /// Codex lookup that names its terms only once it has ended (a search
+    /// run through codex's code mode starts with none), from the result.
+    static func toolSummary(name: String, input: [String: Any], resultOutput: String?) -> String {
+        let summary = summarizeToolInput(name: name, input: input)
+        guard summary.isEmpty, codexLookupNames.contains(name), let output = resultOutput else { return summary }
+        return truncate(output, 60)
+    }
+
+    /// The rows under a row's input once its result is in. A Codex lookup's
+    /// result is its own terms, already beside its title, an image Codex
+    /// viewed went to the model, and a Codex file change says nothing
+    /// beyond the files its body names: none draws a line of its own, where
+    /// any other result says "(no output)".
+    static func toolResultRows(name: String, output: String) -> [ToolBodyRow] {
+        if codexLookupNames.contains(name) || name == CodexToolInput.imageViewName { return [] }
+        if CodexToolInput.fileChangeNames.contains(name),
+           output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return []
+        }
+        return fullToolResultBody(output)
+    }
+
+    /// Codex's web lookups: the live feed's item and a reopened call.
+    private static let codexLookupNames: Set<String> = ["web_search", "web_search_call"]
+
     /// Produce per-tool body rows for full-mode rendering. Empty array
     /// means "no body — header alone is enough".
     static func fullToolBody(name: String, input: [String: Any]) -> [ToolBodyRow] {
         let rows: [ToolBodyRow]
         switch name {
-        case "Bash":
+        case "Bash", "command_execution":
             rows = renderBashInput(input)
         case "Read":
             rows = []  // header already has the path-with-line-range summary
@@ -220,14 +308,18 @@ enum AgentRendering {
             rows = renderPatternInput(input)
         case "TodoWrite":
             rows = renderTodoWrite(input)
-        case "WebSearch":
+        case "WebSearch", "web_search", "web_search_call", "image_view", "view_image":
             rows = []
+        case "file_change", "patch_apply":
+            rows = renderFileChanges(input)
         case "WebFetch", "FetchURL":
             rows = renderWebFetch(input)
         case "Task":
             rows = renderTaskInput(input)
         case "ExitPlanMode":
             rows = renderPlanInput(input)
+        case MCPBridge.questionTool:
+            rows = renderQuestionInput(input)
         default:
             rows = renderGenericInput(input)
         }
@@ -455,7 +547,113 @@ enum AgentRendering {
         return rows
     }
 
+    /// An agent's questions as the user saw them: each question, then its
+    /// options. The answers are claude's own tool result, drawn below.
+    /// Anything not in the shape of a question falls back to the generic
+    /// JSON rows, so a call that could not be drawn as a card still shows
+    /// what it asked.
+    private static func renderQuestionInput(_ ti: [String: Any]) -> [ToolBodyRow] {
+        guard let questions = ti["questions"] as? [[String: Any]], !questions.isEmpty else {
+            return renderGenericInput(ti)
+        }
+        var rows: [ToolBodyRow] = []
+        for (index, question) in questions.enumerated() {
+            if index > 0 {
+                rows.append(ToolBodyRow(text: "", style: .dim, monospaced: false))
+            }
+            rows.append(ToolBodyRow(text: (question["question"] as? String) ?? "",
+                                    style: .bold, monospaced: false))
+            for option in (question["options"] as? [[String: Any]]) ?? [] {
+                let label = (option["label"] as? String) ?? ""
+                let description = (option["description"] as? String) ?? ""
+                rows.append(ToolBodyRow(
+                    text: description.isEmpty ? "• \(label)" : "• \(label) — \(description)",
+                    style: .dim, monospaced: false))
+            }
+        }
+        return rows
+    }
+
+    /// Codex's file change, file by file: what happened to it, in codex's
+    /// own words, then its diff — an added file's lines as additions, a
+    /// deleted file's as removals, an edited file's unified diff as it is.
+    /// `codex exec`'s item names the files without their diffs.
+    private static func renderFileChanges(_ ti: [String: Any]) -> [ToolBodyRow] {
+        var rows: [ToolBodyRow] = []
+        var diffLines = 0
+        var hidden = 0
+        let cap = AgentRenderingLimits.fullToolLines
+        for (index, change) in fileChanges(ti).enumerated() {
+            let path = shortenPath((change["path"] as? String) ?? "")
+            let kind = (change["kind"] as? String) ?? "update"
+            if index > 0 { rows.append(ToolBodyRow(text: "", style: .dim, monospaced: true)) }
+            let headline = fileChangeHeadline(kind: kind, path: path, movedTo: change["move_path"] as? String)
+            rows.append(ToolBodyRow(text: headline, style: .dim, monospaced: true))
+            var diff = (change["diff"] as? String) ?? ""
+            while diff.hasSuffix("\n") { diff.removeLast() }
+            guard !diff.isEmpty else { continue }
+            for line in diff.components(separatedBy: "\n") {
+                guard diffLines < cap else { hidden += 1; continue }
+                diffLines += 1
+                switch kind {
+                case "add": rows.append(ToolBodyRow(text: "+" + line, style: .diffAdd, monospaced: true))
+                case "delete": rows.append(ToolBodyRow(text: "-" + line, style: .diffRemove, monospaced: true))
+                default: rows.append(unifiedDiffRow(line))
+                }
+            }
+        }
+        if hidden > 0 {
+            rows.append(ToolBodyRow(text: "… [diff truncated — \(hidden) more diff lines]",
+                                    style: .dim, monospaced: true))
+        }
+        return rows
+    }
+
+    /// A Codex file change's files, from its row's input.
+    private static func fileChanges(_ ti: [String: Any]) -> [[String: Any]] {
+        (ti["changes"] as? [Any] ?? []).compactMap { $0 as? [String: Any] }
+    }
+
+    /// What happened to one file — "Added", "Edited", "Deleted", the
+    /// words codex's own terminal uses — and where it moved to.
+    private static func fileChangeHeadline(kind: String, path: String, movedTo: String?) -> String {
+        switch kind {
+        case "add":
+            return String(
+                localized: "Added \(path)",
+                comment: "A file Codex created, in its tool row; the argument is the file's path")
+        case "delete":
+            return String(
+                localized: "Deleted \(path)",
+                comment: "A file Codex deleted, in its tool row; the argument is the file's path")
+        default:
+            if let movedTo, !movedTo.isEmpty {
+                let target = shortenPath(movedTo)
+                return String(
+                    localized: "Edited \(path) → \(target)",
+                    comment: "A file Codex edited and moved, in its tool row; the arguments are its old and new paths")
+            }
+            return String(
+                localized: "Edited \(path)",
+                comment: "A file Codex edited, in its tool row; the argument is the file's path")
+        }
+    }
+
+    /// One line of a unified diff in the diff's colours: additions green,
+    /// removals red, the hunk headers and file names dim.
+    private static func unifiedDiffRow(_ line: String) -> ToolBodyRow {
+        if line.hasPrefix("+++") || line.hasPrefix("---") || line.hasPrefix("@@") || line.hasPrefix("\\") {
+            return ToolBodyRow(text: line, style: .dim, monospaced: true)
+        }
+        if line.hasPrefix("+") { return ToolBodyRow(text: line, style: .diffAdd, monospaced: true) }
+        if line.hasPrefix("-") { return ToolBodyRow(text: line, style: .diffRemove, monospaced: true) }
+        return ToolBodyRow(text: line, style: .plain, monospaced: true)
+    }
+
     private static func renderGenericInput(_ ti: [String: Any]) -> [ToolBodyRow] {
+        // A call with no arguments has nothing to show: printed, the empty
+        // input reads as a body of `{` and `}` that says nothing.
+        guard !ti.isEmpty else { return [] }
         // Clip long string values before serialising.
         var clipped: [String: Any] = [:]
         for (k, v) in ti {

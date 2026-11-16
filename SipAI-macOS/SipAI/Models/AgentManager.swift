@@ -60,12 +60,22 @@ final class AgentHistoryCache {
         /// note) is judged on a cache hit too, and a branch's own file
         /// is tiny.
         let inheritedBytes: UInt64
+        /// Whether the read reached the file's start, where the reader can
+        /// say (claude's, through `AgentSessionScanner.conversationTail`:
+        /// its window skips the request records that make up most of a
+        /// long transcript, so the file's size no longer says what was
+        /// left unread). nil = judged by size, as codex and kimi are.
+        let readReachedStart: Bool?
         /// The Chat only turns the read kept thoughts for
         /// (`ConfigManager.agentChatOnlyTurns`). A turn recorded after
         /// the read — the record lands a beat after the turn's answer —
         /// leaves the entry stale on an unchanged file: that turn's
         /// thoughts were never read, and it would draw as an agent turn.
         let chatOnlyTurns: Set<String>
+        /// The read kept every turn's thoughts — compact view was on. A
+        /// read made the other way is stale on an unchanged file: its
+        /// thoughts are missing, or kept where nothing draws them.
+        let allThoughts: Bool
     }
 
     private static let capacity = 8
@@ -87,6 +97,16 @@ final class AgentHistoryCache {
             useOrder.removeFirst()
             entries.removeValue(forKey: oldest)
         }
+    }
+
+    /// Forget a session's cached read: an earlier message edited in place
+    /// leaves the cached rows holding turns the session no longer has,
+    /// and for claude the file does not change until the edit's turn
+    /// writes, so the cache's (size, mtime) test would still call them
+    /// current.
+    func forget(_ sessionId: String) {
+        entries.removeValue(forKey: sessionId)
+        useOrder.removeAll { $0 == sessionId }
     }
 
     /// Strip a derived "Interrupted" marker from a cached transcript.
@@ -112,7 +132,9 @@ final class AgentHistoryCache {
             fileSize: existing.fileSize,
             fileMtime: existing.fileMtime,
             inheritedBytes: existing.inheritedBytes,
-            chatOnlyTurns: existing.chatOnlyTurns
+            readReachedStart: existing.readReachedStart,
+            chatOnlyTurns: existing.chatOnlyTurns,
+            allThoughts: existing.allThoughts
         )
     }
 
@@ -360,11 +382,49 @@ final class AgentManager: ObservableObject {
     /// draft it is still becoming — or ended the run themselves (Stop,
     /// or quitting SipAI; the composer's Stop on a turn another process
     /// ran) — or the run never got a session id, which leaves nothing
-    /// to open.
-    private func noteRunEnded(sessionId id: String, stoppedByUser: Bool) {
+    /// to open. The same moment is said beside the logo for a few
+    /// seconds; the dot is what stays.
+    private func noteRunEnded(sessionId id: String, agentKey: String,
+                              stoppedByUser: Bool, failed: Bool) {
         guard !id.isEmpty, !id.hasPrefix("draft:"), !stoppedByUser,
               id != openSessionId, !isOpenDraftsSession(id) else { return }
         config?.markAgentSessionUnread(id)
+        let agentKey = agentKey.isEmpty
+            ? (sessions.first { $0.id == id }?.agentKey ?? "") : agentKey
+        // An agent that is not listed has no row to open: said beside the
+        // logo, it would be the one place the app still shows it.
+        guard isAgentReady(agentKey) else { return }
+        let names = noticeNames(forSession: id, agentKey: agentKey)
+        SidebarNotices.shared.post(.agentTurnEnded(agent: names.agent, group: names.group,
+                                                   sessionId: id, failed: failed))
+    }
+
+    /// What a notice beside the logo calls a session: its agent's label,
+    /// and the group its row is drawn under — the custom group it is filed
+    /// in when the agent is grouped by Custom, its folder otherwise (a
+    /// date or a state is no place to find a session by). nil for a
+    /// session with neither.
+    func noticeNames(forSession id: String?, agentKey: String) -> (agent: String, group: String?) {
+        let fallback = Self.registry.first { $0.key == agentKey }?.name ?? agentKey
+        let agent = config?.agentLabel(for: agentKey, defaultName: fallback) ?? fallback
+        guard let id, !id.isEmpty else { return (agent, nil) }
+        let session = sessions.first { $0.id == id }
+        if let config, config.agentGroupMode(for: agentKey) == .custom {
+            // The key the row itself is filed under: a scheduled run is
+            // drawn under its task, and the task is what is filed.
+            let itemKey = session?.scheduledTaskName
+                .map(AgentListItem.groupItemKey(forScheduledTaskName:)) ?? id
+            if let name = config.agentSessionGroup(for: itemKey),
+               config.agentCustomGroups(for: agentKey).contains(name) {
+                return (agent, name)
+            }
+        }
+        guard let folder = (session?.projectPath ?? runners[id]?.cwd)?.standardizedFileURL else {
+            return (agent, nil)
+        }
+        // Folder grouping's own label for the group (`buckets`).
+        let name = folder.lastPathComponent
+        return (agent, name.isEmpty ? folder.path : name)
     }
 
     /// The draft the centre pane shows, as ContentView reports it
@@ -448,6 +508,130 @@ final class AgentManager: ObservableObject {
     func configure(bridge: MCPBridge, config: ConfigManager) {
         mcpBridge = bridge
         self.config = config
+        followCompactView(config)
+        bridge.questionPolicy = { [weak self] req in
+            self?.questionPolicy(for: req) ?? .unanswerable
+        }
+        bridge.agentLabel = { [weak self] key in
+            self?.agentLabel(for: key) ?? key
+        }
+        bridge.approverCallTimeoutMs = {
+            Self.approverCallTimeoutMs(installedClaude: Self.installedClaudeVersion())
+        }
+        bridge.reportsPermissionSuggestions = {
+            Self.approverKnowsNewerKeys(installedClaude: Self.installedClaudeVersion())
+        }
+        bridge.bridgesMcpForms = {
+            Self.claudeRunsElicitationHook(installedClaude: Self.installedClaudeVersion())
+        }
+        if pendingSink == nil {
+            // Asynchronous, like `accountsSink`: `@Published` emits from
+            // `willSet`, and each runner re-reads the bridge's list itself.
+            pendingSink = bridge.$pending
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    guard let self else { return }
+                    for runner in self.runners.values { runner.syncUserWait() }
+                }
+        }
+    }
+
+    /// The one subscription through which runners learn that a card came
+    /// or went — what pauses and resumes a turn's clock
+    /// (`AgentRunner.syncUserWait`).
+    private var pendingSink: AnyCancellable? = nil
+    private var compactViewSink: AnyCancellable? = nil
+
+    /// Compact view, from the display setting into the flag the readers
+    /// and parsers ask (`CompactTranscript`). Turned off, the thoughts
+    /// kept for agent turns leave every live buffer: nothing draws them
+    /// then.
+    private func followCompactView(_ config: ConfigManager) {
+        guard compactViewSink == nil else { return }
+        CompactTranscript.set(config.display.agentCompactView)
+        // `@Published` emits from `willSet`: the value handed in is the
+        // new one, and the runners are told after the flag is.
+        compactViewSink = config.$display
+            .map(\.agentCompactView)
+            .removeDuplicates()
+            .sink { [weak self] on in
+                CompactTranscript.set(on)
+                guard !on else { return }
+                DispatchQueue.main.async {
+                    guard let self, !CompactTranscript.isOn else { return }
+                    for runner in self.runners.values { runner.dropAgentTurnThoughts() }
+                }
+            }
+    }
+
+    /// What becomes of a question an agent asks mid-turn: shown when the
+    /// turn that asked can take an answer, answered with Non-stop's words
+    /// when that turn runs Non-stop, declined when no turn of this app
+    /// owns it — a claude left running by an earlier launch, or a turn
+    /// being stopped.
+    ///
+    /// "Can take an answer" is a LIVE child the user has not stopped.
+    /// `status.isRunning` would misjudge both ways: it stays true for the
+    /// seconds a stopped child takes to die (a card drawn then would
+    /// answer nobody), and it is false while a child works on after its
+    /// `result` ended the visible turn (a real question would be refused).
+    private func questionPolicy(for req: MCPApprovalRequest) -> MCPQuestionPolicy {
+        guard let bridge = mcpBridge,
+              let runner = runners.values.first(where: {
+                  bridge.belongs(req, toSession: $0.sessionId,
+                                 taskUuid: $0.taskUuidForBridge)
+              }),
+              runner.hasLiveChild, !runner.turnWasStoppedByUser
+        else { return .unanswerable }
+        return runner.nonStop ? .nonStop : .ask
+    }
+
+    /// The approver's per-server tool-call limit (`MCPBridge
+    /// .approverCallTimeoutMs`): claude's own hard default for a tool call
+    /// — so a card waits as long as claude would ever let any call run —
+    /// written only for a claude known to take the key. The floor is the
+    /// oldest claude measured to accept it. Below the floor, or while the
+    /// installed version is not known, nothing is written and claude's
+    /// own 30-minute idle limit stands.
+    nonisolated static let approverCallTimeoutFloor = CLIVersion.parse("2.1.281")
+
+    nonisolated static func approverCallTimeoutMs(installedClaude: CLIVersion?) -> Int? {
+        approverKnowsNewerKeys(installedClaude: installedClaude) ? 100_000_000 : nil
+    }
+
+    /// Whether the installed claude is one measured to take what the
+    /// bridge adds to a launch beyond the approver itself: the per-server
+    /// `timeout`, and the PermissionRequest hook in `--settings`
+    /// (`MCPBridge.launchSettings`). One floor for both — the oldest
+    /// claude either was measured on. An older or unread claude gets
+    /// neither key, never one it may refuse at startup.
+    nonisolated static func approverKnowsNewerKeys(installedClaude: CLIVersion?) -> Bool {
+        guard let installed = installedClaude,
+              let floor = approverCallTimeoutFloor else { return false }
+        return installed >= floor
+    }
+
+    /// The oldest claude measured to run an Elicitation hook under `-p` and
+    /// hand the hook's answer to the MCP server (`MCPBridge.bridgesMcpForms`).
+    nonisolated static let elicitationHookFloor = CLIVersion.parse("2.1.288")
+
+    /// Whether the installed claude is one measured to run the Elicitation
+    /// hook. An older or unread claude is launched without it, and cancels
+    /// an MCP server's forms and links itself, as it always has.
+    nonisolated static func claudeRunsElicitationHook(installedClaude: CLIVersion?) -> Bool {
+        guard let installed = installedClaude, let floor = elicitationHookFloor else { return false }
+        return installed >= floor
+    }
+
+    /// The installed claude's version as far as it is known right now:
+    /// the update monitor's reading, or — before its first pass lands,
+    /// which is when a launch's first turn is sent — the version a native
+    /// install spells in its own symlink, read without a spawn. nil for
+    /// an install that has to be asked and has not been yet.
+    static func installedClaudeVersion() -> CLIVersion? {
+        if let known = AgentCLIUpdateMonitor.shared.installed["claude_code"] { return known }
+        guard let fingerprint = AgentCLIProbe.fingerprint(agentKey: "claude_code") else { return nil }
+        return AgentCLIProbe.versionFromClaudeVersionsSymlink(fingerprint)
     }
 
     /// Stop every turn THIS app is running, the way the Stop button and
@@ -528,6 +712,70 @@ final class AgentManager: ObservableObject {
         }
     }
 
+    /// Hand back any kimi session an ACP turn left bound to ACP's runtime
+    /// — a crash, a force-quit, a kill mid-turn — from the journal config
+    /// keeps (`kimiBindingRestores`), for every session with no turn of
+    /// ours in flight, clearing each entry as it lands. Called at launch
+    /// (`sessionId` nil: every entry) and on session open (that session
+    /// alone). Bound, the session runs without its file and command tools
+    /// in kimi's own terminal too, which is why this exists.
+    func healKimiRuntimeBindings(sessionId only: String? = nil) {
+        guard let config else { return }
+        let owed = config.kimiBindingRestores().filter { id in
+            if let only, only != id { return false }
+            // A turn of ours on this session hands it back itself.
+            if let runner = runners[id], runner.status.isRunning { return false }
+            return true
+        }
+        guard !owed.isEmpty else { return }
+        Task { [weak self] in
+            let settled = await Task.detached(priority: .utility) { () -> [String] in
+                owed.filter { id in
+                    // A session that is gone owes nothing.
+                    guard let dir = KimiSessionScanner.sessionDirectory(forId: id) else { return true }
+                    return KimiRuntimeBinding.restore(sessionDir: dir)
+                }
+            }.value
+            for id in settled { self?.config?.setKimiBindingRestore(false, for: id) }
+        }
+    }
+
+    /// Each new session whose first message has gone and whose session id
+    /// has not come yet, as the page that sent it last left it — by its
+    /// runner's key (`noteSentDraft`). What `migrateRunner` files under the
+    /// id when it arrives: the custom group, the skills, and the chips the
+    /// message went out with as changed since — whichever page is on screen
+    /// by then. The page saves them again when it switches to the session,
+    /// but a page that moved on before the id arrived (the group's + clicked
+    /// again for the next session, a chat) never does, and the session was
+    /// left with no picks: reopened on the agent's latest choices, and
+    /// passed over by its group's +.
+    private var sentDrafts: [String: ClaudeSessionDraft] = [:]
+
+    /// A new session's first message went, or what it went with changed on
+    /// its page before its session is named. Kept, never saved: the page
+    /// calls this from a change of the chips' state, which cannot tell the
+    /// user's pick from SipAI's own update. What changes once the session
+    /// is named waits for the page's switch to the session, as before.
+    func noteSentDraft(_ draft: ClaudeSessionDraft) {
+        let key = "draft:\(draft.id.uuidString)"
+        guard let runner = runners[key], runner.sessionId == nil else { return }
+        sentDrafts[key] = draft
+    }
+
+    /// The new sessions of `agentKey` sent from a page and not yet named,
+    /// while their first message runs: a group's newest session from the
+    /// moment their message went (`NewSessionPlace.startingSetup`). One
+    /// whose message ended without naming a session is no session.
+    func unnamedNewSessions(for agentKey: String) -> [UnnamedNewSession] {
+        sentDrafts.compactMap { key, draft in
+            guard draft.agentKey == agentKey, let runner = runners[key],
+                  runner.sessionId == nil, let sentAt = runner.status.runningSince
+            else { return nil }
+            return UnnamedNewSession(draft: draft, sentAt: sentAt)
+        }
+    }
+
     func runner(forDraft draft: ClaudeSessionDraft) -> AgentRunner {
         let key = "draft:\(draft.id.uuidString)"
         if let existing = runners[key] { return existing }
@@ -555,7 +803,7 @@ final class AgentManager: ObservableObject {
     /// JSONL tailer applies) is the runner's to make from it — callers
     /// no longer pass those in one at a time.
     func runner(forSessionId id: String, fileURL: URL, cwd: URL,
-                agentKey: String = "claude_code") -> AgentRunner {
+                agentKey: String) -> AgentRunner {
         if let existing = runners[id] { return existing }
         let runner = AgentRunner(
             key: id,
@@ -591,9 +839,15 @@ final class AgentManager: ObservableObject {
                 self.noteRunStarted(sessionId: runner?.sessionId ?? key)
             } else if self.inFlightSends.removeValue(forKey: key) != nil {
                 // A turn just ENDED (there was an in-flight token to
-                // clear — a plain `.idle` assignment is not a turn).
+                // clear — a plain `.idle` assignment is not a turn). One
+                // that ended on a failure (`.done` with a code other than
+                // 0) is said as one.
+                var failed = false
+                if case .done(let code, _) = status, code != 0 { failed = true }
                 self.noteRunEnded(sessionId: runner?.sessionId ?? key,
-                                  stoppedByUser: runner?.turnWasStoppedByUser ?? false)
+                                  agentKey: runner?.agentKey ?? "",
+                                  stoppedByUser: runner?.turnWasStoppedByUser ?? false,
+                                  failed: failed)
                 // The session's file mtime moved, and that timestamp is
                 // on screen: the composer's scheduled-run tag and every
                 // sidebar row's relative time. `sessions` is only
@@ -617,6 +871,9 @@ final class AgentManager: ObservableObject {
             } else {
                 config.clearKimiToolPolicyRestore(for: sessionId)
             }
+        }
+        runner.onKimiBindingJournal = { [weak self] sessionId, owed in
+            self?.config?.setKimiBindingRestore(owed, for: sessionId)
         }
         runner.onChatOnlyTurnRecorded = { [weak self] sessionId, handle in
             self?.config?.noteAgentChatOnlyTurn(handle, for: sessionId)
@@ -649,7 +906,9 @@ final class AgentManager: ObservableObject {
                 // tailer's sweep, seconds after the click, by when the
                 // user may have moved on.
                 self.noteRunEnded(sessionId: sessionId,
-                                  stoppedByUser: runner?.externalTurnWasStoppedByUser ?? false)
+                                  agentKey: runner?.agentKey ?? "",
+                                  stoppedByUser: runner?.externalTurnWasStoppedByUser ?? false,
+                                  failed: false)
             }
         }
     }
@@ -692,6 +951,9 @@ final class AgentManager: ObservableObject {
                                draft: ClaudeSessionDraft?) {
         let oldKey = runner.key
         guard oldKey != newSessionId else { return }
+        // The draft as its page last left it — the runner's own copy is the
+        // one taken when the runner was made, before its first send.
+        let draft = sentDrafts.removeValue(forKey: oldKey) ?? draft
 
         // The old draft key stays in the dict as an alias to the same
         // runner. Dropping it here would strand the open draft view:
@@ -722,6 +984,19 @@ final class AgentManager: ObservableObject {
         // `fileSession`.
         fileSession(newSessionId, inGroup: draft?.customGroup,
                     agentKey: runner.agentKey)
+        // The draft's chosen skills, which went with its first message,
+        // stay chosen for the session that message became.
+        if let picks = draft?.skillPicks, !picks.isEmpty {
+            config?.setAgentSessionSkillPicks(picks, for: newSessionId)
+        }
+        // And the chips it went out with are the session's own picks from
+        // now: what it reopens on, and what its group's + starts the next
+        // new session with while it is the group's newest. Before the
+        // placeholder, like the filing: the row is on screen the moment it
+        // is inserted.
+        if let chips = draft?.sentOptions {
+            config?.setAgentSessionLaunchOptions(chips, for: newSessionId)
+        }
 
         // A run the scheduler started belongs to its task from now on,
         // not from the scan that first reads its marker off disk — the
@@ -1173,6 +1448,13 @@ final class AgentManager: ObservableObject {
         delete([session], task: nil)
     }
 
+    /// A group header's delete: every session of the group at once, in
+    /// one pass, so the rows leave together rather than one by one.
+    func deleteSessions(_ sessions: [AgentSession]) {
+        guard !sessions.isEmpty else { return }
+        delete(sessions, task: nil)
+    }
+
     /// A scheduled task's "Delete all": its definition and every run it
     /// made. The task leaves the sidebar at once and in one piece —
     /// deleted run by run, and definition apart, it would first shrink
@@ -1195,11 +1477,10 @@ final class AgentManager: ObservableObject {
     ///
     /// The rows leave the lists NOW, and stay off them until the files
     /// are gone (`deletingSessionIds`). A run that is still going is
-    /// stopped FIRST and its files removed only once it has ended:
-    /// measured on claude 2.1.283, a transcript deleted under a live turn
-    /// is written again the moment the stopped process exits — a stray
-    /// file of claude's bookkeeping records — while one deleted after
-    /// the exit stays gone. A task's definition goes before any of that,
+    /// stopped FIRST and its files removed only once it has ended: a
+    /// transcript deleted under a live turn is written again the moment
+    /// the stopped claude exits — a stray file of its bookkeeping records
+    /// — while one deleted after the exit stays gone. A task's definition goes before any of that,
     /// so nothing can fire the task again while its runs are stopping.
     private func delete(_ doomed: [AgentSession], task: ScheduledAgentTask?,
                         starting: AgentRunner? = nil) {
@@ -1230,6 +1511,7 @@ final class AgentManager: ObservableObject {
             inFlightSends.removeValue(forKey: session.id)
             // Its Chat only record describes turns that no longer exist.
             config?.clearAgentChatOnlyTurns(for: session.id)
+            config?.clearAgentSessionSkillPicks(for: session.id)
             // And there is nothing left to open.
             config?.clearAgentSessionUnread([session.id])
         }
@@ -1287,6 +1569,7 @@ final class AgentManager: ObservableObject {
                 self.inFlightSends.removeValue(forKey: id)
                 self.externalInFlightSessions.remove(id)
                 self.config?.clearAgentChatOnlyTurns(for: id)
+                self.config?.clearAgentSessionSkillPicks(for: id)
                 self.config?.clearAgentSessionUnread([id])
                 doomedFiles.append(SessionFiles(agentKey: runner.agentKey,
                                                 sessionId: id, fileURL: runner.sessionFileURL))
@@ -1370,8 +1653,12 @@ final class AgentManager: ObservableObject {
             } else {
                 try? fm.removeItem(at: fileURL)
             }
-        default:
+        case "claude_code":
             if let fileURL { try? fm.removeItem(at: fileURL) }
+        default:
+            // A store whose layout SipAI does not know is left alone: a
+            // guess at what belongs to the session could delete another's.
+            break
         }
     }
 

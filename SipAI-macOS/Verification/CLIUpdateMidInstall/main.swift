@@ -13,18 +13,24 @@
 //     executable file where the tool should be. The row came back only
 //     at the next re-stat — up to a minute after the update had ended.
 //   * "Codex just updated to …" never appeared beside the logo. The
-//     monitor DID announce it — the replay below says so. The announcer
+//     monitor DID announce it — the replay below says so. The notices
 //     held it because a sheet was up, and every manual update is run
 //     from Settings: a centred sheet some 720 pt wide that, on the
 //     reporting 2560 pt window with a 440 pt sidebar, left the logo in
 //     plain view the whole time. The line played later, once, wherever
 //     the user was looking after closing Settings.
 //
+// And one reported later, on a slow connection: the tool vanished
+// fifteen minutes into an update all the same, with "Add more agents"
+// in the sidebar and Install beside it — the update's ceiling stopped
+// npm mid-download, and the wait for npm to put the tool back was bounded
+// by that same ceiling. Section 5b replays it with the ceiling in seconds.
+//
 // The replay drives the REAL monitor, extracted whole from
 // AgentCLIUpdates.swift by run.sh, through an npm-shaped update: a
 // "codex" whose `update` hands off to a helper that retires the link,
 // "downloads", and links the new binary — the order npm was logged
-// doing it. The sheet test measures the REAL `UpdateAnnouncer
+// doing it. The sheet test measures the REAL `SidebarNotices
 // .sheetCovers` on windows that are never ordered in, so nothing is
 // drawn; `SIPAI_UPDMID_GUI=1` adds a pass over a real SwiftUI sheet.
 //
@@ -128,44 +134,44 @@ let (edgeHost, edgeLockup) = host(width: 1150)
 let (bareHost, bareLockup) = host(width: 1400, sheet: false)
 let (arrivingHost, arrivingLockup) = host(width: 1400, sheetVisible: false)
 check("a wide window: Settings sits clear of the logo → not covered",
-      !UpdateAnnouncer.sheetCovers(wideLockup))
+      !SidebarNotices.sheetCovers(wideLockup))
 check("a narrow window: Settings lies over the logo → covered",
-      UpdateAnnouncer.sheetCovers(narrowLockup))
+      SidebarNotices.sheetCovers(narrowLockup))
 check("a sheet over any part of the line's area → covered",
-      UpdateAnnouncer.sheetCovers(edgeLockup))
+      SidebarNotices.sheetCovers(edgeLockup))
 check("reported up but not attached yet → counts as covered (the old rule, the safe side)",
-      UpdateAnnouncer.sheetCovers(bareLockup) && UpdateAnnouncer.sheetCovers(arrivingLockup))
+      SidebarNotices.sheetCovers(bareLockup) && SidebarNotices.sheetCovers(arrivingLockup))
 check("a lockup in no window cannot be seen → covered",
-      UpdateAnnouncer.sheetCovers(NSView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))))
+      SidebarNotices.sheetCovers(NSView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))))
 _ = (wideHost, narrowHost, edgeHost, bareHost, arrivingHost)
 
 // MARK: - 3. The line, with Settings up
 
-print("UpdateAnnouncer — a sheet holds a line only while it hides the logo")
+print("SidebarNotices — a sheet holds a notice only while it hides the logo")
 
 do {
-    let open = UpdateAnnouncer(duration: 0.2)
+    let open = SidebarNotices(scale: 0.04)
     open.setAppActive(true)
-    open.sheetCoversLockup = { UpdateAnnouncer.sheetCovers(wideLockup) }
+    open.sheetCoversLockup = { SidebarNotices.sheetCovers(wideLockup) }
     open.setSheetPresented(true)
-    open.announce("Codex just updated to 0.157.1")
+    open.post(.updated(name: "Codex", version: "0.157.1"))
     check("Settings up, the logo in view: the line shows when the update lands",
-          open.current?.text == "Codex just updated to 0.157.1")
+          open.current?.sentence == "Codex just updated to 0.157.1")
 
-    let hidden = UpdateAnnouncer(duration: 0.2)
+    let hidden = SidebarNotices(scale: 0.04)
     hidden.setAppActive(true)
-    hidden.sheetCoversLockup = { UpdateAnnouncer.sheetCovers(narrowLockup) }
+    hidden.sheetCoversLockup = { SidebarNotices.sheetCovers(narrowLockup) }
     hidden.setSheetPresented(true)
-    hidden.announce("Codex just updated to 0.157.1")
+    hidden.post(.updated(name: "Codex", version: "0.157.1"))
     check("Settings up over the logo: the line waits", hidden.current == nil)
     hidden.setSheetPresented(false)
     check("…and shows the moment Settings closes",
-          hidden.current?.text == "Codex just updated to 0.157.1")
+          hidden.current?.sentence == "Codex just updated to 0.157.1")
 
-    let unknown = UpdateAnnouncer(duration: 0.2)
+    let unknown = SidebarNotices(scale: 0.04)
     unknown.setAppActive(true)
     unknown.setSheetPresented(true)
-    unknown.announce("Codex just updated to 0.157.1")
+    unknown.post(.updated(name: "Codex", version: "0.157.1"))
     check("with no lockup to ask, a sheet still holds the line", unknown.current == nil)
 }
 
@@ -204,9 +210,10 @@ enum OnStop {
 
 /// A "codex" at `version`, whose `update` runs a helper the way `codex
 /// update` runs `npm install -g`: retire the link, take `gap` seconds,
-/// link a binary at `target`, then say so.
+/// link a binary at `target`, then say so. `landed`, when given, is the
+/// program the helper links instead — whatever npm actually put there.
 func installFakeCodex(version: String, gap: Double, target: String,
-                      onStop: OnStop = .rollback) {
+                      onStop: OnStop = .rollback, landed: String? = nil) {
     let helper = scratch.appendingPathComponent("npm-helper.sh").path
     try? """
     #!/bin/sh
@@ -239,10 +246,12 @@ func installFakeCodex(version: String, gap: Double, target: String,
     }
     let linger = onStop == .linger
         ? "sleep 30 &\necho $! > \"\(lingerPidFile)\"\n" : ""
+    let program = landed.map { "cp \"\($0)\" \"\(bin.path)/.codex-new\"" }
+        ?? "printf '#!/bin/sh\\n[ \"$1\" = \"--version\" ] && echo \"codex-cli \(target)\"\\n' > \"\(bin.path)/.codex-new\""
     try? """
     #!/bin/sh
     \(download)
-    printf '#!/bin/sh\\n[ "$1" = "--version" ] && echo "codex-cli \(target)"\\n' > "\(bin.path)/.codex-new"
+    \(program)
     chmod +x "\(bin.path)/.codex-new"
     mv "\(bin.path)/.codex-new" "\(codexPath)"
     rm -f "\(bin.path)/.codex-retired"
@@ -263,12 +272,12 @@ func waitFor(_ seconds: Double, _ done: @MainActor () -> Bool) async -> Bool {
 }
 
 let monitor = AgentCLIUpdateMonitor.shared
-let announcer = UpdateAnnouncer.shared
+let announcer = SidebarNotices.shared
 announcer.setAppActive(true)
-announcer.sheetCoversLockup = { UpdateAnnouncer.sheetCovers(wideLockup) }
+announcer.sheetCoversLockup = { SidebarNotices.sheetCovers(wideLockup) }
 announcer.setSheetPresented(true)
 var lines: [String] = []
-let lineWatch = announcer.$current.sink { if let line = $0 { lines.append(line.text) } }
+let lineWatch = announcer.$current.sink { if let line = $0 { lines.append(line.sentence) } }
 
 @MainActor
 func hasRow(_ key: String) -> Bool { monitor.installedAgents.contains { $0.key == key } }
@@ -288,7 +297,7 @@ let reloadsBefore = CodexCatalog.shared.reloads
 
 monitor.startUpdate(agentKey: "codex")
 check("pressed: the row is updating", monitor.statuses["codex"] == .updating)
-let retired = await waitFor(3) { AgentManager.binaryPath(for: "codex") == nil }
+let retired = await waitFor(8) { AgentManager.binaryPath(for: "codex") == nil }
 check("mid-update the binary really is missing (the hazard is live)", retired)
 // The re-stat that runs every minute, on app activation and when the
 // Updates pane appears — any of them can land in the download.
@@ -397,7 +406,7 @@ try? await Task.sleep(nanoseconds: 100_000_000)
 check("…and a version going DOWN is not announced", lines.count == linesBeforeCancel, "\(lines)")
 
 monitor.startUpdate(agentKey: "codex")
-_ = await waitFor(3) { AgentManager.binaryPath(for: "codex") == nil }
+_ = await waitFor(8) { AgentManager.binaryPath(for: "codex") == nil }
 try? await Task.sleep(nanoseconds: 300_000_000)
 monitor.cancelUpdate(agentKey: "codex")
 // The updater dies at once; the helper, like npm, finishes its download
@@ -438,7 +447,7 @@ installFakeCodex(version: "0.150.0", gap: 8, target: "0.157.1", onStop: .die)
 await monitor.refreshLocal()
 _ = await waitFor(5) { isBehind("codex") }
 monitor.startUpdate(agentKey: "codex")
-_ = await waitFor(3) { AgentManager.binaryPath(for: "codex") == nil }
+_ = await waitFor(8) { AgentManager.binaryPath(for: "codex") == nil }
 try? await Task.sleep(nanoseconds: 300_000_000)
 let diedAt = Date()
 monitor.cancelUpdate(agentKey: "codex")
@@ -473,6 +482,270 @@ if let pidText = try? String(contentsOfFile: lingerPidFile, encoding: .utf8),
    let pid = Int32(pidText.trimmingCharacters(in: .whitespacesAndNewlines)) {
     kill(pid, SIGKILL)
 }
+
+// MARK: - 5b. An update that outlasts the update ceiling
+
+// The ceiling is fifteen minutes in the app (run.sh makes it settable in
+// the extracted copy); seconds here — five: whole seconds past what a
+// stand-in updater takes to start and move the tool's link on a busy Mac
+// (a build or another harness running), so the ceiling asks its question
+// with the tool taken apart. A ceiling of two seconds asks before the
+// link has moved and stops an updater these replays need left running.
+// Each download outlasts the ceiling by whole seconds. The package npm
+// downloads for Codex is some 140 MB, so on a connection slower than
+// about 150 KB/s `codex update` is still downloading when the ceiling
+// comes. Stopping it then cannot stop npm — npm finishes the step in
+// flight and rolls the install back — and the wait for npm to put the
+// tool back was bounded by the same, already spent, ceiling: the update
+// ended with the tool's link still moved aside, and Codex went from the
+// sidebar ("Add more agents", Install beside it) while npm ran on.
+
+print("an update past the ceiling: a backstop for a hung updater, never a cut in npm's download")
+
+AgentCLIProbe.updateCeiling = 5
+
+/// Lets a helper left running by an older run of the monitor finish
+/// before the next replay starts, so the replays cannot see each other.
+@MainActor
+func settleCodex() async {
+    _ = await waitFor(16) { AgentManager.binaryPath(for: "codex") != nil }
+    try? await Task.sleep(nanoseconds: 500_000_000)
+}
+
+// The download outlasts the ceiling by whole seconds: a monitor that
+// stops it at the ceiling must end that update with the tool still
+// missing, or the row check below could pass on it by luck.
+installFakeCodex(version: "0.150.0", gap: 12, target: "0.157.1", onStop: .rollback)
+await monitor.refreshLocal()
+let slowBehind = await waitFor(5) { isBehind("codex") }
+let linesBeforeSlow = lines.count
+monitor.startUpdate(agentKey: "codex")
+var slowRowMissing = false
+let slowEnded = await waitFor(30) {
+    if !hasRow("codex") { slowRowMissing = true }
+    return !monitor.isUpdating("codex")
+}
+check("an npm download that runs past the ceiling keeps the tool's row the whole time",
+      slowBehind && slowEnded && !slowRowMissing,
+      "behind: \(slowBehind) ended: \(slowEnded) row missing at some point: \(slowRowMissing)")
+if case .upToDate(let installed, _) = monitor.statuses["codex"] {
+    check("…the updater is left to finish, and the new version lands",
+          installed.text == "0.157.1")
+} else {
+    check("…the updater is left to finish, and the new version lands", false,
+          "\(String(describing: monitor.statuses["codex"]))")
+}
+let slowSaid = await waitFor(3) { lines.count > linesBeforeSlow }
+check("…and is said", slowSaid && lines.last == "Codex just updated to 0.157.1", "\(lines)")
+await settleCodex()
+
+// A hung updater that has not touched the tool is what the ceiling is
+// for: stopping it leaves a working tool, and frees the row and every
+// message waiting on the update.
+let hungCodex = """
+#!/bin/sh
+case "$1" in
+  --version) echo "codex-cli 0.150.0" ;;
+  update) echo "Checking for updates..."
+          sleep 60 ;;
+esac
+"""
+try? hungCodex.write(toFile: codexPath, atomically: true, encoding: .utf8)
+chmod(codexPath, 0o755)
+await monitor.refreshLocal()
+_ = await waitFor(5) { isBehind("codex") }
+let hungStart = Date()
+monitor.startUpdate(agentKey: "codex")
+var hungRowMissing = false
+let hungEnded = await waitFor(20) {
+    if !hasRow("codex") { hungRowMissing = true }
+    return !monitor.isUpdating("codex")
+}
+let hungTook = Date().timeIntervalSince(hungStart)
+check("an updater that hangs before touching the tool is stopped at the ceiling",
+      hungEnded && hungTook < 12, String(format: "took %.1f s", hungTook))
+check("…the tool was never missing, and its row stays",
+      !hungRowMissing && hasRow("codex") && AgentManager.binaryPath(for: "codex") != nil)
+if case .updateFailed = monitor.statuses["codex"] {
+    check("…saying the update did not go through", true)
+} else {
+    check("…saying the update did not go through", false,
+          "\(String(describing: monitor.statuses["codex"]))")
+}
+
+// Cancel during a download that outlasts the ceiling: npm finishes the
+// download before it rolls back, however long that takes.
+installFakeCodex(version: "0.150.0", gap: 10, target: "0.157.1", onStop: .rollback)
+await monitor.refreshLocal()
+_ = await waitFor(5) { isBehind("codex") }
+let linesBeforeLongCancel = lines.count
+monitor.startUpdate(agentKey: "codex")
+_ = await waitFor(8) { AgentManager.binaryPath(for: "codex") == nil }
+try? await Task.sleep(nanoseconds: 300_000_000)
+monitor.cancelUpdate(agentKey: "codex")
+var longCancelRowMissing = false
+let longCancelEnded = await waitFor(25) {
+    if !hasRow("codex") { longCancelRowMissing = true }
+    return !monitor.isUpdating("codex")
+}
+check("a Cancel whose rollback outlasts the ceiling keeps the row until the tool is back",
+      longCancelEnded && !longCancelRowMissing && AgentManager.binaryPath(for: "codex") != nil,
+      "ended: \(longCancelEnded) row missing at some point: \(longCancelRowMissing)")
+check("…back on the old version, nothing announced",
+      monitor.installed["codex"]?.text == "0.150.0" && lines.count == linesBeforeLongCancel,
+      "\(String(describing: monitor.installed["codex"])) \(lines)")
+await settleCodex()
+
+// Cancel pressed once the ceiling has given way — twenty minutes into a
+// slow download, say: the update has no ceiling left, and Cancel is what
+// still ends it.
+installFakeCodex(version: "0.150.0", gap: 12, target: "0.157.1", onStop: .rollback)
+await monitor.refreshLocal()
+_ = await waitFor(5) { isBehind("codex") }
+let linesBeforeLateCancel = lines.count
+monitor.startUpdate(agentKey: "codex")
+_ = await waitFor(8) { AgentManager.binaryPath(for: "codex") == nil }
+try? await Task.sleep(nanoseconds: 6_500_000_000)
+check("past the ceiling, a download that has the tool taken apart is still running, the tool listed",
+      monitor.isUpdating("codex") && hasRow("codex")
+        && AgentManager.binaryPath(for: "codex") == nil,
+      "updating: \(monitor.isUpdating("codex")) row: \(hasRow("codex"))")
+monitor.cancelUpdate(agentKey: "codex")
+var lateCancelRowMissing = false
+let lateCancelEnded = await waitFor(25) {
+    if !hasRow("codex") { lateCancelRowMissing = true }
+    return !monitor.isUpdating("codex")
+}
+check("…a Cancel then ends it once npm has put the old version back, the row kept throughout",
+      lateCancelEnded && !lateCancelRowMissing && AgentManager.binaryPath(for: "codex") != nil
+        && monitor.installed["codex"]?.text == "0.150.0" && isBehind("codex")
+        && !monitor.cancelling.contains("codex") && lines.count == linesBeforeLateCancel,
+      "ended: \(lateCancelEnded) row missing at some point: \(lateCancelRowMissing) "
+        + "\(String(describing: monitor.statuses["codex"])) \(lines)")
+await settleCodex()
+
+AgentCLIProbe.updateCeiling = 15 * 60
+
+// MARK: - 5c. An update that lands without the tool's program
+
+// npm installs a tool's macOS program as an OPTIONAL package, and a
+// download of it that fails is no error to npm: it drops the package and
+// ends the install with exit 0, `codex update` says "Update ran
+// successfully!", and the launcher npm did link throws on every start.
+// Node's trace of that ends with Node's own version — "Node.js v22.12.0"
+// — which a version read taking the first dotted number of the output
+// reads as the tool's: the update is announced as done, and the row says
+// up to date over a tool that cannot start.
+
+print("an update that lands without the tool's program: npm says it worked, the tool cannot start")
+
+/// The launcher npm links for Codex, with its platform package missing:
+/// what it prints on every start, Node's trace in Node's shape (the
+/// file and line, the source, a caret, the error, the stack, Node's own
+/// version last), and its exit status.
+let brokenCodex = scratch.appendingPathComponent("codex-without-program").path
+try? """
+#!/bin/sh
+cat >&2 <<'TRACE'
+file:///usr/local/lib/node_modules/@openai/codex/bin/codex.js:108
+  throw new Error(
+        ^
+
+Error: Missing optional dependency @openai/codex-darwin-arm64. Reinstall Codex: npm install -g @openai/codex@latest
+    at findCodexExecutable (file:///usr/local/lib/node_modules/@openai/codex/bin/codex.js:108:9)
+    at file:///usr/local/lib/node_modules/@openai/codex/bin/codex.js:113:20
+    at ModuleJob.run (node:internal/modules/esm/module_job:343:25)
+
+Node.js v22.12.0
+TRACE
+exit 1
+""".write(toFile: brokenCodex, atomically: true, encoding: .utf8)
+chmod(brokenCodex, 0o755)
+let codexWords = "Missing optional dependency @openai/codex-darwin-arm64"
+
+// The same tool broken from Terminal: no update of SipAI's, a binary that
+// moved under the running app and now cannot start.
+installFakeCodex(version: "0.150.0", gap: 0, target: "0.150.0")
+await monitor.refreshLocal()
+_ = await waitFor(5) { isBehind("codex") }
+let linesBeforeTerminal = lines.count
+try? fm.removeItem(atPath: codexPath)
+try? fm.copyItem(atPath: brokenCodex, toPath: codexPath)
+await monitor.refreshLocal()
+check("broken from Terminal: no version read off the tool's error",
+      monitor.installed["codex"] == nil,
+      "\(String(describing: monitor.installed["codex"]))")
+check("…no line beside the logo", lines.count == linesBeforeTerminal, "\(lines)")
+switch monitor.statuses["codex"] {
+case .upToDate?, .updateAvailable?, .versionOnly?:
+    check("…and the row makes no claim about a version", false,
+          "\(String(describing: monitor.statuses["codex"]))")
+default:
+    check("…and the row makes no claim about a version", true)
+}
+// What the row says instead, and what a turn that cannot tell how to run
+// reads: the tool's own words, kept beside the version that was not read.
+if case .cannotStart(let said)? = monitor.statuses["codex"] {
+    check("…it says the tool cannot start, with the tool's own words for its details",
+          said.contains(codexWords), said)
+} else {
+    check("…it says the tool cannot start, with the tool's own words for its details", false,
+          "\(String(describing: monitor.statuses["codex"]))")
+}
+check("…and those words are published beside the versions",
+      monitor.startFailures["codex"]?.contains(codexWords) == true,
+      "\(String(describing: monitor.startFailures["codex"]))")
+
+installFakeCodex(version: "0.150.0", gap: 1, target: "0.157.1", landed: brokenCodex)
+await monitor.refreshLocal()
+let brokenBehind = await waitFor(5) { isBehind("codex") }
+// A notice still showing would swallow an identical one, so the line
+// below is judged with nothing beside the logo.
+_ = await waitFor(8) { announcer.current == nil }
+let linesBeforeBroken = lines.count
+monitor.startUpdate(agentKey: "codex")
+let brokenEnded = await waitFor(20) { !monitor.isUpdating("codex") }
+check("the update that lands a tool unable to start ends", brokenBehind && brokenEnded,
+      "behind: \(brokenBehind) ended: \(brokenEnded)")
+check("…and reads no version off the tool's error: not Node's 22.12.0",
+      monitor.installed["codex"] == nil,
+      "\(String(describing: monitor.installed["codex"]))")
+check("…announces nothing beside the logo",
+      lines.count == linesBeforeBroken, "\(lines)")
+if case .updateFailed(let tail) = monitor.statuses["codex"] {
+    check("…and the row says the update did not complete, the tool's own words in its details",
+          tail.contains(codexWords), tail)
+} else {
+    check("…and the row says the update did not complete, the tool's own words in its details",
+          false, "\(String(describing: monitor.statuses["codex"]))")
+}
+check("…the tool stays listed", hasRow("codex"))
+await monitor.refreshLocal()
+check("the next re-stat keeps it so: no version, no line",
+      monitor.installed["codex"] == nil && lines.count == linesBeforeBroken,
+      "\(String(describing: monitor.installed["codex"])) \(lines)")
+if case .updateFailed = monitor.statuses["codex"] {
+    check("…the failed update still on the row", true)
+} else {
+    check("…the failed update still on the row", false,
+          "\(String(describing: monitor.statuses["codex"]))")
+}
+
+// A working codex back in place — a reinstall from Terminal — and the row
+// follows it at the next re-stat: the version read again, the tool's
+// words and the failed update gone with the problem they described.
+installFakeCodex(version: "0.157.1", gap: 0, target: "0.157.1")
+await monitor.refreshLocal()
+check("a tool that starts again is read again: its version back, its words gone",
+      monitor.installed["codex"]?.text == "0.157.1" && monitor.startFailures["codex"] == nil,
+      "\(String(describing: monitor.installed["codex"])) \(String(describing: monitor.startFailures["codex"]))")
+if case .upToDate? = monitor.statuses["codex"] {
+    check("…and the row says up to date, the failed update gone from it", true)
+} else {
+    check("…and the row says up to date, the failed update gone from it", false,
+          "\(String(describing: monitor.statuses["codex"]))")
+}
+
 lineWatch.cancel()
 
 // MARK: - 6. A real SwiftUI sheet (opt in: two windows flash on screen)
@@ -524,7 +797,7 @@ if ProcessInfo.processInfo.environment["SIPAI_UPDMID_GUI"] == "1" {
         window.orderFrontRegardless()
         pumpRunLoop(1.5)
         let sheet = window.sheets.first { $0.isVisible }?.frame
-        let verdict = marker.map(UpdateAnnouncer.sheetCovers)
+        let verdict = marker.map(SidebarNotices.sheetCovers)
         for s in window.sheets { window.endSheet(s) }
         window.orderOut(nil)
         return (sheet, verdict)
@@ -553,7 +826,7 @@ print("structural")
 
 let model = source("SipAI/Models/AgentCLIUpdates.swift")
 let manager = source("SipAI/Models/AgentManager.swift")
-let notices = source("SipAI/Models/UpdateNotices.swift")
+let notices = source("SipAI/Models/SidebarNotices.swift")
 let sidebar = source("SipAI/Views/Sidebar/LeftSidebar.swift")
 let content = source("SipAI/Views/ContentView.swift")
 check("the sources are where they are expected",
@@ -584,19 +857,30 @@ if let refresh = finish.range(of: "refreshInstalledAgents()"),
 // A Cancel: the update stays open while npm puts the tool back.
 let update = body(of: "func update(agentKey key: String) -> Bool {", in: model)
 if let spawn = update.range(of: "await AgentCLIProbe.run("),
-   let wait = update.range(of: "await awaitRestore(of: key, byGroup: result.processGroup,"),
+   let wait = update.range(of: "await awaitRestore(of: key, byGroup: result.processGroup)"),
    let reread = update.range(of: "let after = await readInstalledNow(key)") {
     check("after the updater exits, the update waits out its group, then reads the version",
           spawn.lowerBound < wait.lowerBound && wait.lowerBound < reread.lowerBound)
 } else {
     check("after the updater exits, the update waits out its group, then reads the version", false)
 }
-check("…bounded by the update's own ceiling, counted from the spawn",
-      update.contains("until: startedAt.addingTimeInterval(AgentCLIProbe.updateCeiling))"))
-let restore = body(of: "private func awaitRestore(of key: String, byGroup group: pid_t?,", in: model)
+// The ceiling used to bound this wait too, counted from the spawn — so
+// an updater stopped AT the ceiling had no time left for npm to put the
+// tool back, and the tool went from every list while npm ran on.
+check("…on no clock of SipAI's: the wait is not handed a deadline",
+      update.contains("await awaitRestore(of: key, byGroup: result.processGroup)\n")
+      && !update.contains("startedAt.addingTimeInterval(AgentCLIProbe.updateCeiling)"))
+check("the update's ceiling gives way while the updater has the tool taken apart",
+      update.contains("ceilingYields: { AgentManager.binaryPath(for: key) == nil },"))
+let restore = body(of: "private func awaitRestore(of key: String, byGroup group: pid_t?)", in: model)
 check("the wait ends on a present binary or on a group with nobody left in it",
       restore.contains("if present || !AgentCLIProbe.groupIsAlive(group) { return }")
-      && restore.contains("guard let group else { return }"))
+      && restore.contains("guard let group else { return }")
+      && !restore.contains("deadline"))
+let drain = body(of: "nonisolated private static func drain(", in: model)
+check("the drain asks the ceiling's question once and, given way, never stops the child",
+      drain.contains("if ceilingYields?() == true {")
+      && drain.contains("deadline = nil"))
 check("…and never stats the binary on the MainActor",
       restore.contains("await Task.detached(priority: .utility) {"))
 let probeRun = body(of: "nonisolated static func run(binary: String,", in: model)
@@ -620,15 +904,15 @@ check("a sheet holds a line only while it covers the lockup",
 // mode of the main window that keeps the logo in view at the top of the
 // sidebar, so nothing about it may hold a line.
 check("the window says when a sheet is up",
-      content.contains(".onChange(of: showingModelSetup) { _, showing in\n            UpdateAnnouncer.shared.setSheetPresented(showing)\n        }")
+      content.contains(".onChange(of: showingModelSetup) { _, showing in\n            SidebarNotices.shared.setSheetPresented(showing)\n        }")
       && content.components(separatedBy: "setSheetPresented(").count == 2
       && content.range(of: #"showingSettings\b"#, options: .regularExpression) == nil)
 check("…and no longer calls a sheet a covered window",
       !content.contains("setMainWindowCovered") && !notices.contains("setMainWindowCovered"))
 check("the lockup installs the test over its own frame",
       sidebar.contains(".background(LockupSheetCheck())")
-      && sidebar.contains("UpdateAnnouncer.shared.sheetCoversLockup = { [weak view] in")
-      && sidebar.contains("view.map(UpdateAnnouncer.sheetCovers) ?? true"))
+      && sidebar.contains("SidebarNotices.shared.sheetCoversLockup = { [weak view] in")
+      && sidebar.contains("view.map(SidebarNotices.sheetCovers) ?? true"))
 check("…through a view every click passes through",
       sidebar.contains("override func hitTest(_ point: NSPoint) -> NSView? { nil }"))
 check("the test reads the window's own sheets",

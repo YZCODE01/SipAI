@@ -166,6 +166,7 @@ struct ChatAttachment: Identifiable {
     }
 
     var isText: Bool { if case .text = kind { return true }; return false }
+    var isImage: Bool { if case .image = kind { return true }; return false }
 }
 
 // Identity is the id alone. The synthesized conformances would compare
@@ -174,6 +175,282 @@ struct ChatAttachment: Identifiable {
 extension ChatAttachment: Hashable {
     static func == (a: ChatAttachment, b: ChatAttachment) -> Bool { a.id == b.id }
     func hash(into hasher: inout Hasher) { hasher.combine(id) }
+}
+
+/// What one attachment chip draws. The chat page's files and an agent
+/// session's go through the one chip (`AttachmentChipRow`), so the two
+/// composers cannot drift apart.
+struct AttachmentChipItem: Identifiable, Hashable {
+    let id: UUID
+    let icon: String
+    let name: String
+    /// The size, beside the name; nil draws none (a folder).
+    let detail: String?
+    /// The hover title: what the model will receive.
+    let hint: String
+}
+
+extension ChatAttachment {
+    /// The hover title states what the model will actually receive.
+    /// The distinction is invisible otherwise and it decides whether a
+    /// later turn still knows about the file.
+    var chipItem: AttachmentChipItem {
+        let icon: String
+        let hint: String
+        switch kind {
+        case .image:
+            icon = "photo"
+            hint = String(localized: "\(name) — \(sizeLabel), sent as an image with this message",
+                          comment: "Tooltip for an attached image chip")
+        case .pdf:
+            icon = "doc.richtext"
+            hint = String(localized: "\(name) — \(sizeLabel), sent as a document with this message",
+                          comment: "Tooltip for an attached PDF chip")
+        case .text:
+            icon = "doc.plaintext"
+            hint = String(localized: "\(name) — \(sizeLabel), its text is included in the message",
+                          comment: "Tooltip for an attached text file chip")
+        }
+        return AttachmentChipItem(id: id, icon: icon, name: name, detail: sizeLabel, hint: hint)
+    }
+}
+
+// MARK: - Agent sessions
+
+/// A file staged in an agent session's composer, drawn as the chat
+/// page's chip in every mode. Outside Chat only the agent reads a file
+/// itself, so the file is a REFERENCE: nothing is read here and only
+/// its path travels (`AttachmentInline.referenceMarker`). Chat only
+/// gives the agent no tool to open a path with, so there the file is
+/// LOADED — when it is attached, and when the composer switches to Chat
+/// only — by the chat page's rules, and its content travels.
+struct AgentAttachment: Identifiable {
+    let id = UUID()
+    /// The file as picked or dropped. A symlink is kept as one: the
+    /// agent opens the path, and the path is what the user chose.
+    let url: URL
+    let name: String
+    let isFolder: Bool
+    /// A folder the Finder shows as one file (an app, a Keynote deck).
+    let isPackage: Bool
+    /// Bytes on disk when attached; nil for a folder.
+    let byteCount: Int?
+    /// The file read and measured for a Chat only send; nil while it is
+    /// only a reference.
+    var loaded: ChatAttachment?
+
+    var reference: AttachmentInline.FileReference {
+        AttachmentInline.FileReference(name: name, path: url.path, isFolder: isFolder)
+    }
+}
+
+// Identity is the id, plus WHICH load it carries: a reference loaded on
+// the way into Chat only is a change the composer's stash must see. A
+// load compares by its own id, never by its payload.
+extension AgentAttachment: Hashable {
+    static func == (a: AgentAttachment, b: AgentAttachment) -> Bool {
+        a.id == b.id && a.loaded?.id == b.loaded?.id
+    }
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+}
+
+extension AgentAttachment {
+    /// Stage `picked` as a reference: what it is and how big, read off
+    /// the file system — never its contents.
+    static func reference(_ picked: URL) throws -> AgentAttachment {
+        let url = picked.standardizedFileURL
+        // A filename may legally contain newlines; the chip and the
+        // paperclip line are single-line surfaces.
+        let name = url.lastPathComponent
+            .components(separatedBy: .newlines).joined(separator: " ")
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            throw AttachmentError.unreadable(name: name)
+        }
+        // Read through a link: a link's own size is the length of the
+        // path it holds, and it is no package itself. The chip states
+        // what the agent will open.
+        let values = try? url.resolvingSymlinksInPath()
+            .resourceValues(forKeys: [.isPackageKey, .fileSizeKey])
+        return AgentAttachment(url: url, name: name, isFolder: isDirectory.boolValue,
+                               isPackage: values?.isPackage ?? false,
+                               byteCount: isDirectory.boolValue ? nil : values?.fileSize,
+                               loaded: nil)
+    }
+
+    /// The chip for the mode in force — it states what the send will do.
+    /// Under Chat only, the chat page's chip for the file read for it,
+    /// except that a PDF goes as its text: an agent message has no
+    /// document part. In every other mode only the path travels, whatever
+    /// was read for Chat only, so the chip names where the file is and
+    /// who reads it.
+    func chipItem(agentName: String, chatOnly: Bool) -> AttachmentChipItem {
+        if chatOnly, let loaded {
+            let item = loaded.chipItem
+            let hint = loaded.kind == .pdf
+                ? String(localized: "\(loaded.name) — \(loaded.sizeLabel), its text is included in the message",
+                         comment: "Tooltip for an attached text file chip")
+                : item.hint
+            return AttachmentChipItem(id: id, icon: item.icon, name: item.name,
+                                      detail: item.detail, hint: hint)
+        }
+        let path = (url.path as NSString).abbreviatingWithTildeInPath
+        if isFolder && !isPackage {
+            return AttachmentChipItem(
+                id: id, icon: "folder", name: name, detail: nil,
+                hint: String(localized: "\(path) — \(agentName) reads the folder itself",
+                             comment: "Tooltip for a folder attached to an agent session; placeholders are the folder's path and the agent label"))
+        }
+        return AttachmentChipItem(
+            id: id, icon: fileIcon, name: name,
+            detail: byteCount.map { ByteCountFormatter.string(fromByteCount: Int64($0), countStyle: .file) },
+            hint: String(localized: "\(path) — \(agentName) reads the file itself",
+                         comment: "Tooltip for a file attached to an agent session; placeholders are the file's path and the agent label"))
+    }
+
+    /// The chat page's icons, told apart by the file's type alone.
+    private var fileIcon: String {
+        let ext = url.pathExtension.lowercased()
+        if ChatAttachment.extraTextExtensions.contains(ext) { return "doc.plaintext" }
+        guard let type = UTType(filenameExtension: ext), !type.isDynamic else { return "doc" }
+        if type.conforms(to: .image) { return "photo" }
+        if type.conforms(to: .pdf) { return "doc.richtext" }
+        if type.conforms(to: .text) { return "doc.plaintext" }
+        return "doc"
+    }
+
+    /// What the composer does with the files the + or a drop hands it —
+    /// one rule for both doors, so a drop refuses what the picker
+    /// refuses, in the same words. `imageRefusal` says why an image
+    /// cannot go in this session's Chat only message, or nil where it
+    /// can.
+    static func staging(_ urls: [URL],
+                        onto current: [AgentAttachment],
+                        chatOnly: Bool,
+                        imageRefusal: (String) -> String?) -> (staged: [AgentAttachment], refused: [String]) {
+        var staged = current
+        var refused: [String] = []
+        var inlined = inlinedCharacters(in: current)
+        for picked in urls where picked.isFileURL {
+            guard staged.count < AttachmentLimits.maxPerMessage else {
+                refused.append(AttachmentError.tooMany.localizedDescription)
+                break
+            }
+            // The same file attached twice is one attachment — by path: a
+            // folder's URL may or may not end in a slash.
+            let path = picked.standardizedFileURL.path
+            guard !staged.contains(where: { $0.url.path == path }) else { continue }
+            do {
+                var file = try reference(picked)
+                if chatOnly {
+                    switch chatOnlyLoad(file, inlined: inlined, imageRefusal: imageRefusal) {
+                    case .loaded(let attachment):
+                        file.loaded = attachment
+                        inlined += attachment.isImage ? 0 : (attachment.text?.count ?? 0)
+                    case .refused(let why):
+                        refused.append(why)
+                        continue
+                    }
+                }
+                staged.append(file)
+            } catch {
+                refused.append(error.localizedDescription)
+            }
+        }
+        return (staged, refused)
+    }
+
+    /// Entering Chat only: each file staged as a reference is loaded now,
+    /// by the rules an attach in Chat only follows, and one that cannot
+    /// go in a Chat only message comes off with the reason the user
+    /// would have read attaching it there.
+    static func loadingForChatOnly(_ current: [AgentAttachment],
+                                   imageRefusal: (String) -> String?) -> (staged: [AgentAttachment], refused: [String]) {
+        var kept: [AgentAttachment] = []
+        var refused: [String] = []
+        // Counted over every file already loaded, wherever it stands in
+        // the row, so the files loaded now fit beside all of them.
+        var inlined = inlinedCharacters(in: current)
+        for var file in current {
+            if file.loaded == nil {
+                switch chatOnlyLoad(file, inlined: inlined, imageRefusal: imageRefusal) {
+                case .loaded(let attachment):
+                    file.loaded = attachment
+                    inlined += attachment.isImage ? 0 : (attachment.text?.count ?? 0)
+                case .refused(let why):
+                    refused.append(why)
+                    continue
+                }
+            }
+            kept.append(file)
+        }
+        return (kept, refused)
+    }
+
+    /// A scheduled task's prompt with the files staged in the composer.
+    /// The prompt is plain text in the task's file, edited in the task
+    /// card, so each file goes in as its path, one per line under the
+    /// words — what the agent opens on every run, and what the card can
+    /// show.
+    static func taskPrompt(_ words: String, with files: [AgentAttachment]) -> String {
+        let body = words.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !files.isEmpty else { return body }
+        let paths = files.map(\.url.path).joined(separator: "\n")
+        return body.isEmpty ? paths : body + "\n\n" + paths
+    }
+
+    private enum ChatOnlyLoad {
+        case loaded(ChatAttachment)
+        case refused(String)
+    }
+
+    /// Attached text that rides the message body, over files already
+    /// loaded. An image's bytes go a side channel and count for nothing.
+    private static func inlinedCharacters(in files: [AgentAttachment]) -> Int {
+        files.reduce(0) { sum, file in
+            guard let loaded = file.loaded, !loaded.isImage else { return sum }
+            return sum + (loaded.text?.count ?? 0)
+        }
+    }
+
+    /// The Chat only rules for one file: the chat page's (read, decoded
+    /// and measured now), an image only where the session has an image
+    /// channel, text that is there, and the one ceiling an agent message
+    /// adds — no more than `AttachmentInline.perMessageCharCap`
+    /// characters of attached text in the message, because the message
+    /// travels as one command-line argument.
+    private static func chatOnlyLoad(_ file: AgentAttachment, inlined: Int,
+                                     imageRefusal: (String) -> String?) -> ChatOnlyLoad {
+        if file.isFolder {
+            return .refused(String(
+                localized: "\(file.name) is a folder. Chat only attaches files, not folders.",
+                comment: "Attachment refused: a folder cannot travel in a Chat only message; placeholder is the folder's name"))
+        }
+        let attachment: ChatAttachment
+        do {
+            attachment = try ChatAttachment.load(file.url)
+        } catch {
+            return .refused(error.localizedDescription)
+        }
+        // An image travels the agent's own image channel (claude
+        // stream-json, codex `-i`, kimi's server) — except where there is
+        // none (a resumed kimi turn), where it is refused here rather than
+        // dropped at send.
+        if attachment.isImage {
+            if let why = imageRefusal(attachment.name) { return .refused(why) }
+            return .loaded(attachment)
+        }
+        // Text and PDF text ride the message body.
+        guard let text = attachment.text, !text.isEmpty else {
+            return .refused(AttachmentError.noText(name: attachment.name).localizedDescription)
+        }
+        guard inlined + text.count <= AttachmentInline.perMessageCharCap else {
+            return .refused(String(
+                localized: "\(attachment.name) would put this message over \(AttachmentInline.perMessageCharCap / 1000)k characters of attached text.",
+                comment: "Attachment refused on an agent session: the per-message inlined-text cap; placeholders are the file name and the cap in thousands"))
+        }
+        return .loaded(attachment)
+    }
 }
 
 // MARK: - Loading
@@ -199,7 +476,7 @@ extension ChatAttachment {
     ]
 
     /// Extensions macOS has no UTI for but that are plainly text.
-    private static let extraTextExtensions: Set<String> = [
+    fileprivate static let extraTextExtensions: Set<String> = [
         "md", "markdown", "csv", "tsv", "log", "env", "ini", "cfg", "conf",
         "toml", "yml", "yaml", "jsonl", "ndjson", "gitignore", "lock",
     ]
@@ -515,12 +792,5 @@ extension ChatAttachment {
     /// to the find pipeline too.
     static func strippingInlineBlocks(from content: String) -> String {
         AttachmentInline.stripping(content)
-    }
-
-    /// The names an inlined message carries, for a paperclip line on a
-    /// surface that stores no `files` key of its own (the agent
-    /// transcripts).
-    static func attachedNames(in content: String) -> [String] {
-        AttachmentInline.names(in: content)
     }
 }

@@ -80,17 +80,24 @@ enum CodexSessionFork {
     /// hydrated history is not read — the rollout is. No `cwd`, `model`
     /// or sandbox override: the branch inherits its parent's, and every
     /// later send passes the composer's chips on the command line as it
-    /// does for any session.
-    static func request(threadId: String, lastTurnId: String) -> String? {
+    /// does for any session. The SPEED is the exception: a fork that
+    /// names none takes codex's config, never the parent's, and codex then
+    /// keeps it for the branch (`CodexKeptSpeed`), so `serviceTier`
+    /// carries the parent's saved speed (`CodexKeptSpeed.forkTier`); nil
+    /// leaves it to codex.
+    static func request(threadId: String, lastTurnId: String,
+                        serviceTier: String? = nil) -> String? {
+        var params: [String: Any] = [
+            "threadId": threadId,
+            "lastTurnId": lastTurnId,
+            "excludeTurns": true,
+        ]
+        if let serviceTier { params["serviceTier"] = serviceTier }
         let body: [String: Any] = [
             "jsonrpc": "2.0",
             "id": CodexAppServerCall.answerId,
             "method": "thread/fork",
-            "params": [
-                "threadId": threadId,
-                "lastTurnId": lastTurnId,
-                "excludeTurns": true,
-            ] as [String: Any],
+            "params": params,
         ]
         guard JSONSerialization.isValidJSONObject(body),
               let data = try? JSONSerialization.data(withJSONObject: body)
@@ -128,10 +135,14 @@ enum CodexSessionFork {
     /// The turn id of the newest user record whose cleaned text matches
     /// `text` — for LIVE rows, which never went through the rollout
     /// reader and carry no handle. The same identification
-    /// `AgentSessionView.trimmedForInFlight` makes between a live event
-    /// and its record; newest-first, so a repeated prompt branches at
-    /// the one on screen. Reads files; call it off the main thread.
+    /// `TranscriptSeam.cut` makes between a live event and its record;
+    /// newest-first, so a repeated prompt branches at the one on screen.
+    /// A message of attached files alone has no words to match: its
+    /// record is the one with no words that names `files`, the live
+    /// row's own — what the reader puts on the paperclip line.
+    /// Reads files; call it off the main thread.
     static func resolveCutPoint(matchingUserText text: String,
+                                attachedFiles files: [String] = [],
                                 in rollout: URL,
                                 root: URL = CodexSessionScanner.sessionRoot,
                                 skippingNewest skip: Int = 0) -> String? {
@@ -139,16 +150,14 @@ enum CodexSessionFork {
         // record spell the text one way.
         let wanted = CodexSessionScanner.strippedTaskMarker(text)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !wanted.isEmpty else { return nil }
-        let attributes = try? FileManager.default
-            .attributesOfItem(atPath: rollout.path)
-        let size = (attributes?[.size] as? NSNumber)?.uint64Value
+        guard !wanted.isEmpty || !files.isEmpty else { return nil }
+        let size = AgentSessionScanner.contentSize(of: rollout)
         var ownMatches = 0
         for budget in [256 * 1024, 4 * 1024 * 1024, 64 * 1024 * 1024] {
             guard let window = AgentSessionScanner.boundedTail(of: rollout,
                                                                budget: budget)
             else { return nil }
-            let scan = cutPointScan(text: wanted,
+            let scan = cutPointScan(text: wanted, files: files,
                                     lines: window.split(separator: "\n").map(String.init),
                                     skippingNewest: skip)
             ownMatches = scan.matches
@@ -164,7 +173,7 @@ enum CodexSessionFork {
         // newest last, skipping what the own file already accounted for.
         if let origin = CodexSessionScanner.forkOrigin(of: rollout) {
             let scan = cutPointScan(
-                text: wanted,
+                text: wanted, files: files,
                 lines: CodexSessionScanner.inheritedLines(
                     for: origin, budget: 64 * 1024 * 1024, root: root),
                 skippingNewest: max(0, skip - ownMatches))
@@ -178,14 +187,17 @@ enum CodexSessionFork {
     /// the record and is only known walking forward. The answer is the
     /// newest match less the ones to skip; `handle` nil on a found
     /// match means that record's turn opened above the window.
-    private static func cutPointScan(text: String, lines: [String],
+    private static func cutPointScan(text: String, files: [String], lines: [String],
                                      skippingNewest skip: Int)
     -> (found: Bool, handle: String?, matches: Int) {
         var decoder = CodexSessionScanner.RolloutDecoder()
         var matches: [String?] = []
         for line in lines {
             for item in decoder.items(forLine: line) {
-                if case .userText(let body) = item.kind, body == text {
+                // No words: every record of files alone reads the same,
+                // and the files are what tell this one apart.
+                if case .userText(let body) = item.kind, body == text,
+                   !text.isEmpty || item.attachedFiles == files {
                     matches.append(item.recordUuid)
                 }
             }
@@ -223,11 +235,17 @@ enum CodexSessionFork {
     /// `nothingToBranch` when it is the first turn (the caller starts a
     /// fresh session instead) and `writeFailed` with codex's own words
     /// when codex declines.
+    ///
+    /// `keepsSpeed`: the installed codex keeps a thread's speed
+    /// (`CodexKeptSpeed.keeps`), so the branch is forked at its parent's.
     static func fork(rollout: URL, threadId: String, cutAtTurnId: String,
-                     binary: String,
+                     binary: String, keepsSpeed: Bool = false,
                      root: URL = CodexSessionScanner.sessionRoot) async throws -> Result {
-        let sequence = await Task.detached(priority: .userInitiated) {
-            turnSequence(of: rollout, root: root)
+        let (sequence, parentSpeed) = await Task.detached(priority: .userInitiated) {
+            () -> ([String], CodexKeptSpeed.Saved) in
+            let saved = CodexSessionScanner.savedServiceTier(of: rollout)
+            return (turnSequence(of: rollout, root: root),
+                    saved.found ? .tier(saved.tier) : .unknown)
         }.value
         guard sequence.contains(cutAtTurnId) else {
             throw ForkError.cutPointNotFound
@@ -235,7 +253,8 @@ enum CodexSessionFork {
         guard let last = previousTurn(before: cutAtTurnId, in: sequence) else {
             throw ForkError.nothingToBranch
         }
-        guard let line = request(threadId: threadId, lastTurnId: last) else {
+        guard let line = request(threadId: threadId, lastTurnId: last,
+                                 serviceTier: keepsSpeed ? CodexKeptSpeed.forkTier(parentSpeed) : nil) else {
             throw ForkError.writeFailed("could not build the request")
         }
         switch outcome(from: await CodexAppServerCall.run(binary: binary,

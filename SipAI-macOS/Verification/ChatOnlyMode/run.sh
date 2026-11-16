@@ -24,8 +24,8 @@
 #    `--prompt`, outlives kimi's server, and must be restored; a Chat
 #    only turn records a snapshot of its kept web tools alone, so the
 #    name source is the newest ORDINARY turn's; the server refuses `disabled_tools`
-#    without `profile` + `model`, and refuses `--prompt` on a session it
-#    created until its first prompt.
+#    without `profile` + `model`, and a session it created and still
+#    holds takes no recorded turn from another process's `--prompt`.
 #  * The GATES. The row is offered only where the installed CLI names
 #    the switches; a saved pick below the gate is ignored.
 #  * The READERS. An inlined attachment block is stripped from every
@@ -108,9 +108,14 @@ if ! swiftc -O -o "$out/chatonly" \
   "$src/SipAI/Models/KimiToolPolicy.swift" \
   "$src/SipAI/Models/KimiWebTurn.swift" \
   "$src/SipAI/Models/PlanUsage.swift" \
+  "$src/SipAI/Models/KimiMembership.swift" \
+  "$src/SipAI/Models/CLIStartFailure.swift" \
+  "$src/SipAI/Models/SkillModel.swift" \
+  "$src/SipAI/Models/ShellCommands.swift" \
   "$src/SipAI/Models/AgentSession.swift" \
   "$src/SipAI/Models/AgentEventParsing.swift" \
   "$src/SipAI/Models/CodexSessions.swift" \
+  "$src/SipAI/Models/CodexRecordedTools.swift" \
   "$src/SipAI/Models/CodexEventParsing.swift" \
   "$src/SipAI/Models/KimiSessions.swift" \
   "$src/SipAI/Models/KimiEventParsing.swift" \

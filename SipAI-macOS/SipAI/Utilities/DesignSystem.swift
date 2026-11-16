@@ -94,12 +94,6 @@ enum SipDesign {
         dark:  NSColor(srgbRed: 30/255,  green: 45/255,  blue: 80/255,  alpha: 1)
     )
 
-    /// Background for circular feature icons. #EBF3FE in light.
-    static let iconCircleBg = dyn("SipAIIconBg",
-        light: NSColor(srgbRed: 235/255, green: 243/255, blue: 254/255, alpha: 1),
-        dark:  NSColor(srgbRed: 30/255,  green: 45/255,  blue: 80/255,  alpha: 1)
-    )
-
     /// Neutral chip / badge background. #F0F0F0 in light.
     static let chipBg = dyn("SipAIChipBg",
         light: NSColor(srgbRed: 240/255, green: 240/255, blue: 240/255, alpha: 1),
@@ -161,11 +155,12 @@ enum SipDesign {
 
 // MARK: - Font size tiers
 
-/// User-selectable font sizing (Settings → Display → Font Size). Applies
-/// to sidebar list names and chat/agent content. `scale` multiplies the
-/// base sizes the views were designed with ("Small" IS the original
-/// design); line spacing grows with the tier, and Large-text mode adds a
-/// full extra line height — i.e. double line spacing.
+/// User-selectable sizing (Settings → Display → Zoom, and View → Zoom In /
+/// Zoom Out / Actual Size, which move the same setting one size at a
+/// time). Applies to sidebar list names and chat/agent content. `scale`
+/// multiplies the base sizes the views were designed with ("Small" IS the
+/// original design); line spacing grows with the tier, and Large-text mode
+/// adds a full extra line height — i.e. double line spacing.
 enum FontTier: String, CaseIterable, Identifiable {
     case small
     case standard = "default"
@@ -202,6 +197,25 @@ enum FontTier: String, CaseIterable, Identifiable {
         case .larger: return 0.40
         case .xlarge: return 1.2
         }
+    }
+
+    // MARK: View → Zoom In / Zoom Out / Actual Size
+
+    /// One size larger — what Zoom In goes to — or nil at the largest,
+    /// where the menu item is greyed out.
+    var zoomedIn: FontTier? { stepped(by: 1) }
+
+    /// One size smaller, or nil at the smallest.
+    var zoomedOut: FontTier? { stepped(by: -1) }
+
+    /// What Actual Size goes back to.
+    static let actualSize: FontTier = .standard
+
+    private func stepped(by delta: Int) -> FontTier? {
+        let all = Self.allCases
+        guard let at = all.firstIndex(of: self) else { return nil }
+        let next = at + delta
+        return all.indices.contains(next) ? all[next] : nil
     }
 }
 
@@ -432,7 +446,15 @@ extension EnvironmentValues {
 // MARK: - Spell checking
 
 /// Spelling squiggles for the app's own NSTextView surfaces, driven by
-/// `DisplaySettings.spellCheck`. Contract in CLAUDE.md, "Typo check".
+/// `DisplaySettings.spellCheck`, and called from both `makeNSView` and
+/// `updateNSView` so the switch reaches a text view already standing.
+/// Grammar checking is ON by default on an NSTextView and starts drawing
+/// the moment continuous checking does, so it is pinned off here: the
+/// switch means spelling and nothing else. The flip goes through
+/// `toggleContinuousSpellChecking(nil)`, the Edit ▸ Spelling action,
+/// because that clears the marks already drawn when the switch goes off;
+/// the state compare keeps it idempotent under `updateNSView`'s
+/// per-keystroke calls.
 @MainActor
 enum TextInputSpellChecking {
     static func apply(_ enabled: Bool, to textView: NSTextView) {
@@ -629,8 +651,10 @@ extension View {
 /// * `apply` resolves a persisted id order against whatever items
 ///   actually exist right now — ordered ids first (in their saved
 ///   positions), never-ordered items after them in their natural order.
-///   A section that comes back (codex reinstalled) or a brand-new group
-///   simply appends; a stale id in the saved order is ignored.
+///   A brand-new group simply appends; a stale id in the saved order is
+///   ignored. The top-level sections save every section's place, the
+///   ones not on screen included, so a section that comes back (shown
+///   again, codex reinstalled) returns to its place.
 /// * `SidebarReorderDropDelegate` is the per-row drop target. The drag
 ///   payload is a namespaced string ("section:notes",
 ///   "chatgroup:<slug>", …), so the payload itself says which surface
@@ -664,11 +688,27 @@ enum SidebarOrdering {
             }
             .map(\.element)
     }
+
+    /// The order once `dragged` is dropped on `target`: it takes the
+    /// target's place, after it when moving down and before it when
+    /// moving up. Every other id keeps its place, an id not on screen
+    /// included. nil when nothing moves.
+    static func moving(_ order: [String], dragged: String, onto target: String) -> [String]? {
+        guard dragged != target,
+              let from = order.firstIndex(of: dragged),
+              let to = order.firstIndex(of: target) else { return nil }
+        var moved = order
+        moved.insert(moved.remove(at: from), at: to)
+        return moved
+    }
 }
 
 /// See `SidebarOrdering`. `order`'s getter must return the ids in their
 /// CURRENT displayed order (resolved, not just the persisted array —
 /// items the user never dragged are in there too); its setter persists.
+/// It may also hold ids that are not on screen (a hidden section): a
+/// move leaves them where they are, which is the place they come back
+/// to.
 struct SidebarReorderDropDelegate: DropDelegate {
     /// Bare id of the row this delegate sits on (no prefix).
     let itemId: String
@@ -709,20 +749,17 @@ struct SidebarReorderDropDelegate: DropDelegate {
             }
             let dragged = String(payload.dropFirst(payloadPrefix.count))
             Task { @MainActor in
-                guard dragged != itemId,
-                      let from = order.firstIndex(of: dragged),
-                      let to = order.firstIndex(of: itemId) else {
+                guard let moved = SidebarOrdering.moving(order, dragged: dragged, onto: itemId) else {
                     #if DEBUG
                     SidebarDropDiagnostics.log("dropEntered on \(payloadPrefix)\(itemId): dragged=\(dragged) from=\(String(describing: order.firstIndex(of: dragged))) to=\(String(describing: order.firstIndex(of: itemId))) → no move")
                     #endif
                     return
                 }
                 #if DEBUG
-                SidebarDropDiagnostics.log("dropEntered on \(payloadPrefix)\(itemId): moving \(dragged) \(from)→\(to)")
+                SidebarDropDiagnostics.log("dropEntered on \(payloadPrefix)\(itemId): moving \(dragged) \(order.firstIndex(of: dragged) ?? -1)→\(order.firstIndex(of: itemId) ?? -1)")
                 #endif
                 withAnimation(.easeInOut(duration: 0.16)) {
-                    order.move(fromOffsets: IndexSet(integer: from),
-                               toOffset: to > from ? to + 1 : to)
+                    order = moved
                 }
             }
         }
@@ -1019,6 +1056,195 @@ extension View {
     }
 }
 
+// MARK: - Links
+
+/// A link in the app's link style: blue and underlined, a shade darker
+/// and the pointing hand under the pointer; grey, and no hand, while
+/// disabled. The hand is SwiftUI's own link pointer: SwiftUI's hosting
+/// view puts the arrow back the next time it updates the cursor, so a
+/// hand pushed from an `onHover` does not stay.
+struct LinkButton: View {
+    let title: String
+    var size: CGFloat = 12
+    /// An arrow after the words: the link leaves SipAI for the browser.
+    var leavesApp = false
+    let action: () -> Void
+
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                Text(verbatim: title)
+                    .underline()
+                    .sipFont(size)
+                if leavesApp {
+                    Image(systemName: "arrow.up.right")
+                        .sipFont(size - 3, weight: .semibold)
+                }
+            }
+            .foregroundColor(!isEnabled ? .secondary : hovered ? SipDesign.blueHover : SipDesign.blue)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovered = $0 }
+        .pointerStyle(isEnabled ? .link : nil)
+    }
+}
+
+/// Where a Text's links are drawn, so each can show the pointing hand.
+/// SwiftUI draws a link inside a Text with no hover feedback and offers no
+/// pointer for part of a Text, so `linkPointers` lays a clear region over
+/// each link — found in the Text's own layout, by the UTF-16 offsets it
+/// reports per glyph — carrying the link pointer and opening the link
+/// through the environment's `openURL`, as the Text itself would. Over a
+/// selectable Text the regions sit above its selection field: the pointer
+/// over a link is then SwiftUI's to set, and everywhere else the field
+/// keeps its I-beam and its selection. A selection cannot start on a link
+/// — a click there opens it.
+enum LinkHotspots {
+    struct Span: Equatable {
+        let range: Range<Int>
+        let url: URL
+    }
+
+    struct Hotspot: Equatable {
+        let rect: CGRect
+        let url: URL
+    }
+
+    /// Each link's UTF-16 range in the Text's string. A link whose runs
+    /// differ in style (bold inside it) is one span.
+    nonisolated static func spans(in text: AttributedString) -> [Span] {
+        var spans: [Span] = []
+        for (url, range) in text.runs[\.link] {
+            guard let url else { continue }
+            let start = String(text.characters[text.startIndex..<range.lowerBound]).utf16.count
+            let length = String(text.characters[range]).utf16.count
+            spans.append(Span(range: start..<(start + length), url: url))
+        }
+        return spans
+    }
+
+    /// One region per link per line, moved by the layout's `origin`.
+    nonisolated static func hotspots(in layout: Text.Layout, origin: CGPoint, spans: [Span]) -> [Hotspot] {
+        guard !spans.isEmpty else { return [] }
+        var hotspots: [Hotspot] = []
+        for line in layout {
+            var open: (rect: CGRect, span: Int)?
+            func close() {
+                if let o = open {
+                    hotspots.append(Hotspot(rect: o.rect.offsetBy(dx: origin.x, dy: origin.y), url: spans[o.span].url))
+                }
+                open = nil
+            }
+            for run in line {
+                for glyph in run.indices {
+                    let slice = run[glyph]
+                    guard let index = slice.characterIndices.first,
+                          case let offset = firstCharacter.distance(to: index),
+                          let span = spans.firstIndex(where: { $0.range.contains(offset) })
+                    else { close(); continue }
+                    let rect = slice.typographicBounds.rect
+                    if let o = open, o.span == span {
+                        open = (o.rect.union(rect), span)
+                    } else {
+                        close()
+                        open = (rect, span)
+                    }
+                }
+            }
+            close()
+        }
+        return hotspots
+    }
+
+    /// `CharacterIndex` is a frozen struct holding one Int, and its public
+    /// interface offers only distances between indices: the first
+    /// character's index is the all-zero bit pattern.
+    private nonisolated static let firstCharacter = unsafeBitCast(0, to: Text.Layout.CharacterIndex.self)
+}
+
+/// What one link's region does: whether a click follows the link (with
+/// the pointing hand), and what the region says on hover. Read per link
+/// from the environment, so a view drawing links of a kind of its own can
+/// say; every other link follows and says nothing.
+struct LinkHotspotBehavior: Equatable {
+    var follows = true
+    var help: String?
+}
+
+private struct LinkHotspotBehaviorKey: EnvironmentKey {
+    static let defaultValue: (URL) -> LinkHotspotBehavior = { _ in LinkHotspotBehavior() }
+}
+
+extension EnvironmentValues {
+    var linkHotspotBehavior: (URL) -> LinkHotspotBehavior {
+        get { self[LinkHotspotBehaviorKey.self] }
+        set { self[LinkHotspotBehaviorKey.self] = newValue }
+    }
+}
+
+private struct LinkPointers: ViewModifier {
+    let spans: [LinkHotspots.Span]
+    @Environment(\.openURL) private var openURL
+    @Environment(\.linkHotspotBehavior) private var behavior
+
+    func body(content: Content) -> some View {
+        content.overlayPreferenceValue(Text.LayoutKey.self) { layouts in
+            GeometryReader { proxy in
+                let spots = layouts.flatMap {
+                    LinkHotspots.hotspots(in: $0.layout, origin: proxy[$0.origin], spans: spans)
+                }
+                ForEach(Array(spots.enumerated()), id: \.offset) { _, spot in
+                    let does = behavior(spot.url)
+                    // A link that is not followed still takes its click, so
+                    // the Text under the region does not follow it either.
+                    // The hover text goes on the region's own frame: after
+                    // `position` the view spans the whole Text.
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .frame(width: spot.rect.width, height: spot.rect.height)
+                        .modifier(LinkHotspotHelp(text: does.help))
+                        .position(x: spot.rect.midX, y: spot.rect.midY)
+                        .pointerStyle(does.follows ? .link : nil)
+                        .onTapGesture { if does.follows { openURL(spot.url) } }
+                        .accessibilityHidden(true)
+                }
+            }
+        }
+    }
+}
+
+private struct LinkHotspotHelp: ViewModifier {
+    let text: String?
+
+    func body(content: Content) -> some View {
+        if let text {
+            content.help(Text(verbatim: text))
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    /// The pointing hand over each link in `text`, where this view draws
+    /// `text` as one Text. Apply it after `.textSelection`, and inside any
+    /// `.environment(\.openURL, …)` the links are meant to go through.
+    /// A text without links gets nothing.
+    @ViewBuilder
+    func linkPointers(_ text: AttributedString) -> some View {
+        let spans = LinkHotspots.spans(in: text)
+        if spans.isEmpty {
+            self
+        } else {
+            modifier(LinkPointers(spans: spans))
+        }
+    }
+}
+
 // MARK: - Row plus button (+)
 
 /// The + action button on sidebar headers (folder session groups, the
@@ -1144,12 +1370,20 @@ struct SidebarShowMoreRow: View {
     }
 }
 
-// MARK: - Row ellipsis menu (⋮)
+// MARK: - Row ellipsis menu (…)
 
-/// The three-vertical-dot action button on sidebar rows. Sits OUTSIDE
-/// the row's own Button (SwiftUI nested buttons both fire), highlights
-/// on hover like every other sidebar affordance, and opens the menu
-/// items the caller supplies — Delete / Rename / Move to, typically.
+/// The three-dot (…) action button on sidebar rows. Sits OUTSIDE the
+/// row's own Button (SwiftUI nested buttons both fire), highlights on
+/// hover like every other sidebar affordance, and opens the menu items
+/// the caller supplies — Delete / Rename / Move to, typically.
+///
+/// The label is drawn by SwiftUI (`.menuStyle(.button)` with a plain
+/// button style), so its glyph, its 18-pt frame and its hover fill are
+/// what shows, and the whole box takes the click.
+/// `.menuStyle(.borderlessButton)` is a pop-up button AppKit draws
+/// itself: it ignores the label's font, colour, frame and fill, so
+/// nothing fills under the pointer and only AppKit's own smaller button
+/// takes the click.
 struct RowEllipsisMenu<Items: View>: View {
     @ViewBuilder var items: () -> Items
     @State private var hovered: Bool = false
@@ -1158,10 +1392,7 @@ struct RowEllipsisMenu<Items: View>: View {
         Menu {
             items()
         } label: {
-            // SF Symbols has no vertical ellipsis; rotate the
-            // horizontal one.
             Image(systemName: "ellipsis")
-                .rotationEffect(.degrees(90))
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(hovered ? .primary : .secondary)
                 .frame(width: 18, height: 18)
@@ -1171,15 +1402,16 @@ struct RowEllipsisMenu<Items: View>: View {
                 )
                 .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
         .menuIndicator(.hidden)
         .fixedSize()
         .onHover { hovered = $0 }
         .help(String(localized: "Actions",
-                     comment: "Tooltip for the per-row ⋮ actions menu"))
+                     comment: "Tooltip for the per-row … actions menu"))
         .accessibilityLabel(String(
             localized: "Row actions",
-            comment: "Accessibility label for the per-row ⋮ actions menu"))
+            comment: "Accessibility label for the per-row … actions menu"))
     }
 }
 

@@ -15,13 +15,26 @@
 // MainActor via DispatchQueue.main.async before writing, since the
 // listener/handler threads are off-main.
 //
-// "Allow Always" / "Deny Always" write a per-scope
-// cache[(toolName, signature)] → allow/deny that is consulted before a
-// new request ever reaches the UI (`lookupCache`), so a remembered
-// decision answers immediately without a card.
+// "Allow Always" hands claude back its OWN suggestion for the call — the
+// rule its terminal offers as "don't ask again for …" — so claude applies
+// and matches it itself (`ClaudePermissionUpdate`). The suggestions reach
+// this bridge through a PermissionRequest hook (approver.py run with
+// `--permission-context`), since the approve tool is never given them.
+// Claude runs that hook AT THE SAME TIME as it asks the approve tool, so
+// the two arrive in either order and are matched up here
+// (`fileSuggestions`). With no suggestion for a call, and for "Deny
+// Always", the decision is remembered here instead: a per-scope
+// cache[(toolName, signature)] → allow/deny consulted before a new
+// request ever reaches the UI (`lookupCache`), which answers the very
+// same call without a card.
+//
+// An MCP server's own request for input — a form, a link to open — comes
+// the same way from claude's Elicitation hook (approver.py run with
+// `--elicitation`), and is drawn as codex's are (`McpElicitation`).
 
 import Foundation
 import AppKit
+import CryptoKit
 import UserNotifications
 
 // MARK: - Verdict + ApprovalRequest
@@ -44,17 +57,110 @@ enum MCPVerdict: String {
     }
 }
 
-/// One in-flight approval awaiting the user's click. Reference type —
-/// the socket-handler thread creates it, hands it to the bridge which
-/// posts it on MainActor, and then blocks on `semaphore` until the UI
-/// calls `resolve(requestId:verdict:)`. The verdict + semaphore fields
-/// are internal so the handler thread can read them after signalling.
+/// What becomes of a question an agent asks in the middle of a turn —
+/// decided by the turn that asked it (`MCPBridge.questionPolicy`).
+enum MCPQuestionPolicy: Equatable {
+    /// Show the question card; the turn waits for the user.
+    case ask
+    /// Non-stop is on for the turn: declined at once with
+    /// `AgentQuestionReplies.nonStop`.
+    case nonStop
+    /// No turn of this app can take an answer: declined with
+    /// `AgentQuestionReplies.unanswerable`.
+    case unanswerable
+}
+
+/// One in-flight approval awaiting the user's click. Reference type.
+///
+/// Two front ends ask for one:
+///
+/// * claude's approver: the socket-handler thread creates it, hands it to
+///   the bridge which posts it on MainActor, and then blocks on
+///   `semaphore` until the UI calls `resolve(requestId:verdict:)`. The
+///   verdict + semaphore fields are internal so the handler thread can
+///   read them after signalling.
+/// * an agent's own interactive protocol (codex's app-server, kimi's
+///   ACP): its turn driver creates it with a `presentation` and a
+///   `respond` closure, and the bridge calls that closure exactly once
+///   with what became of the card (`CardResolution`).
 final class MCPApprovalRequest: Identifiable, @unchecked Sendable {
-    let id: String                // request_id from the wire
+    let id: String                // request_id from the wire, or "<agent>:<uuid>" for another front end
     let sessionId: String?        // from SIPAI_SESSION_ID env when it's a dashed UUID
     let taskUuid: String?         // from SIPAI_SESSION_ID env when it's 32 hex chars
     let toolName: String
     let toolInput: [String: Any]
+
+    /// The agent whose turn asked.
+    let agentKey: String
+
+    /// How a request from an agent's own front end is drawn; nil for
+    /// claude's approver, whose card follows from the tool name and input.
+    let presentation: CardPresentation?
+
+    /// Whether the question policy decides this request — a question, a
+    /// question whose form could not be read, or what an MCP server asks
+    /// itself: a link to open, a yes-or-no. Non-stop declines them all; an
+    /// approval waits with or without it.
+    let asksQuestion: Bool
+
+    /// Whether the turn that asked waits on this card. False for a question
+    /// an agent asked without stopping (codex's `request_user_input_async`):
+    /// the agent works on while it is up, so it never holds the turn clock
+    /// (`AgentRunner.syncUserWait`). Claude's approver asks nothing that
+    /// way.
+    let turnWaits: Bool
+
+    /// Hands what became of the card back to the agent's own front end —
+    /// exactly once, on the main actor. nil for claude's approver, which
+    /// is answered over its socket once `semaphore` is signalled.
+    fileprivate let respond: (@MainActor (CardResolution) -> Void)?
+
+    /// Set by the bridge as the request is answered; a second answer — a
+    /// double click, Stop racing a click — finds it set and does nothing.
+    fileprivate var delivered = false
+
+    /// Whether this request came from claude's approver.
+    var isFromApprover: Bool { presentation == nil }
+
+    var permissionContent: PermissionCardContent? {
+        if case .permission(let content) = presentation { return content }
+        return nil
+    }
+
+    var planContent: PlanCardContent? {
+        if case .plan(let content) = presentation { return content }
+        return nil
+    }
+
+    var linkContent: LinkCardContent? {
+        if case .link(let content) = presentation { return content }
+        return nil
+    }
+
+    /// The one spelling of "this request is drawn as a plan card".
+    var isPlanCard: Bool {
+        planContent != nil || (isFromApprover && toolName == MCPBridge.planApprovalTool)
+    }
+
+    /// The questions of an `AskUserQuestion` call, parsed once as the
+    /// request arrives. Non-nil exactly when the request is drawn as a
+    /// question card rather than an approval card.
+    let question: AgentQuestionForm?
+
+    var isQuestion: Bool { question != nil }
+
+    /// What "Allow Always" does for this call: claude's own suggestions
+    /// for it, as its PermissionRequest hook reported them. Empty when
+    /// claude suggested nothing (its terminal then offers no "don't ask
+    /// again" either), when the hook did not run, and for the moment
+    /// between the card appearing and the hook's report landing; "Allow
+    /// Always" then remembers the exact call in SipAI. Written on the
+    /// main actor only (`MCPBridge.fileSuggestions`).
+    fileprivate(set) var alwaysOffer: [ClaudePermissionUpdate] = []
+
+    /// What this call's suggestions are filed under, or nil for a call
+    /// that has no Always — a question, a plan.
+    let suggestionKey: String?
 
     /// Signalled by `resolve(...)` once the user clicks a button (or
     /// on shutdown, which forces a deny). The handler thread waits on
@@ -78,13 +184,60 @@ final class MCPApprovalRequest: Identifiable, @unchecked Sendable {
     /// session launched on Plan).
     fileprivate var modeOnAllow: String?
 
+    /// On allow: the input the tool runs with instead of the one claude
+    /// proposed — an answered question's input with its `answers`. nil
+    /// runs the tool with its input unchanged.
+    fileprivate var inputOnAllow: [String: Any]?
+
+    /// On allow: the permission changes claude makes as it runs the tool
+    /// — the `alwaysOffer`, when the answer was "Allow Always".
+    fileprivate var permissionsOnAllow: [ClaudePermissionUpdate] = []
+
     init(id: String, sessionId: String?, taskUuid: String?,
-         toolName: String, toolInput: [String: Any]) {
+         toolName: String, toolInput: [String: Any],
+         question: AgentQuestionForm? = nil,
+         suggestionKey: String? = nil) {
         self.id = id
         self.sessionId = sessionId
         self.taskUuid = taskUuid
         self.toolName = toolName
         self.toolInput = toolInput
+        self.question = question
+        self.suggestionKey = suggestionKey
+        self.agentKey = "claude_code"
+        self.presentation = nil
+        self.asksQuestion = toolName == MCPBridge.questionTool
+        self.turnWaits = true
+        self.respond = nil
+    }
+
+    /// A request from an agent's own front end. Its id is minted here, never
+    /// the protocol's own: a JSON-RPC id is a small number unique to one
+    /// connection, and drafts, notes, notifications and the keyboard are
+    /// all keyed on this one. A question whose form could not be read
+    /// passes `question: nil` with `asksQuestion: true`, and is declined.
+    init(agentKey: String, sessionId: String?, taskUuid: String?,
+         toolName: String, toolInput: [String: Any] = [:],
+         presentation: CardPresentation,
+         question: AgentQuestionForm? = nil,
+         turnWaits: Bool = true,
+         respond: @escaping @MainActor (CardResolution) -> Void) {
+        self.id = "\(agentKey):\(UUID().uuidString)"
+        self.sessionId = sessionId
+        self.taskUuid = taskUuid
+        self.toolName = toolName
+        self.toolInput = toolInput
+        self.question = question
+        self.suggestionKey = nil
+        self.agentKey = agentKey
+        self.presentation = presentation
+        switch presentation {
+        case .question, .link: self.asksQuestion = true
+        case .permission(let content): self.asksQuestion = content.asker != nil
+        case .plan: self.asksQuestion = false
+        }
+        self.turnWaits = turnWaits
+        self.respond = respond
     }
 
     /// Best-effort single-line preview of the tool input for card display.
@@ -143,6 +296,89 @@ final class MCPBridge: ObservableObject {
     /// useful before the hook is wired.
     var isApprovalFocused: ((MCPApprovalRequest) -> Bool)?
 
+    /// Set by `SipAIApp.onAppear`: told of every card the moment it is
+    /// appended — the same moment the macOS notification is decided — so
+    /// the bubble beside the sidebar's logo can say a session needs the
+    /// user. A request answered before it was appended (declined, cancelled
+    /// at shutdown) is never shown, and never told.
+    var onRequestShown: ((MCPApprovalRequest) -> Void)?
+
+    /// Whether a question is shown to the user, answered with Non-stop's
+    /// words, or declined because no turn of this app can take an answer.
+    /// Set by `AgentManager.configure(bridge:config:)`, which knows the
+    /// runners; nil declines every question as unanswerable.
+    var questionPolicy: ((MCPApprovalRequest) -> MCPQuestionPolicy)?
+
+    /// An agent's name as the user set it in Settings → Labels, by agent
+    /// key, for the notifications. Set by `AgentManager`; nil reads as the
+    /// agent key itself.
+    var agentLabel: ((String) -> String)?
+
+    /// The approver's per-server tool-call limit in milliseconds, written
+    /// into its MCP config as `timeout` — or nil to write none. Claude
+    /// abandons a permission prompt its server has been silent on for 30
+    /// minutes (and says so as the tool's result) unless the server's
+    /// entry raises that limit; a card the user has not reached yet is
+    /// exactly such a silent call. Asked on every config write, so a
+    /// claude update is picked up by the next turn. Set by `AgentManager`,
+    /// which knows the installed claude's version: a claude that does not
+    /// know the key is never handed it.
+    var approverCallTimeoutMs: (() -> Int?)?
+
+    /// Whether the turns this bridge serves are launched with the
+    /// PermissionRequest hook that reports claude's own suggestions for a
+    /// call (`launchSettings`). Set by `AgentManager`, which knows the
+    /// installed claude's version: a claude not measured to run the hook
+    /// is launched without it, and "Allow Always" then remembers the
+    /// exact call in SipAI — never a hook key a claude may refuse.
+    var reportsPermissionSuggestions: (() -> Bool)?
+
+    /// Whether the turns this bridge serves are launched with the
+    /// Elicitation hook that puts an MCP server's forms and links on a
+    /// card (`launchSettings`). Set by `AgentManager`, which knows the
+    /// installed claude's version: below the oldest claude measured to run
+    /// the hook under `-p`, nothing is added and claude cancels every such
+    /// request itself, as it always has.
+    var bridgesMcpForms: (() -> Bool)?
+
+    /// The suggestions claude's hook reported for calls whose approval
+    /// request has not arrived yet (`fileSuggestions`).
+    private let suggestions = PermissionSuggestionStore()
+
+    /// The session-scoped grants "Allow Always" made, per scope (the
+    /// session id, or a draft's task uuid until it has one). Claude keeps
+    /// such a grant in the running process alone, and every turn is a
+    /// process of its own, so each later turn of the session is launched
+    /// with them (`launchSettings`). In memory only, like `cache`: a
+    /// relaunch asks again.
+    private var sessionGrants: [String: [ClaudePermissionUpdate]] = [:]
+
+    /// A question card's answers so far, per request id. Kept here rather
+    /// than in the card: the centre pane replaces the session view on
+    /// every detour to a chat or a note, and a card rebuilt from nothing
+    /// would drop what the user had picked. Written on every change,
+    /// dropped when the request is resolved. Deliberately not
+    /// `@Published` — a pick must not re-render every view holding the
+    /// bridge.
+    private(set) var questionDrafts: [String: AgentQuestionDraft] = [:]
+
+    /// Store a card's state while its request is still pending.
+    func setQuestionDraft(_ draft: AgentQuestionDraft, for requestId: String) {
+        guard pending.contains(where: { $0.id == requestId }) else { return }
+        questionDrafts[requestId] = draft
+    }
+
+    /// What the user has typed into a card's own text field so far — the
+    /// plan card's "what to change" — per request id. Here for the same
+    /// reason as `questionDrafts`, under the same rules: written on every
+    /// change, dropped with the request, not `@Published`.
+    private(set) var cardNotes: [String: String] = [:]
+
+    func setCardNote(_ note: String, for requestId: String) {
+        guard pending.contains(where: { $0.id == requestId }) else { return }
+        cardNotes[requestId] = note.isEmpty ? nil : note
+    }
+
     // MARK: Paths (computed once at init)
 
     private let mcpDir: URL
@@ -171,15 +407,13 @@ final class MCPBridge: ObservableObject {
         "mcp__\(serverName)__\(toolName)"
     }
 
-    /// Built-in tools that exist to run interactive UI inside Claude
-    /// Code's OWN terminal front-end, and therefore cannot work here.
-    /// Resolved without an approval card — see `handleConnection`.
-    ///
-    /// Deliberately a minimal set: auto-denying a tool the user might
-    /// legitimately want is worse than showing a card.
-    nonisolated static let nonInteractiveTools: Set<String> = [
-        "AskUserQuestion",
-    ]
+    /// Claude's question tool. It reaches the approver like any other
+    /// tool call — in every permission mode but dontAsk, Bypass
+    /// included, since claude asks the user for it whatever the mode —
+    /// and is answered through the same permission-prompt result: an
+    /// allow whose input carries the user's `answers`. Drawn as a
+    /// question card; see `handleConnection` and `AgentQuestionForm`.
+    nonisolated static let questionTool = "AskUserQuestion"
 
     // MARK: Init
 
@@ -212,10 +446,14 @@ final class MCPBridge: ObservableObject {
     /// wake up cleanly instead of hanging on the semaphore.
     func shutdown() {
         shuttingDown = true
-        // Release each pending semaphore; handler threads will see
-        // the default `.deny` verdict.
-        for req in pending { req.semaphore.signal() }
+        // Every pending request is answered: an approver's handler thread
+        // sees the default `.deny` verdict, another front end hears
+        // `.cancelled`. State first, answers last.
+        let open = pending
         pending.removeAll()
+        questionDrafts.removeAll()
+        cardNotes.removeAll()
+        for req in open { deliver(req, .cancelled) }
         // Close listener socket; accept loop exits.
         if listenerSocket >= 0 {
             _ = Darwin.close(listenerSocket)
@@ -268,16 +506,22 @@ final class MCPBridge: ObservableObject {
         // interpreter path so the user's chosen Python 3 wins (a
         // developer with multiple Pythons installed might have
         // /opt/homebrew/bin/python3 ahead of /usr/bin/python3).
+        var server: [String: Any] = [
+            "type": "stdio",
+            "command": "/usr/bin/env",
+            "args": ["python3", approverPath.path],
+            "env": [
+                "SIPAI_APPROVER_SOCKET": socketPath.path,
+            ],
+        ]
+        // A card can wait on the user for as long as they take; see
+        // `approverCallTimeoutMs`.
+        if let timeout = approverCallTimeoutMs?() {
+            server["timeout"] = timeout
+        }
         let config: [String: Any] = [
             "mcpServers": [
-                Self.serverName: [
-                    "type": "stdio",
-                    "command": "/usr/bin/env",
-                    "args": ["python3", approverPath.path],
-                    "env": [
-                        "SIPAI_APPROVER_SOCKET": socketPath.path,
-                    ],
-                ]
+                Self.serverName: server
             ]
         ]
         let data = try JSONSerialization.data(
@@ -366,6 +610,14 @@ final class MCPBridge: ObservableObject {
                 // that's the shutdown path.
                 return
             }
+            // A peer can be gone by the time it is answered — claude ends
+            // a hook the moment its prompt is answered, and takes its MCP
+            // servers down with it when it is stopped. A write to such a
+            // socket raises SIGPIPE, which ends THIS process unless the
+            // socket is told not to.
+            var noSigPipe: Int32 = 1
+            _ = setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe,
+                           socklen_t(MemoryLayout<Int32>.size))
             // Same-user only. The socket already sits under ~/Library
             // (mode 0700), but if those permissions are ever loosened a
             // connection from another uid must still be refused: an
@@ -398,6 +650,27 @@ final class MCPBridge: ObservableObject {
         }
         let requestId = (obj["request_id"] as? String) ?? UUID().uuidString
         let kind = obj["kind"] as? String
+        if kind == "permission_context" {
+            // Claude's own suggestions for a call, from its
+            // PermissionRequest hook. No answer goes back: the hook
+            // decides nothing and waits for nothing.
+            let offer = ClaudePermissionSuggestions.sanitized(obj["suggestions"])
+            if !offer.isEmpty, let tool = obj["tool_name"] as? String, !tool.isEmpty {
+                let key = PermissionSuggestionStore.key(
+                    sessionId: obj["session_id"] as? String,
+                    taskUuid: obj["task_uuid"] as? String,
+                    toolName: tool,
+                    toolInput: (obj["tool_input"] as? [String: Any]) ?? [:])
+                DispatchQueue.main.async { [weak self] in
+                    self?.fileSuggestions(offer, for: key)
+                }
+            }
+            return
+        }
+        if kind == "elicitation_request" {
+            answerElicitation(fd: fd, message: obj)
+            return
+        }
         if kind != "approval_request" {
             sendDenyResponse(fd: fd, requestId: requestId,
                              message: "SipAI approver: unexpected request kind.")
@@ -413,30 +686,13 @@ final class MCPBridge: ObservableObject {
         let sessionId = obj["session_id"] as? String
         let taskUuid = obj["task_uuid"] as? String
 
-        // A tool that can only be answered by an interactive front-end
-        // never reaches the UI. `AskUserQuestion` renders its options
-        // in Claude Code's OWN terminal front-end; under `claude -p`
-        // there is none, so it arrives on this socket like any other
-        // tool — and however an approval card were answered, the tool
-        // would still come back "The user did not answer the
-        // questions". A card would interrupt the user to decide
-        // nothing, while reading as if it WERE the question.
-        //
-        // Answer it here instead, and say why. A deny `message` is
-        // handed back to claude as the tool's result, which is the one
-        // channel this protocol gives us — so the agent learns
-        // immediately to put the question in its reply, where the
-        // composer can answer it.
-        if Self.nonInteractiveTools.contains(toolName) {
-            sendDenyResponse(
-                fd: fd, requestId: requestId,
-                message: "SipAI runs Claude Code headlessly (claude -p), so "
-                    + "\(toolName) has no interface to collect an answer and "
-                    + "will always come back unanswered. Do not retry it — ask "
-                    + "the user in your reply text instead; they answer in the "
-                    + "composer.")
-            return
-        }
+        // A question is drawn as a question card and answered through the
+        // same permission-prompt result as an approval: an allow whose
+        // input carries the user's `answers`. Its form is parsed here,
+        // off the main thread. A form the card cannot draw still becomes
+        // a request — the turn that asked is consulted first, so a turn
+        // running Non-stop gets Non-stop's words rather than "ask in text".
+        let isQuestion = toolName == Self.questionTool
 
         // Build the request and hand it to MainActor for UI display.
         let req = MCPApprovalRequest(
@@ -444,45 +700,49 @@ final class MCPBridge: ObservableObject {
             sessionId: sessionId,
             taskUuid: taskUuid,
             toolName: toolName,
-            toolInput: toolInput
+            toolInput: toolInput,
+            question: isQuestion ? AgentQuestionForm(toolInput: toolInput) : nil,
+            // A question has no Always, and neither has a plan.
+            suggestionKey: isQuestion || toolName == Self.planApprovalTool
+                ? nil
+                : PermissionSuggestionStore.key(
+                    sessionId: sessionId, taskUuid: taskUuid,
+                    toolName: toolName, toolInput: toolInput)
         )
 
         // Cache-hit fast path: if we have a cached always-decision for
         // this (scope, tool, signature), answer immediately without
         // bothering the UI. Scope resolution: session_id wins, else
-        // alias[task_uuid] or task_uuid itself.
-        var cachedVerdict: MCPCacheVerdict?
-        DispatchQueue.main.sync {
-            MainActor.assumeIsolated {
-                cachedVerdict = self.lookupCache(req)
+        // alias[task_uuid] or task_uuid itself. Never for a question: it
+        // is answered each time it is asked, and its card has no Always.
+        if !isQuestion {
+            var cachedVerdict: MCPCacheVerdict?
+            DispatchQueue.main.sync {
+                MainActor.assumeIsolated {
+                    cachedVerdict = self.lookupCache(req)
+                }
+            }
+            if let cached = cachedVerdict {
+                let wire = (cached == .allow) ? "allow" : "deny"
+                let updated: [String: Any]? = (cached == .allow) ? toolInput : nil
+                let message: String? = (cached == .deny) ? "Denied by SipAI (remembered)." : nil
+                sendResponse(fd: fd, requestId: requestId, verdict: wire,
+                             updatedInput: updated, message: message)
+                return
             }
         }
-        if let cached = cachedVerdict {
-            let wire = (cached == .allow) ? "allow" : "deny"
-            let updated: [String: Any]? = (cached == .allow) ? toolInput : nil
-            let message: String? = (cached == .deny) ? "Denied by SipAI (remembered)." : nil
-            sendResponse(fd: fd, requestId: requestId, verdict: wire,
-                         updatedInput: updated, message: message)
-            return
-        }
 
-        // Post to MainActor — appends to `pending`, which drives the UI.
-        // The UI's Allow/Deny button calls `resolve(requestId:verdict:)`
-        // which sets req.verdict and signals req.semaphore.
+        // Post to MainActor — `enqueue` appends to `pending`, which drives
+        // the UI, and announces it, in one step (see there). The cards'
+        // buttons resolve through `resolve(requestId:verdict:)` /
+        // `answerQuestion`, which set req.verdict and signal req.semaphore.
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, !self.shuttingDown else {
+            guard let self = self else {
                 // Bridge gone; let the handler fall through to default deny.
                 req.semaphore.signal()
                 return
             }
-            self.pending.append(req)
-        }
-
-        // Fire a macOS notification if the user isn't looking at this
-        // session. Harmless if notifications are denied — the inline
-        // card still appears as the primary surface.
-        DispatchQueue.main.async { [weak self] in
-            self?.maybePostNotification(for: req)
+            self.enqueue(req)
         }
 
         // Block until resolved (or shutdown forces default .deny).
@@ -490,11 +750,15 @@ final class MCPBridge: ObservableObject {
 
         // Send the response.
         let wireVerdict = req.verdict.wireVerdict
-        let updatedInput: [String: Any]? = wireVerdict == "allow" ? toolInput : nil
+        let updatedInput: [String: Any]? = wireVerdict == "allow"
+            ? (req.inputOnAllow ?? toolInput) : nil
         let message: String? = wireVerdict == "deny"
             ? (req.denyMessage ?? "Denied by SipAI.") : nil
-        let updatedPermissions: [[String: Any]]? = wireVerdict == "allow"
-            ? req.modeOnAllow.map { [Self.setModePermission($0)] } : nil
+        var updatedPermissions: [[String: Any]] = []
+        if wireVerdict == "allow" {
+            if let mode = req.modeOnAllow { updatedPermissions.append(Self.setModePermission(mode)) }
+            updatedPermissions.append(contentsOf: req.permissionsOnAllow.map(\.wire))
+        }
         sendResponse(fd: fd, requestId: requestId,
                      verdict: wireVerdict,
                      updatedInput: updatedInput,
@@ -517,48 +781,247 @@ final class MCPBridge: ObservableObject {
     /// rather than a generic permission card.
     nonisolated static let planApprovalTool = "ExitPlanMode"
 
-    /// What "Keep planning" tells the model. A deny's message is handed
-    /// to claude verbatim as the tool's result (measured), so this is
-    /// the whole instruction: stop, stay in plan mode, and let the user
-    /// say what to change in the composer. One English constant, not a
-    /// catalog key — it is read by the model, never shown in the UI.
-    nonisolated static let keepPlanningMessage =
-        "The user has not approved this plan and wants to keep planning. "
-        + "End your turn now with a short reply — they will say what to "
-        + "change in their next message. Stay in plan mode, and do not "
-        + "call ExitPlanMode again until they ask for it."
+    /// What "No, keep planning" with nothing typed tells the model. A
+    /// deny's message is handed to claude verbatim as the tool's result
+    /// (measured), so this is the whole instruction: stop, stay in plan
+    /// mode, and let the user say what to change in the composer. With
+    /// words typed the card sends `PlanReplies.keepPlanning(feedback:)`
+    /// instead. One English constant, not a catalog key — it is read by
+    /// the model, never shown in the UI.
+    nonisolated static let keepPlanningMessage = PlanReplies.keepPlanning
+
+    // MARK: - One way in
+
+    /// Hand a request to the user — or decline it at once — in ONE
+    /// main-actor step, whichever front end asked: claude's approver (the
+    /// socket door) or an agent's own protocol (its turn driver). A
+    /// question's fate is decided in the same step that would append it,
+    /// so no card can appear for a turn that has meanwhile turned Non-stop
+    /// on or been stopped, and nothing is announced that was never
+    /// appended. A card that cannot be drawn is declined here and never
+    /// half-drawn: it must not hold a turn open.
+    func enqueue(_ req: MCPApprovalRequest) {
+        guard !shuttingDown else {
+            deliver(req, .cancelled)
+            return
+        }
+        if !req.isFromApprover, !Self.isDrawable(req) {
+            deliver(req, .declined(.unreadable))
+            return
+        }
+        if req.asksQuestion, let refusal = questionRefusal(for: req) {
+            req.verdict = .deny
+            req.denyMessage = AgentQuestionReplies.words(for: refusal)
+            deliver(req, .declined(refusal))
+            return
+        }
+        // Suggestions that arrived ahead of their request.
+        if let key = req.suggestionKey {
+            req.alwaysOffer = suggestions.take(key)
+        }
+        pending.append(req)
+        // Fire a macOS notification if the user isn't looking at this
+        // session. Harmless if notifications are denied — the inline
+        // card still appears as the primary surface.
+        maybePostNotification(for: req)
+        onRequestShown?(req)
+    }
+
+    /// Whether a request from an agent's own front end can be drawn: a
+    /// permission or plan card with answers the card can show. A question
+    /// is judged by the question policy, with its form.
+    nonisolated static func isDrawable(_ req: MCPApprovalRequest) -> Bool {
+        switch req.presentation {
+        case .permission(let content): return CardChoiceLayout.isDrawable(content.choices)
+        case .plan(let content): return CardChoiceLayout.isDrawable(content.choices)
+        case .question, .link, .none: return true
+        }
+    }
+
+    /// The one way a request is ever answered, exactly once: an approver's
+    /// handler thread is woken to write its socket reply, another front
+    /// end's driver is handed the resolution. Callers settle the bridge's
+    /// own state first — the pending list, drafts, notes, the notification
+    /// — so a driver that enqueues or withdraws from inside its responder
+    /// finds that state already true.
+    private func deliver(_ req: MCPApprovalRequest, _ resolution: CardResolution) {
+        guard !req.delivered else { return }
+        req.delivered = true
+        req.respond?(resolution)
+        req.semaphore.signal()
+    }
 
     // MARK: - UI callback — resolve a pending request
 
     /// Called from the SwiftUI Allow/Deny/Allow-Always/Deny-Always
-    /// buttons. Sets the verdict, removes from pending, and signals
-    /// the semaphore so the handler thread proceeds to write the
-    /// wire response. For the Always variants, also writes the
-    /// `(toolName, signature)` → verdict mapping into the cache under
-    /// the approval's scope so future matching requests short-circuit.
+    /// buttons of claude's cards. Sets the verdict, removes from pending,
+    /// and signals the semaphore so the handler thread proceeds to write
+    /// the wire response.
+    ///
+    /// "Allow Always" hands claude its own suggestion for the call
+    /// (`alwaysOffer`) to apply as it runs the tool; with none on offer,
+    /// and for "Deny Always", the `(toolName, signature)` → verdict
+    /// mapping is written into the cache under the approval's scope, so
+    /// the very same call is answered here next time.
     ///
     /// `message` replaces a deny's generic words; `setMode` rides an
     /// allow as the mode claude switches the session to. Both exist for
     /// the plan card, and neither is ever cached.
     func resolve(requestId: String, verdict: MCPVerdict,
                  message: String? = nil, setMode: String? = nil) {
-        guard let idx = pending.firstIndex(where: { $0.id == requestId }) else {
+        guard let req = pending.first(where: { $0.id == requestId }),
+              req.isFromApprover else {
             return
         }
-        let req = pending[idx]
+        finish(req, verdict: verdict, message: message, setMode: setMode,
+               resolution: .chose(verdict.rawValue))
+    }
+
+    /// One of the answers an agent's own card offers was picked. The
+    /// agent applies it — and remembers it, for an answer that says
+    /// "for this session" — itself: nothing is written to the exact-call
+    /// cache, which answers claude's approver alone.
+    func choose(requestId: String, optionId: String) {
+        guard let req = pending.first(where: { $0.id == requestId }),
+              !req.isFromApprover else { return }
+        finish(req, verdict: .deny, resolution: .chose(optionId))
+    }
+
+    /// The agent resolved a request itself — answered on another client,
+    /// or dropped with its turn — so it no longer waits: the card goes,
+    /// and no answer is sent. Returns what the user had started on a
+    /// question the turn did not wait on (`unsentAnswers`), for the
+    /// session's message box.
+    @discardableResult
+    func withdraw(requestId: String) -> String? {
+        guard let idx = pending.firstIndex(where: { $0.id == requestId }),
+              !pending[idx].isFromApprover else { return nil }
+        let req = pending.remove(at: idx)
+        let unsent = unsentAnswers(of: req)
+        questionDrafts[req.id] = nil
+        cardNotes[req.id] = nil
+        dismissNotification(for: req.id)
+        req.delivered = true
+        return unsent
+    }
+
+    /// What the user had put into a question card the turn does not wait
+    /// on (codex's question asked without stopping) and not sent, as
+    /// Codex's own terminal hands it back when the turn that asked ends.
+    /// Nil for every other card: one the turn waits on cannot be left
+    /// behind by its turn, and its answer goes nowhere else.
+    private func unsentAnswers(of req: MCPApprovalRequest) -> String? {
+        guard !req.turnWaits, let form = req.question,
+              let draft = questionDrafts[req.id] else { return nil }
+        return form.unsentAnswersText(draft)
+    }
+
+    /// The one way a request the user answers leaves `pending`: the
+    /// verdict and its riders set, the card gone, the notification
+    /// withdrawn, and then the answer delivered. A second call for the
+    /// same request — a double click, a field's Return beside a default
+    /// button — finds nothing pending and does nothing.
+    ///
+    /// The verdict and its riders are what claude's approver writes back;
+    /// `resolution` is what another front end's driver is handed. Each
+    /// reads its own and ignores the other.
+    private func finish(_ req: MCPApprovalRequest, verdict: MCPVerdict,
+                        message: String? = nil, setMode: String? = nil,
+                        inputOnAllow: [String: Any]? = nil,
+                        resolution: CardResolution) {
+        guard let idx = pending.firstIndex(where: { $0 === req }) else { return }
         req.verdict = verdict
         req.denyMessage = message
         req.modeOnAllow = setMode
+        req.inputOnAllow = inputOnAllow
+        if verdict == .allowAlways, !req.alwaysOffer.isEmpty {
+            // Claude applies its own rule, and matches later calls
+            // against it itself — nothing is remembered here, except the
+            // grants claude keeps in the running process alone, which the
+            // session's later turns are launched with.
+            req.permissionsOnAllow = req.alwaysOffer
+            rememberSessionGrants(req.alwaysOffer.filter(\.isSessionScoped), for: req)
+        }
         pending.remove(at: idx)
-        req.semaphore.signal()
+        questionDrafts[req.id] = nil
+        cardNotes[req.id] = nil
 
-        if verdict == .allowAlways || verdict == .denyAlways {
+        if req.isFromApprover,
+           verdict == .denyAlways || (verdict == .allowAlways && req.alwaysOffer.isEmpty) {
             writeCacheEntry(req: req,
                             cached: verdict == .allowAlways ? .allow : .deny)
         }
 
         // Dismiss the notification we posted for this request (if any).
         dismissNotification(for: req.id)
+        deliver(req, resolution)
+    }
+
+    // MARK: - Questions (AskUserQuestion)
+
+    /// Answer a question card. Claude runs the tool with its own input
+    /// plus the user's `answers`, and tells the model what was chosen;
+    /// another agent's driver spells the answers its own way.
+    func answerQuestion(requestId: String, answers: [String: AgentQuestionAnswer]) {
+        guard let req = pending.first(where: { $0.id == requestId }),
+              let form = req.question else { return }
+        finish(req, verdict: .allow,
+               inputOnAllow: req.isFromApprover
+                   ? form.updatedInput(original: req.toolInput, answers: answers) : nil,
+               resolution: .answered(answers))
+    }
+
+    /// Skip a question card: the agent is told to choose for itself and
+    /// carry on — in SipAI's words where its protocol carries them, and
+    /// as its own "not answered" where it does not.
+    func skipQuestion(requestId: String) {
+        guard let req = pending.first(where: { $0.id == requestId }),
+              req.isQuestion else { return }
+        finish(req, verdict: .deny, message: AgentQuestionReplies.skipped,
+               resolution: .skipped)
+    }
+
+    /// "Chat about this" on a question card: the agent is told what was
+    /// asked and answered so far, and to ask what the user wants to
+    /// clarify — in its reply, which ends the turn. Claude's alone: it
+    /// rides a deny's message, a channel other agents' protocols lack.
+    func chatAboutQuestion(requestId: String, answers: [String: AgentQuestionAnswer]) {
+        guard let req = pending.first(where: { $0.id == requestId }),
+              req.isFromApprover,
+              let form = req.question else { return }
+        finish(req, verdict: .deny,
+               message: AgentQuestionReplies.chat(about: form, answers: answers),
+               resolution: .skipped)
+    }
+
+    /// Non-stop was turned on while a turn's question was on screen: the
+    /// question is declined with Non-stop's words, and the turn goes on.
+    /// Approval cards of the same turn are left alone — Non-stop is about
+    /// questions only.
+    func declineQuestions(sessionId: String?, taskUuid: String?) {
+        let owned = pending.filter {
+            $0.asksQuestion && belongs($0, toSession: sessionId, taskUuid: taskUuid)
+        }
+        for req in owned {
+            finish(req, verdict: .deny, message: AgentQuestionReplies.nonStop,
+                   resolution: .declined(.nonStop))
+        }
+    }
+
+    /// Why a question is declined without a card, or nil to show it.
+    /// Non-stop comes first: whatever else is true of the call, a turn
+    /// running Non-stop — the composer's switch, a scheduled task's box —
+    /// is told to decide and go on, never to wait or to ask in text.
+    private func questionRefusal(for req: MCPApprovalRequest) -> CardDecline? {
+        switch questionPolicy?(req) ?? .unanswerable {
+        case .nonStop: return .nonStop
+        case .unanswerable: return .unanswerable
+        // A question whose form could not be read. A link and a server's
+        // yes-or-no have no form to read.
+        case .ask:
+            let hasForm = req.isFromApprover || req.presentation == .question
+            return hasForm && req.question == nil ? .unreadable : nil
+        }
     }
 
     // MARK: - Which session a request belongs to
@@ -627,24 +1090,33 @@ final class MCPBridge: ObservableObject {
     /// can never consume the answer, so leaving the cards up leaves
     /// ghost questions whose Allow/Deny buttons do nothing meaningful.
     /// Deliberately never writes the always-cache — this is cleanup,
-    /// not a user verdict.
-    func cancelPending(sessionId: String?, taskUuid: String?) {
+    /// not a user verdict. Returns what the user had started on the
+    /// questions among them the turn did not wait on (`unsentAnswers`),
+    /// in the order they were asked.
+    @discardableResult
+    func cancelPending(sessionId: String?, taskUuid: String?) -> [String] {
         let sid = sessionId ?? ""
         let tuid = taskUuid ?? ""
-        guard !sid.isEmpty || !tuid.isEmpty else { return }
+        guard !sid.isEmpty || !tuid.isEmpty else { return [] }
         var kept: [MCPApprovalRequest] = []
-        var removed = false
+        var removed: [MCPApprovalRequest] = []
+        var unsent: [String] = []
         for req in pending {
             if belongs(req, toSession: sessionId, taskUuid: taskUuid) {
                 req.verdict = .deny
-                req.semaphore.signal()
+                if let text = unsentAnswers(of: req) { unsent.append(text) }
+                questionDrafts[req.id] = nil
+                cardNotes[req.id] = nil
                 dismissNotification(for: req.id)
-                removed = true
+                removed.append(req)
             } else {
                 kept.append(req)
             }
         }
-        if removed { pending = kept }
+        guard !removed.isEmpty else { return [] }
+        pending = kept
+        for req in removed { deliver(req, .cancelled) }
+        return unsent
     }
 
     /// Commit an always-decision to the per-scope cache.
@@ -719,6 +1191,62 @@ final class MCPBridge: ObservableObject {
             }
             cache[sessionId] = sessionEntries
         }
+        // The same move for the grants a first turn made under its
+        // draft's uuid: the session's next turn asks for them by its id.
+        if let granted = sessionGrants.removeValue(forKey: taskUuid) {
+            var mine = sessionGrants[sessionId] ?? []
+            for grant in granted where !mine.contains(grant) { mine.append(grant) }
+            sessionGrants[sessionId] = mine
+        }
+    }
+
+    // MARK: - Claude's suggestions ("Allow Always")
+
+    /// File the suggestions claude's hook reported for one call. Claude
+    /// runs the hook and asks the approve tool at the same time, so
+    /// either can arrive first: a request already waiting takes them —
+    /// its card redraws to say what "Allow Always" will do — and
+    /// otherwise they are kept for the request to take as it arrives.
+    /// Both halves run here, on the main actor, so neither order can
+    /// lose them.
+    private func fileSuggestions(_ offer: [ClaudePermissionUpdate], for key: String) {
+        if let req = pending.first(where: { $0.suggestionKey == key && $0.alwaysOffer.isEmpty }) {
+            // The request is a reference: changing it does not change
+            // `pending`, so the cards are told by hand.
+            objectWillChange.send()
+            req.alwaysOffer = offer
+        } else {
+            suggestions.put(offer, for: key)
+        }
+    }
+
+    // MARK: - Session grants ("Allow Always", across turns)
+
+    /// Keep the session-scoped grants an "Allow Always" made, under the
+    /// approval's scope, for the session's later turns.
+    private func rememberSessionGrants(_ grants: [ClaudePermissionUpdate],
+                                       for req: MCPApprovalRequest) {
+        guard !grants.isEmpty else { return }
+        let scope = scopeKey(sessionId: req.sessionId, taskUuid: req.taskUuid)
+        guard !scope.isEmpty else { return }
+        var mine = sessionGrants[scope] ?? []
+        for grant in grants where !mine.contains(grant) { mine.append(grant) }
+        sessionGrants[scope] = mine
+    }
+
+    /// The session-scoped grants made so far in one session.
+    func sessionGrants(sessionId: String?, taskUuid: String?) -> [ClaudePermissionUpdate] {
+        var out: [ClaudePermissionUpdate] = []
+        var scopes: [String] = []
+        if let sid = sessionId, !sid.isEmpty { scopes.append(sid) }
+        if let tuid = taskUuid, !tuid.isEmpty {
+            scopes.append(tuid)
+            if let aliased = alias[tuid] { scopes.append(aliased) }
+        }
+        for scope in scopes {
+            for grant in sessionGrants[scope] ?? [] where !out.contains(grant) { out.append(grant) }
+        }
+        return out
     }
 
     // MARK: - Claude Code integration helpers
@@ -730,6 +1258,88 @@ final class MCPBridge: ObservableObject {
             "--mcp-config", configPath.path,
             "--permission-prompt-tool", Self.permissionPromptToolName,
         ]
+    }
+
+    /// What a turn's `--settings` carries for the bridge, to be MERGED
+    /// into the one `--settings` value of the launch
+    /// (`ClaudeSettingsArgv.merging` — claude reads only the last of two):
+    ///
+    /// * the PermissionRequest hook that reports claude's suggestions for
+    ///   each call it is about to ask about (approver.py run with
+    ///   `--permission-context`), when the installed claude is known to
+    ///   run it. It decides nothing, and claude's own hooks from the
+    ///   user's settings still run beside it;
+    /// * the session-scoped grants "Allow Always" made in earlier turns
+    ///   of this session, as a `permissions` block;
+    /// * the Elicitation hook that puts an MCP server's form or link on a
+    ///   card (approver.py run with `--elicitation`), when the installed
+    ///   claude is known to run it. Under `-p` claude has no dialog for one
+    ///   and cancels it unless a hook answers.
+    ///
+    /// Empty when there is none of them.
+    func launchSettings(sessionId: String?, taskUuid: String?) -> [String: Any] {
+        var settings: [String: Any] = [:]
+        var hooks: [String: Any] = [:]
+        if reportsPermissionSuggestions?() == true {
+            hooks["PermissionRequest"] = [[
+                "matcher": "",
+                "hooks": [[
+                    "type": "command",
+                    "command": Self.permissionContextCommand(approverPath: approverPath.path,
+                                                             socketPath: socketPath.path),
+                    // Seconds. The hook only hands over a few hundred
+                    // bytes; a stuck one must not hold the turn.
+                    "timeout": 10,
+                ]],
+            ]]
+        }
+        if bridgesMcpForms?() == true {
+            hooks["Elicitation"] = [[
+                "matcher": "",
+                "hooks": [[
+                    "type": "command",
+                    "command": Self.elicitationCommand(approverPath: approverPath.path,
+                                                       socketPath: socketPath.path),
+                    // Seconds. The hook waits on the user for as long as
+                    // they take, and claude cancels the server's request
+                    // the moment it runs out. As long as the approver's
+                    // own call limit, and kept under the 2^31 ms a timer
+                    // can hold — past that one fires at once.
+                    "timeout": Self.elicitationHookTimeout,
+                ]],
+            ]]
+        }
+        if !hooks.isEmpty { settings["hooks"] = hooks }
+        if let permissions = ClaudePermissionSuggestions.replaySettings(
+            sessionGrants(sessionId: sessionId, taskUuid: taskUuid)) {
+            settings["permissions"] = permissions
+        }
+        return settings
+    }
+
+    /// The hook's command line. Claude runs it through a shell, so both
+    /// paths are quoted — Application Support has a space in it. The
+    /// socket is named outright rather than left to the environment: the
+    /// approver's own entry names it in its MCP config, and the hook has
+    /// no such entry.
+    nonisolated static func permissionContextCommand(approverPath: String,
+                                                     socketPath: String) -> String {
+        "SIPAI_APPROVER_SOCKET=\(shellQuoted(socketPath)) /usr/bin/env python3 "
+            + "\(shellQuoted(approverPath)) --permission-context"
+    }
+
+    /// The Elicitation hook's command line, spelled like the
+    /// PermissionRequest hook's.
+    nonisolated static func elicitationCommand(approverPath: String, socketPath: String) -> String {
+        "SIPAI_APPROVER_SOCKET=\(shellQuoted(socketPath)) /usr/bin/env python3 "
+            + "\(shellQuoted(approverPath)) --elicitation"
+    }
+
+    /// How long, in seconds, claude lets the Elicitation hook wait.
+    nonisolated static let elicitationHookTimeout = 100_000
+
+    nonisolated static func shellQuoted(_ text: String) -> String {
+        "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// Environment-overlay for the `claude` subprocess.
@@ -802,6 +1412,12 @@ final class MCPBridge: ObservableObject {
             return trunc((input["url"] as? String) ?? "", 260)
         case "WebSearch":
             return trunc((input["query"] as? String) ?? "", 260)
+        case "Skill":
+            // The skill, and what the model handed it.
+            let skill = SkillRecords.skillToolName(name: toolName, input: input) ?? ""
+            let args = ((input["args"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return trunc(args.isEmpty ? skill : "\(skill)  \(args)", 260)
         default:
             if let data = try? JSONSerialization.data(
                 withJSONObject: input, options: [.sortedKeys]),
@@ -882,6 +1498,55 @@ final class MCPBridge: ObservableObject {
                      updatedInput: nil, message: message)
     }
 
+    // MARK: - An MCP server's request, from claude's Elicitation hook
+
+    /// An MCP server's form or link, from claude's Elicitation hook
+    /// (approver.py run with `--elicitation`): put on a card like any
+    /// agent's (`McpElicitation`), and the answer written back for the
+    /// hook to hand claude — `{action, content?}`. One SipAI does not draw
+    /// is declined at once. The handler thread waits for as long as the
+    /// user takes, within the timeout `launchSettings` gives the hook; a
+    /// quit answers `cancel`, as claude's own dialog does on Esc.
+    nonisolated private func answerElicitation(fd: Int32, message obj: [String: Any]) {
+        let hookInput = obj["hook_input"] as? [String: Any] ?? [:]
+        let order = (obj["field_order"] as? [Any])?.compactMap { $0 as? String }
+        guard let request = McpElicitation.Request(claudeHook: hookInput, fieldOrder: order),
+              let card = McpElicitation.card(for: request) else {
+            sendElicitationAnswer(fd: fd, .decline)
+            return
+        }
+        let box = ElicitationAnswerBox()
+        let req = MCPApprovalRequest(
+            agentKey: "claude_code",
+            sessionId: obj["session_id"] as? String,
+            taskUuid: obj["task_uuid"] as? String,
+            toolName: request.serverName, toolInput: hookInput,
+            presentation: card.presentation, question: card.question,
+            respond: { resolution in box.set(McpElicitation.answer(for: resolution, to: card)) })
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                req.semaphore.signal()
+                return
+            }
+            self.enqueue(req)
+        }
+        req.semaphore.wait()
+        sendElicitationAnswer(fd: fd, box.value ?? .cancel)
+    }
+
+    nonisolated private func sendElicitationAnswer(fd: Int32, _ answer: McpElicitation.Answer) {
+        var body: [String: Any] = ["v": 1, "action": answer.action]
+        if let content = answer.content { body["content"] = content }
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: body, options: [.withoutEscapingSlashes])
+        else { return }
+        var payload = data
+        payload.append(0x0A)  // '\n'
+        payload.withUnsafeBytes { rawBuf in
+            _ = Darwin.send(fd, rawBuf.baseAddress, rawBuf.count, 0)
+        }
+    }
+
     // MARK: - Notifications
 
     /// Identifier prefix so we can dismiss a specific request's
@@ -915,17 +1580,10 @@ final class MCPBridge: ObservableObject {
         }
 
         let content = UNMutableNotificationContent()
-        content.title = String(
-            localized: "Claude Code permission needed",
-            comment: "Notification title for a pending MCP approval")
-        // A plan is not a tool call to allow: its preview would be the
-        // first characters of a JSON object holding the whole plan.
-        content.body = req.toolName == Self.planApprovalTool
-            ? String(localized: "A plan is ready for your review",
-                     comment: "Notification body: an agent session in plan mode finished its plan and waits for approval")
-            : String(
-                localized: "Allow ‘\(req.toolName)’ · \(notificationPreview(for: req))",
-                comment: "Notification body: tool name + short preview")
+        let text = Self.notificationText(for: req,
+                                          agent: agentLabel?(req.agentKey) ?? req.agentKey)
+        content.title = text.title
+        content.body = text.body
         content.sound = .default
         content.userInfo = [
             "kind": "mcp-approval",
@@ -942,6 +1600,42 @@ final class MCPBridge: ObservableObject {
         UNUserNotificationCenter.current().add(request) { _ in }
     }
 
+    /// A notification's words for a request: the agent under the user's
+    /// own label, never a name spelled here.
+    nonisolated static func notificationText(for req: MCPApprovalRequest,
+                                             agent: String) -> (title: String, body: String) {
+        // What an MCP server asks itself — a form, a link, a yes-or-no: the
+        // server asks, in its own words.
+        if let form = req.question, let server = form.asker {
+            return (McpElicitation.Words.requestsInput(server), bannerLine(form.message))
+        }
+        if let link = req.linkContent {
+            return (McpElicitation.Words.wantsLink(link.asker), bannerLine(link.message))
+        }
+        if let content = req.permissionContent, let server = content.asker {
+            var words = ""
+            if case .text(let message) = content.preview { words = message }
+            return (McpElicitation.Words.requestsInput(server), bannerLine(words))
+        }
+        if let form = req.question {
+            // A question is not a permission: the banner asks it.
+            return (String(localized: "\(agent) has a question",
+                           comment: "Title of the card on which the user answers the agent's question, and of the notification announcing it; placeholder is the agent label"),
+                    bannerLine(form.questions.first?.text ?? ""))
+        }
+        let title = String(localized: "\(agent) permission needed",
+                           comment: "Notification title for an agent's pending approval request; placeholder is the agent label")
+        // A plan is not a tool call to allow: its preview would be the
+        // first characters of a JSON object holding the whole plan.
+        if req.isPlanCard {
+            return (title, String(localized: "A plan is ready for your review",
+                                  comment: "Notification body: an agent session in plan mode finished its plan and waits for approval"))
+        }
+        let preview = bannerLine(notificationPreview(for: req))
+        return (title, String(localized: "Allow ‘\(req.toolName)’ · \(preview)",
+                              comment: "Notification body: tool name + short preview"))
+    }
+
     /// Remove a request's notification (if any) from Notification
     /// Center once it's resolved. Avoids leaving stale banners the
     /// user could still click on after the inline card is gone.
@@ -953,40 +1647,83 @@ final class MCPBridge: ObservableObject {
             .removePendingNotificationRequests(withIdentifiers: [identifier])
     }
 
-    /// Short-form preview for the notification body. Truncates
-    /// aggressively since the banner has limited horizontal space.
-    private func notificationPreview(for req: MCPApprovalRequest) -> String {
-        let full = Self.previewInput(toolName: req.toolName,
-                                     input: req.toolInput)
-        if full.count > 80 {
-            return String(full.prefix(77)) + "…"
+    /// One line of at most 80 characters, for a banner.
+    nonisolated private static func bannerLine(_ text: String) -> String {
+        let flat = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return flat.count > 80 ? String(flat.prefix(77)) + "…" : flat
+    }
+
+    /// The call a banner names: claude's input preview, or what another
+    /// agent's card shows of it.
+    nonisolated private static func notificationPreview(for req: MCPApprovalRequest) -> String {
+        switch req.permissionContent?.preview {
+        case .command(let command, _, _)?:
+            return command
+        case .fileChanges(let changes, _)?:
+            return changes.map(\.path).joined(separator: ", ")
+        case .text(let text)?:
+            return text
+        case .nothing?:
+            return ""
+        case nil:
+            return previewInput(toolName: req.toolName, input: req.toolInput)
         }
-        return full
     }
 }
 
-// MARK: - Plan approval modes
+/// The answer to an MCP server's request, handed from the main actor —
+/// where the card is answered — to the socket thread that waits to write
+/// it.
+private final class ElicitationAnswerBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var answer: McpElicitation.Answer?
 
-/// The modes the plan card's two approvals leave plan mode into, in the
-/// spelling the installed claude's `--help` lists — the chip's own
-/// vocabulary. Newer builds list `manual` for the mode their transcripts
-/// record as `default`; older builds list `default`.
-enum PlanApprovalModes {
-    /// "Approve and accept edits": the mode claude is switched to as it
-    /// runs ExitPlanMode. nil when the installed claude lists no
-    /// accept-edits mode; the card then offers one plain approval.
-    nonisolated static func acceptEdits(in modes: [String]) -> String? {
-        modes.contains("acceptEdits") ? "acceptEdits" : nil
+    func set(_ answer: McpElicitation.Answer) { lock.withLock { self.answer = answer } }
+    var value: McpElicitation.Answer? { lock.withLock { answer } }
+}
+
+// MARK: - Suggestions waiting for their request
+
+/// Claude's suggestions for calls whose approval request has not arrived
+/// yet. Keyed by the turn's identity, the tool and a digest of its input,
+/// so a request finds its own call's suggestions whatever order several
+/// calls arrive in. Guards itself, though the bridge only touches it on
+/// the main actor. Bounded in count and in time — an entry whose request
+/// never comes (the call was answered without a card) must not pile up.
+final class PermissionSuggestionStore: @unchecked Sendable {
+    private struct Entry {
+        let key: String
+        let offer: [ClaudePermissionUpdate]
+        let at: Date
     }
 
-    /// "Approve, ask before edits": claude returns to its pre-plan mode by
-    /// itself — Default for a session launched on Plan (measured) — and
-    /// this is that mode as the chip spells it. nil when neither
-    /// spelling is listed, and the chip is then left alone.
-    nonisolated static func askBeforeEdits(in modes: [String]) -> String? {
-        if modes.contains("manual") { return "manual" }
-        if modes.contains("default") { return "default" }
-        return nil
+    private let lock = NSLock()
+    private var entries: [Entry] = []
+
+    static let capacity = 64
+    static let lifetime: TimeInterval = 120
+
+    nonisolated static func key(sessionId: String?, taskUuid: String?,
+                                toolName: String, toolInput: [String: Any]) -> String {
+        let input = (try? JSONSerialization.data(withJSONObject: toolInput,
+                                                 options: [.sortedKeys])) ?? Data()
+        let digest = SHA256.hash(data: input).map { String(format: "%02x", $0) }.joined()
+        return [sessionId ?? "", taskUuid ?? "", toolName, digest].joined(separator: "\u{1F}")
+    }
+
+    func put(_ offer: [ClaudePermissionUpdate], for key: String, now: Date = Date()) {
+        lock.lock(); defer { lock.unlock() }
+        entries.removeAll { $0.key == key || now.timeIntervalSince($0.at) > Self.lifetime }
+        entries.append(Entry(key: key, offer: offer, at: now))
+        if entries.count > Self.capacity { entries.removeFirst(entries.count - Self.capacity) }
+    }
+
+    /// The suggestions filed under `key`, removed: one request takes them.
+    func take(_ key: String, now: Date = Date()) -> [ClaudePermissionUpdate] {
+        lock.lock(); defer { lock.unlock() }
+        entries.removeAll { now.timeIntervalSince($0.at) > Self.lifetime }
+        guard let index = entries.firstIndex(where: { $0.key == key }) else { return [] }
+        return entries.remove(at: index).offer
     }
 }
 

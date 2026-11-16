@@ -2,7 +2,9 @@
 // Scanner + history reader for OpenAI Codex sessions.
 //
 // Codex stores one rollout file per recording under
-// ~/.codex/sessions/YYYY/MM/DD/rollout-<stamp>-<uuid>.jsonl. Line 1 is
+// ~/.codex/sessions/YYYY/MM/DD/rollout-<stamp>-<uuid>.jsonl — or, for
+// one left alone a while, compressed as `….jsonl.zst`, read as the text
+// it holds (`SessionFileCompression`). Line 1 is
 // a session_meta record whose payload carries the session id and cwd;
 // ~/.codex/session_index.jsonl maps id → thread_name — the display
 // name Codex Desktop shows, so reading it gives SipAI the same names.
@@ -48,19 +50,39 @@ enum CodexSessionScanner {
         "<environment_context>", "<user_instructions>", "<turn_context>",
         "<permissions", "<recommended_plugins>",
         "<app_context>", "<collaboration_mode>",
+        // A loaded skill's instructions, which codex injects as a
+        // message of their own after a `$name` mention.
+        "<skill>",
+        // What codex writes into the session after a review — the review
+        // handed to the model for later turns. The review itself is
+        // codex's message beside it.
+        "<user_action>",
     ]
 
     /// The scheduled-task marker removed, leaving the prompt. A record
     /// holding ONLY the marker reduces to "" and is then classified as
     /// context by `isContextText`, which is correct — there is no
     /// message in it.
-    static func strippedTaskMarker(_ text: String) -> String {
+    ///
+    /// `mentionLine: false` leaves a leading line of skill mentions in
+    /// place. That line is part of what CODEX records; the text of a
+    /// claude or kimi message never carries one of SipAI's, so a first
+    /// line shaped like it (`$path`, then a blank line) is the user's
+    /// own, and their reader keeps it — stripped from the live row
+    /// alone, the row would no longer match its record.
+    static func strippedTaskMarker(_ text: String, mentionLine: Bool = true) -> String {
         // Inlined attachment blocks go first, matched as a pair
         // (`AttachmentInline`): this is codex's one user-text cleaner,
         // so the row, the derived title and the fork's text match all
         // see the user's own words. The names the paperclip line prints
         // are read off the raw text by the caller before this runs.
-        let text = AttachmentInline.stripping(text)
+        var text = AttachmentInline.stripping(text)
+        // The line of skill mentions SipAI puts above a message the
+        // skill chip loads skills with (`SkillWire.codexText`); the
+        // names ride the row, read off the raw text by the caller.
+        if mentionLine, let split = SkillWire.splittingCodexMentionLine(text) {
+            text = split.rest
+        }
         guard text.contains("<scheduled-task") else { return text }
         let pattern = "<scheduled-task[^>]*>[\\s\\S]*?</scheduled-task>"
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
@@ -87,7 +109,10 @@ enum CodexSessionScanner {
     /// a fired run is classified by what its author actually wrote.
     private static func isContextText(_ text: String) -> Bool {
         let body = strippedTaskMarker(text)
-        if body.isEmpty { return true }
+        // A message of attached files alone is the user's: it has no
+        // words, and its paperclip line names what it carried. Only a
+        // record that held nothing but bookkeeping is context.
+        if body.isEmpty { return AttachmentInline.names(in: text).isEmpty }
         if contextPrefixes.contains(where: body.hasPrefix) { return true }
         let range = NSRange(location: 0, length: (body as NSString).length)
         return contextHeadingRegex.firstMatch(in: body, range: range) != nil
@@ -153,12 +178,42 @@ enum CodexSessionScanner {
         }
         let names = indexNames()
         var newestById: [String: AgentSession] = [:]
+        var rollouts: [URL] = []
+        // A thread's first file, by name: a revert's segment holds only
+        // what came after the cut, while the conversation's first message
+        // — its title, and the marker that files a scheduled run under its
+        // task — is in the file the thread began with.
+        var firstFileByThread: [String: URL] = [:]
         for case let url as URL in walker {
             let name = url.lastPathComponent
-            guard name.hasPrefix("rollout-"), name.hasSuffix(".jsonl") else {
-                continue
+            guard rolloutStem(name) != nil else { continue }
+            rollouts.append(url)
+        }
+        // A file both packed and unpacked is listed once, as the plain
+        // file: codex unpacks a compressed rollout when it loads the
+        // thread again and writes there.
+        let plainNames = Set(rollouts.lazy.map(\.lastPathComponent)
+            .filter { !$0.hasSuffix(SessionFileCompression.suffix) })
+        rollouts.removeAll {
+            SessionFileCompression.isCompressed($0)
+                && plainNames.contains(SessionFileCompression.unpacked($0).lastPathComponent)
+        }
+        for url in rollouts {
+            if let parts = rolloutParts(url.lastPathComponent), parts.segment == nil {
+                firstFileByThread[parts.thread] = url
             }
-            guard let meta = readMeta(of: url) else { continue }
+        }
+        for url in rollouts {
+            let name = url.lastPathComponent
+            guard var meta = readMeta(of: url) else { continue }
+            if rolloutParts(name)?.segment != nil,
+               let first = firstFileByThread[meta.id], first != url,
+               let opening = readMeta(of: first) {
+                meta.derivedTitle = opening.derivedTitle
+                meta.origin = opening.origin
+                meta.originTitle = opening.originTitle
+                meta.scheduledTaskName = opening.scheduledTaskName
+            }
             // Same scratch rule as the claude scanner: a rollout rooted
             // in a temp directory is a probe, not work to come back to
             // — but a SCHEDULED run is kept wherever it happened to
@@ -205,13 +260,15 @@ enum CodexSessionScanner {
                 origin: meta.origin
             )
             if let known = newestById[meta.id] {
-                // Which rollout REPRESENTS the session is still an
-                // mtime question — it asks which file was written
-                // last, not when its owner last spoke. A resume whose
-                // first prompt has not landed yet has no user record
+                // Which rollout REPRESENTS the session is a question about
+                // FILES, never about when its owner last spoke: a resume
+                // whose first prompt has not landed yet has no user record
                 // at all, and picking by `activityAt` there would keep
-                // showing the abandoned older rollout.
-                if session.modifiedAt > known.modifiedAt {
+                // showing the abandoned older rollout. A revert's segment
+                // wins over the file it was cut from even when codex last
+                // touched that file (`isCurrent`).
+                if isCurrent(url, over: known.fileURL,
+                             modified: { $0 == url ? mtime : known.modifiedAt }) {
                     newestById[meta.id] = session
                 }
             } else {
@@ -244,9 +301,7 @@ enum CodexSessionScanner {
     /// small tail, and only a file with nothing found in the first
     /// window pays for the second.
     static func lastUserMessageDate(of url: URL) -> Date? {
-        let attributes = try? FileManager.default
-            .attributesOfItem(atPath: url.path)
-        let size = (attributes?[.size] as? NSNumber)?.uint64Value
+        let size = AgentSessionScanner.contentSize(of: url)
         for budget in [256 * 1024, 4 * 1024 * 1024] {
             if let found = userMessageScan(of: url, budget: budget) {
                 return found
@@ -313,6 +368,44 @@ enum CodexSessionScanner {
         lastContextInfo(of: url).tokens
     }
 
+    /// The speed codex saved for a thread, as its newest turn recorded it:
+    /// `event_msg` `thread_settings_applied` → `thread_settings
+    /// .service_tier` (`default` is codex's standard; a null or missing
+    /// tier is standard too). `found` is false when the window holds no
+    /// such record — a thread from a codex that records none — and the
+    /// caller then knows nothing about its speed. The record is written on
+    /// every turn, so the narrow window nearly always holds it.
+    static func savedServiceTier(of url: URL) -> (found: Bool, tier: String?) {
+        // The TEXT's size: a compressed rollout is a quarter of its text, and
+        // judged on the file's size the loop would stop before the wider
+        // window on a thread whose newest turn pushed the record past 256 KB.
+        let size = AgentSessionScanner.contentSize(of: url)
+        for budget in [256 * 1024, 4 * 1024 * 1024] {
+            guard let text = AgentSessionScanner.boundedTail(of: url, budget: budget)
+            else { break }
+            var found = false
+            var tier: String? = nil
+            text.enumerateLines { line, _ in
+                // Cheap pre-filter; correctness comes from the parse.
+                guard line.contains("\"thread_settings_applied\"") else { return }
+                guard let data = line.trimmingCharacters(in: .whitespaces)
+                        .data(using: .utf8),
+                      let obj = (try? JSONSerialization.jsonObject(with: data))
+                        as? [String: Any],
+                      let payload = obj["payload"] as? [String: Any],
+                      payload["type"] as? String == "thread_settings_applied",
+                      let settings = payload["thread_settings"] as? [String: Any]
+                else { return }
+                // Forward walk: the newest record wins.
+                found = true
+                tier = settings["service_tier"] as? String
+            }
+            if found { return (true, tier) }
+            if let size, size <= UInt64(budget) { break }
+        }
+        return (false, nil)
+    }
+
     /// The footprint PLUS the window it sits in.
     /// `info.model_context_window` rides the very record the footprint
     /// is read from, so the occupancy tooltip can divide by the model's
@@ -326,9 +419,7 @@ enum CodexSessionScanner {
         // token_count past a small tail. The second window is a safety
         // net that all but never runs, and only a file that misses the
         // first pays for it.
-        let attributes = try? FileManager.default
-            .attributesOfItem(atPath: url.path)
-        let size = (attributes?[.size] as? NSNumber)?.uint64Value
+        let size = AgentSessionScanner.contentSize(of: url)
         for budget in [256 * 1024, 4 * 1024 * 1024] {
             let found = contextTokenScan(of: url, budget: budget)
             if found.tokens > 0 { return found }
@@ -396,9 +487,9 @@ enum CodexSessionScanner {
         var found: [URL] = []
         for case let url as URL in walker {
             let name = url.lastPathComponent
-            guard name.hasPrefix("rollout-"), name.hasSuffix(".jsonl") else {
-                continue
-            }
+            // A compressed rollout is the session's too: left behind, it
+            // brings a deleted session back.
+            guard rolloutStem(name) != nil else { continue }
             // The filename embeds the session UUID — cheap pre-filter;
             // the meta read confirms (older files could clash on names).
             if rolloutName(name, isFor: sessionId) {
@@ -409,6 +500,18 @@ enum CodexSessionScanner {
         }
         return found
     }
+
+    private typealias Meta = (id: String, cwd: URL?, derivedTitle: String?,
+                              origin: AgentSessionOrigin, originTitle: String?,
+                              scheduledTaskName: String?)
+
+    /// A compressed rollout's meta, by file: decoding its head is the
+    /// cost, every scan reads every rollout's head, and a compressed file
+    /// never changes (codex writes to the unpacked one). Keyed on the
+    /// file's size and modification time all the same.
+    private static let metaCacheLock = NSLock()
+    nonisolated(unsafe) private static var metaCache:
+        [String: (size: UInt64, mtime: Date, meta: Meta?)] = [:]
 
     /// `(session_id, cwd, derivedTitle)` from a rollout's head. The id
     /// falls back to the UUID embedded in the filename when the meta
@@ -422,10 +525,24 @@ enum CodexSessionScanner {
     /// is half a megabyte because the session_meta line alone runs
     /// ~40 KB and an instruction echo of similar size can precede the
     /// first real user message.
-    private static func readMeta(of url: URL)
-    -> (id: String, cwd: URL?, derivedTitle: String?,
-        origin: AgentSessionOrigin, originTitle: String?,
-        scheduledTaskName: String?)? {
+    private static func readMeta(of url: URL) -> Meta? {
+        guard SessionFileCompression.isCompressed(url) else { return readMetaNow(of: url) }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
+        let mtime = (attrs?[.modificationDate] as? Date) ?? .distantPast
+        metaCacheLock.lock()
+        let cached = metaCache[url.path]
+        metaCacheLock.unlock()
+        if let cached, cached.size == size, cached.mtime == mtime { return cached.meta }
+        let meta = readMetaNow(of: url)
+        metaCacheLock.lock()
+        if metaCache.count >= 4096 { metaCache.removeAll() }
+        metaCache[url.path] = (size, mtime, meta)
+        metaCacheLock.unlock()
+        return meta
+    }
+
+    private static func readMetaNow(of url: URL) -> Meta? {
         var id: String? = nil
         var cwd: URL? = nil
         var nickname: String? = nil
@@ -433,9 +550,12 @@ enum CodexSessionScanner {
         var origin: AgentSessionOrigin = .user
         var originTitle: String? = nil
         var scheduledTaskName: String? = nil
-        if let handle = try? FileHandle(forReadingFrom: url) {
-            defer { try? handle.close() }
-            let head = handle.readData(ofLength: 512 * 1024)
+        let head = AgentSessionScanner.head(of: url, count: 512 * 1024)
+        // A compressed rollout nothing can decode is not listed — the
+        // name alone would make it a session with no folder and no title.
+        // A real one always decodes to its meta record at least.
+        if SessionFileCompression.isCompressed(url), head?.isEmpty != false { return nil }
+        if let head {
             // Lossy on purpose: the 512 KB byte window can cut a
             // multi-byte character, and strict decoding would then
             // reject the WHOLE head — misclassifying the session. Only
@@ -487,7 +607,12 @@ enum CodexSessionScanner {
                           payload["role"] as? String == "user",
                           let content = payload["content"] as? [Any]
                     else { continue }
-                    let joined = userText(fromContent: content)
+                    var joined = userText(fromContent: content)
+                    // A session opened by a `!` command is titled as its row
+                    // reads, never by codex's record of it.
+                    if let shell = CodexShellCommand.record(fromText: joined) {
+                        joined = ShellCommandInput.display(shell.command)
+                    }
                     guard !isContextText(joined) else { continue }
                     // A run SipAI fired carries the same marker the
                     // claude scanner reads, and is filed under the same
@@ -526,9 +651,8 @@ enum CodexSessionScanner {
         if derived == nil, let nick = nickname, !nick.isEmpty {
             derived = "\(nick) (subagent)"
         }
-        if id == nil {
+        if id == nil, let stem = rolloutStem(url.lastPathComponent) {
             // rollout-<stamp>-<uuid>.jsonl — take the trailing UUID.
-            let stem = url.deletingPathExtension().lastPathComponent
             let parts = stem.split(separator: "-")
             if parts.count >= 5 {
                 let tail = parts.suffix(5).joined(separator: "-")
@@ -621,8 +745,7 @@ enum CodexSessionScanner {
         // push that marker past the first window — read as "no turn",
         // the session would sit unlit and ungated through it. Only a
         // file with no marker in the first window pays for the second.
-        let size = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size]
-                    as? NSNumber)?.uint64Value
+        let size = AgentSessionScanner.contentSize(of: url)
         let wide = 8 * 1024 * 1024
         for window in (budget < wide ? [budget, wide] : [budget]) {
             if let found = latestTurnScan(of: url, budget: window) { return found }
@@ -665,8 +788,9 @@ enum CodexSessionScanner {
 
     // MARK: - Fork reference
 
-    /// Where a forked rollout's history begins: the parent thread and
-    /// the parent's first ordinal that is NOT inherited.
+    /// Where a forked rollout's history begins: the history it continues
+    /// (a thread's id, or a revert segment's — see below) and that
+    /// history's first ordinal that is NOT inherited.
     ///
     /// Codex's own fork copies nothing. The new rollout's `session_meta`
     /// names `forked_from_id` and `forked_from_ordinal_exclusive`, and
@@ -687,6 +811,15 @@ enum CodexSessionScanner {
         let exclusiveOrdinal: Int
     }
 
+    /// Codex also writes the reference as `history_base {thread_id,
+    /// end_ordinal_exclusive}` — on a fork, and on the file a REVERT
+    /// starts (`thread/revert`, and Esc Esc in codex's terminal): the
+    /// thread keeps its id and goes on in a new file whose history is the
+    /// base's records below the cut, then its own. `thread_id` there is a
+    /// history id: a thread's id names its first file, and a revert's
+    /// segment id names that file (`historyFile(forId:)`). Read first
+    /// when present; a codex that writes only the fork fields is read as
+    /// before. A subagent is never spliced, whatever its head carries.
     static func forkOrigin(ofHeadLine line: String) -> ForkOrigin? {
         guard let data = line.trimmingCharacters(in: .whitespaces)
                 .data(using: .utf8),
@@ -694,7 +827,14 @@ enum CodexSessionScanner {
                 as? [String: Any],
               (obj["type"] as? String) == "session_meta",
               let payload = obj["payload"] as? [String: Any],
-              let parent = payload["forked_from_id"] as? String,
+              payload["subagent_history_start_ordinal"] == nil
+        else { return nil }
+        if let base = payload["history_base"] as? [String: Any],
+           let id = base["thread_id"] as? String, !id.isEmpty,
+           let exclusive = (base["end_ordinal_exclusive"] as? NSNumber)?.intValue {
+            return ForkOrigin(parentId: id, exclusiveOrdinal: exclusive)
+        }
+        guard let parent = payload["forked_from_id"] as? String,
               !parent.isEmpty,
               let exclusive = (payload["forked_from_ordinal_exclusive"]
                                 as? NSNumber)?.intValue
@@ -703,13 +843,11 @@ enum CodexSessionScanner {
     }
 
     static func forkOrigin(of url: URL) -> ForkOrigin? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else {
-            return nil
-        }
-        defer { try? handle.close() }
         // The meta record alone can run tens of KB (base instructions
         // ride in it); the window only has to reach its end.
-        let head = handle.readData(ofLength: 512 * 1024)
+        guard let head = AgentSessionScanner.head(of: url, count: 512 * 1024) else {
+            return nil
+        }
         let text = String(decoding: head, as: UTF8.self)
         guard let first = text.split(separator: "\n",
                                      omittingEmptySubsequences: true).first
@@ -717,16 +855,82 @@ enum CodexSessionScanner {
         return forkOrigin(ofHeadLine: String(first))
     }
 
-    /// Whether `name` is the file codex writes for session `id`:
-    /// `rollout-<timestamp>-<id>.jsonl`. Exact, never a substring — an
-    /// id is read out of file content, and one as short as `-` is in
-    /// every rollout's name, which on the delete path means every
-    /// rollout in the store.
-    static func rolloutName(_ name: String, isFor id: String) -> Bool {
-        !id.isEmpty && name.hasPrefix("rollout-") && name.hasSuffix("-\(id).jsonl")
+    /// A rollout's name without its extension, `rollout-<stamp>-<id>`
+    /// (or `…_<segment>`), for `….jsonl` and for the compressed
+    /// `….jsonl.zst` alike; nil for any other file.
+    static func rolloutStem(_ name: String) -> String? {
+        guard name.hasPrefix("rollout-") else { return nil }
+        let plain = name.hasSuffix(SessionFileCompression.suffix)
+            ? String(name.dropLast(SessionFileCompression.suffix.count)) : name
+        guard plain.hasSuffix(".jsonl") else { return nil }
+        return String(plain.dropLast(".jsonl".count))
     }
 
-    /// Newest rollout whose FILENAME carries this thread id.
+    /// Whether `name` is the file codex writes for session `id`:
+    /// `rollout-<timestamp>-<id>.jsonl`, or that file compressed. Exact,
+    /// never a substring — an id is read out of file content, and one as
+    /// short as `-` is in every rollout's name, which on the delete path
+    /// means every rollout in the store.
+    ///
+    /// A revert's file counts: `rollout-<stamp>-<id>_<segment>.jsonl`,
+    /// the thread going on under its own id. Deleting a session takes
+    /// those too, or it comes back from the newest of them.
+    static func rolloutName(_ name: String, isFor id: String) -> Bool {
+        guard !id.isEmpty, let stem = rolloutStem(name) else { return false }
+        if stem.hasSuffix("-\(id)") { return true }
+        guard let parts = rolloutParts(name), parts.segment != nil else { return false }
+        return parts.thread == id
+    }
+
+    /// The thread a rollout's NAME belongs to, and the revert segment it
+    /// is, when it is one: `rollout-<stamp>-<thread>.jsonl` or
+    /// `rollout-<stamp>-<thread>_<segment>.jsonl` (either compressed).
+    /// Both ids are uuids.
+    static func rolloutParts(_ name: String) -> (thread: String, segment: String?)? {
+        guard let full = rolloutStem(name) else { return nil }
+        let stem = String(full.dropFirst("rollout-".count))
+        func uuid(endingAt text: Substring) -> String? {
+            guard text.count >= 37 else { return nil }
+            let candidate = String(text.suffix(36))
+            guard text.dropLast(36).hasSuffix("-"),
+                  UUID(uuidString: candidate) != nil else { return nil }
+            return candidate
+        }
+        if let underscore = stem.lastIndex(of: "_") {
+            let segment = String(stem[stem.index(after: underscore)...])
+            guard UUID(uuidString: segment) != nil,
+                  let thread = uuid(endingAt: stem[..<underscore]) else { return nil }
+            return (thread, segment)
+        }
+        guard let thread = uuid(endingAt: Substring(stem)) else { return nil }
+        return (thread, nil)
+    }
+
+    /// Whether rollout `a` is the thread's current file rather than `b`.
+    /// A revert's segment is newer than the file it was cut from, and
+    /// segments are ordered by their ids (time-ordered uuids, compared as
+    /// text); two files with no segment are the older shape, a new file
+    /// per resume, where the one written last is current.
+    static func isCurrent(_ a: URL, over b: URL,
+                          modified: (URL) -> Date) -> Bool {
+        // One file packed and unpacked: the plain one is what codex
+        // writes to.
+        if rolloutStem(a.lastPathComponent) == rolloutStem(b.lastPathComponent),
+           SessionFileCompression.isCompressed(a) != SessionFileCompression.isCompressed(b) {
+            return !SessionFileCompression.isCompressed(a)
+        }
+        let sa = rolloutParts(a.lastPathComponent)?.segment?.lowercased()
+        let sb = rolloutParts(b.lastPathComponent)?.segment?.lowercased()
+        switch (sa, sb) {
+        case let (x?, y?) where x != y: return x > y
+        case (_?, nil): return true
+        case (nil, _?): return false
+        default: return modified(a) > modified(b)
+        }
+    }
+
+    /// The thread's CURRENT rollout, found by FILENAME: after a revert,
+    /// the newest segment (`isCurrent`), never the file the revert left.
     ///
     /// Filename-only on purpose. `rolloutFiles(forSessionId:)` answers
     /// the same question authoritatively, but falls back to reading a
@@ -747,12 +951,45 @@ enum CodexSessionScanner {
                 includingPropertiesForKeys: [.contentModificationDateKey],
                 options: [.skipsHiddenFiles])
         else { return nil }
+        func modified(_ url: URL) -> Date {
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate ?? .distantPast
+        }
+        var current: URL? = nil
+        for case let url as URL in walker {
+            guard rolloutName(url.lastPathComponent, isFor: id) else { continue }
+            if let best = current, !isCurrent(url, over: best, modified: modified) { continue }
+            current = url
+        }
+        return current
+    }
+
+    /// The file a history reference names (`ForkOrigin.parentId`): a
+    /// thread's id names the thread's FIRST file — a fork made before its
+    /// parent was reverted goes on inheriting what the parent said then
+    /// (codex's own resume of such a fork still sends it) — and
+    /// a revert segment's id names that segment.
+    static func historyFile(forId id: String, root: URL = sessionRoot) -> URL? {
+        guard !id.isEmpty,
+              let walker = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.contentModificationDateKey],
+                options: [.skipsHiddenFiles])
+        else { return nil }
         var newest: (url: URL, at: Date)? = nil
         for case let url as URL in walker {
-            let name = url.lastPathComponent
-            guard rolloutName(name, isFor: id) else { continue }
+            guard let stem = rolloutStem(url.lastPathComponent),
+                  stem.hasSuffix("-\(id)") || stem.hasSuffix("_\(id)")
+            else { continue }
             let at = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate ?? .distantPast
+            // The same file packed and unpacked: the plain one.
+            if let best = newest,
+               rolloutStem(best.url.lastPathComponent) == stem,
+               SessionFileCompression.isCompressed(best.url) != SessionFileCompression.isCompressed(url) {
+                if SessionFileCompression.isCompressed(best.url) { newest = (url, at) }
+                continue
+            }
             if newest == nil || at > newest!.at { newest = (url, at) }
         }
         return newest?.url
@@ -804,10 +1041,10 @@ enum CodexSessionScanner {
     static func inheritedPrefix(of parent: URL, belowOrdinal cut: Int,
                                 budget: Int)
     -> (lines: [String], bytes: Int, cutOffset: UInt64) {
-        guard let reader = try? FileHandle(forReadingFrom: parent) else {
+        guard let reader = SessionFileReader.open(parent) else {
             return ([], 0, 0)
         }
-        defer { try? reader.close() }
+        defer { reader.close() }
         // The budget window drops its OLDEST lines from a moving head:
         // `removeFirst` shifts every line kept, once per line read.
         var kept: [String] = []
@@ -845,7 +1082,7 @@ enum CodexSessionScanner {
         // per chunk: removing each line from the front shifts the rest of
         // the chunk, once per line — quadratic in a chunk of short lines.
         outer: while true {
-            let chunk = (try? reader.read(upToCount: prefixChunk)) ?? Data()
+            let chunk = reader.read(upToCount: prefixChunk)
             if chunk.isEmpty { break }
             leftover.append(chunk)
             var start = leftover.startIndex
@@ -878,7 +1115,7 @@ enum CodexSessionScanner {
                                root: URL = sessionRoot,
                                depth: Int = 0) -> [String] {
         guard depth < forkDepthCap,
-              let parent = rolloutFile(namedForId: origin.parentId, root: root)
+              let parent = historyFile(forId: origin.parentId, root: root)
         else { return [] }
         var lines: [String] = []
         if let grand = forkOrigin(of: parent) {
@@ -910,8 +1147,8 @@ enum CodexSessionScanner {
     /// line retained, so a multi-hundred-MB rollout costs a pass and
     /// no memory. `belowOrdinal` stops at a fork's cut for a parent.
     static func turnIds(of url: URL, belowOrdinal cut: Int? = nil) -> [String] {
-        guard let reader = try? FileHandle(forReadingFrom: url) else { return [] }
-        defer { try? reader.close() }
+        guard let reader = SessionFileReader.open(url) else { return [] }
+        defer { reader.close() }
         var ids: [String] = []
         var index = 0
         var leftover = Data()
@@ -938,7 +1175,7 @@ enum CodexSessionScanner {
         // Consumed by a cursor, compacted once per chunk (see
         // `inheritedPrefix`).
         outer: while !stop {
-            let chunk = (try? reader.read(upToCount: prefixChunk)) ?? Data()
+            let chunk = reader.read(upToCount: prefixChunk)
             if chunk.isEmpty { break }
             leftover.append(chunk)
             var start = leftover.startIndex
@@ -963,7 +1200,7 @@ enum CodexSessionScanner {
                                  root: URL = sessionRoot,
                                  depth: Int = 0) -> [String] {
         guard depth < forkDepthCap,
-              let parent = rolloutFile(namedForId: origin.parentId, root: root)
+              let parent = historyFile(forId: origin.parentId, root: root)
         else { return [] }
         var ids: [String] = []
         if let grand = forkOrigin(of: parent) {
@@ -987,13 +1224,12 @@ enum CodexSessionScanner {
     /// and judged on that alone a long inherited prefix bounded by the
     /// read would pass for the whole conversation.
     static func historyExtent(of url: URL, root: URL = sessionRoot) -> UInt64 {
-        let own = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size]
-                   as? NSNumber)?.uint64Value ?? 0
+        let own = AgentSessionScanner.contentSize(of: url) ?? 0
         var total = own
         var origin = forkOrigin(of: url)
         var depth = 0
         while let o = origin, depth < forkDepthCap,
-              let parent = rolloutFile(namedForId: o.parentId, root: root) {
+              let parent = historyFile(forId: o.parentId, root: root) {
             // A zero budget keeps no lines; only the offset is wanted.
             total += inheritedPrefix(of: parent, belowOrdinal: o.exclusiveOrdinal,
                                      budget: 0).cutOffset
@@ -1033,9 +1269,36 @@ enum CodexSessionScanner {
         /// two searches for one query stay two rows.
         private var unpairedSearchItems = 0
         private var unpairedSearchCalls = 0
+        /// The turn under way was run by `codex exec` (`turn_attribution
+        /// .turn_trigger`), which stops a command still running in a
+        /// background terminal when its turn ends — said, at the turn's end,
+        /// in the notice the live turn drew (`CodexBackgroundNotice`). Codex
+        /// records that stop only now and then (an `item_completed` after
+        /// the turn's end), so it is read off the commands themselves: an
+        /// `exec_command` whose output says it is still running, and
+        /// nothing after it saying it ended. Codex's own clients keep such
+        /// a command running past the turn, so their turns get no notice.
+        private var turnRunByExec = false
+        /// The turn's `exec_command` calls (call id → command) and its
+        /// `write_stdin` polls (call id → the terminal's session id).
+        private var commandCalls: [String: String] = [:]
+        private var pollCalls: [String: String] = [:]
+        /// Commands left running in a background terminal, by session id, in
+        /// the order they were left.
+        private var backgroundCommands: [(session: String, command: String)] = []
+        /// The turn under way has drawn the user's message it opened with.
+        /// Another one in the same turn was sent into it while it ran — a
+        /// steered message (`AgentSessionHistoryItem.sentIntoTurn`).
+        private var turnHasMessage = false
+        /// A review codex ran in this session has entered and not yet
+        /// ended: its turn's end is drawn as codex's "Code review finished".
+        private var reviewOpen = false
         /// Keep reasoning summaries as `.thinking` rows (see
         /// `readHistory`). Off, a reasoning record reads as nothing.
         var includeThinking = false
+        /// The calls held back until codex says what they ran — its
+        /// records are the rows the live feed draws (`CodexRecordedTools`).
+        var recordedTools = CodexRecordedTools()
 
         init(includeThinking: Bool = false) {
             self.includeThinking = includeThinking
@@ -1052,10 +1315,35 @@ enum CodexSessionScanner {
                 currentTurnId = turn
                 unpairedSearchItems = 0
                 unpairedSearchCalls = 0
-                return []
+                let payload = obj["payload"] as? [String: Any]
+                turnRunByExec = ((payload?["turn_attribution"] as? [String: Any])?["turn_trigger"]
+                                 as? String) == "exec"
+                commandCalls = [:]
+                pollCalls = [:]
+                backgroundCommands = []
+                turnHasMessage = false
+                // A turn whose end codex never wrote (a killed one) draws
+                // what it held back before the next one starts.
+                return recordedTools.turnEnded()
             }
             guard let payload = obj["payload"] as? [String: Any] else {
                 return []
+            }
+            // A turn's end draws what its calls held back, ahead of the
+            // notices the end itself draws.
+            let turnEnds = CodexSessionScanner.turnEnded(obj) != nil
+            let released = turnEnds ? recordedTools.turnEnded() : []
+            if let rows = reviewRows(obj, payload) { return released + rows }
+            if let rows = backgroundCommandRows(obj, payload) { return released + rows }
+            if turnEnds { return released }
+
+            // A command or a file change codex recorded: the row the live
+            // feed draws for it, in place of the call that ran it.
+            if (obj["type"] as? String) == "event_msg",
+               (payload["type"] as? String) == "item_completed",
+               let item = payload["item"] as? [String: Any],
+               let rows = recordedTools.record(item) {
+                return rows
             }
 
             // A web search's own record (`item_completed`, a `WebSearch`
@@ -1091,6 +1379,24 @@ enum CodexSessionScanner {
                                    input: ["command": summary]))]
             }
 
+            // A message the agent sent without ending its turn
+            // (`delivery: "async"`) — above all a question it asks without
+            // stopping — is recorded ONLY as this `item_completed`: its
+            // call (`request_user_input_async`) has nothing a tool row
+            // could say, and no assistant record repeats it. The live turn
+            // draws its text, so the reopened one does too.
+            if (obj["type"] as? String) == "event_msg",
+               (payload["type"] as? String) == "item_completed",
+               let item = payload["item"] as? [String: Any],
+               (item["type"] as? String) == "AgentMessage",
+               (item["delivery"] as? String) == "async" {
+                let text = (item["content"] as? [Any] ?? [])
+                    .compactMap { ($0 as? [String: Any])?["text"] as? String }
+                    .joined()
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return text.isEmpty ? [] : [AgentSessionHistoryItem(kind: .assistantText(text))]
+            }
+
             // The agent summarised the conversation and carried on.
             // Codex states no before/after figures, so the row says so
             // without them — the same row every agent gets, minus what
@@ -1112,6 +1418,28 @@ enum CodexSessionScanner {
                 let joined = CodexSessionScanner.userText(fromContent: content)
                 guard !joined.isEmpty else { return [] }
                 if role == "user" {
+                    // The user's answer to a question asked without
+                    // stopping, steered into the turn that asked: drawn
+                    // as codex's terminal draws it, never as the envelope.
+                    // Given on the question's card, it is part of the
+                    // agent's answer.
+                    if let reply = CodexSessionScanner.questionReplyDisplay(of: joined) {
+                        var item = AgentSessionHistoryItem(kind: .userText(reply),
+                                                           recordUuid: currentTurnId)
+                        item.sentIntoTurn = true
+                        item.belongsToAnswer = true
+                        return [item]
+                    }
+                    // A `!` command: codex keeps it as a user message of
+                    // its own making (`CodexShellCommand.record`) — the
+                    // user's row, and the output under it.
+                    if let shell = CodexShellCommand.record(fromText: joined) {
+                        var item = AgentSessionHistoryItem(
+                            kind: .userText(ShellCommandInput.display(shell.command)),
+                            recordUuid: currentTurnId)
+                        item.shellCommand = true
+                        return [item, AgentSessionHistoryItem(kind: .shellOutput(shell.output))]
+                    }
                     if CodexSessionScanner.isContextText(joined) {
                         return []
                     }
@@ -1122,9 +1450,25 @@ enum CodexSessionScanner {
                         kind: .userText(CodexSessionScanner.strippedTaskMarker(joined)),
                         recordUuid: currentTurnId)
                     item.attachedFiles = AttachmentInline.names(in: joined)
+                    item.loadedSkills = SkillWire.splittingCodexMentionLine(
+                        AttachmentInline.stripping(joined))?.names ?? []
+                    // A second message in one turn was steered into it
+                    // while it ran: the user's words, no turn of its own.
+                    item.sentIntoTurn = turnHasMessage
+                    turnHasMessage = true
                     return [item]
                 }
-                return [AgentSessionHistoryItem(kind: .assistantText(joined))]
+                // The agent's words: a call that finished before them with
+                // nothing recorded for it is drawn first, where it ran.
+                let released = recordedTools.boundary()
+                // A plan codex's Plan mode proposed: drawn after the words
+                // around it, as the live turn draws the plan item codex
+                // cuts out of the message — and without the tags.
+                if let split = CodexSessionScanner.proposedPlanSplit(joined) {
+                    return released + [split.outside, split.plan].filter { !$0.isEmpty }
+                        .map { AgentSessionHistoryItem(kind: .assistantText($0)) }
+                }
+                return released + [AgentSessionHistoryItem(kind: .assistantText(joined))]
             }
 
             switch payload["type"] as? String {
@@ -1149,28 +1493,226 @@ enum CodexSessionScanner {
                     if unpairedSearchItems > 0 { unpairedSearchItems -= 1 }
                     return []
                 }
+                let name = (payload["name"] as? String)
+                    ?? (payload["type"] as? String) ?? "tool"
+                let namespace = payload["namespace"] as? String
+                // A new call: one that finished before it with nothing
+                // recorded for it is drawn first, where it ran.
+                let released = recordedTools.boundary()
+                if CodexRecordedTools.isPlumbing(name: name, namespace: namespace) { return released }
                 // A tool row with nothing to say is pure noise in a
                 // read-only transcript — show it with its arguments or
                 // not at all.
                 guard let summary = CodexSessionScanner.toolCallSummary(payload)
-                else { return [] }
+                else { return released }
                 if isSearchCall {
                     if unpairedSearchItems > 0 {
                         unpairedSearchItems -= 1
-                        return []
+                        return released
                     }
                     unpairedSearchCalls += 1
                 }
-                let name = (payload["name"] as? String)
-                    ?? (payload["type"] as? String) ?? "tool"
-                return [AgentSessionHistoryItem(
+                // A call codex records the work of waits for that record,
+                // which is the row the live feed draws; its own row is
+                // what is drawn if none comes, under its id, so a record
+                // that comes after all adds its output to it.
+                let callId = payload["call_id"] as? String ?? ""
+                if !callId.isEmpty, CodexRecordedTools.isRecorded(name: name, namespace: namespace) {
+                    let row = AgentSessionHistoryItem(
+                        kind: .toolUse(id: callId, name: name, input: ["command": summary]))
+                    recordedTools.hold(
+                        callId: callId, row: row, isScript: name == "exec",
+                        input: (payload["input"] as? String) ?? "")
+                    return released
+                }
+                return released + [AgentSessionHistoryItem(
                     kind: .toolUse(id: UUID().uuidString,
                                    name: name,
                                    input: ["command": summary]))]
+            case "function_call_output", "custom_tool_call_output":
+                if let callId = payload["call_id"] as? String {
+                    recordedTools.output(callId: callId, raw: payload["output"])
+                }
+                return []
             default:
                 return []
             }
         }
+
+        /// A review codex ran in the session (its terminal's `/review`,
+        /// `review/start`): the notices its terminal draws around it, in its
+        /// words — "Code review started: <what>" where codex records entering
+        /// review mode, "Code review finished" at the end of the turn that
+        /// left it. The review itself is codex's message between them, and
+        /// the `<user_action>` copy codex keeps for the model is context.
+        /// Nil lets the record be read as it always is.
+        private mutating func reviewRows(_ obj: [String: Any],
+                                         _ payload: [String: Any]) -> [AgentSessionHistoryItem]? {
+            switch (obj["type"] as? String, payload["type"] as? String) {
+            case ("event_msg", "item_completed"):
+                guard let item = payload["item"] as? [String: Any] else { return nil }
+                switch item["type"] as? String {
+                case "EnteredReviewMode":
+                    reviewOpen = true
+                    let what = (item["user_facing_hint"] as? String)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    return [AgentSessionHistoryItem(
+                        kind: .userText(CodexReviewWords.started(what)), isSystemNotice: true)]
+                case "ExitedReviewMode":
+                    return []
+                default:
+                    return nil
+                }
+            case ("event_msg", "task_complete"):
+                guard reviewOpen else { return nil }
+                reviewOpen = false
+                return [AgentSessionHistoryItem(kind: .userText(CodexReviewWords.finished),
+                                                isSystemNotice: true)]
+                    + (backgroundCommandRows(obj, payload) ?? [])
+            case ("event_msg", "turn_aborted"):
+                // A review that was stopped ends without codex's "finished",
+                // live and reopened alike.
+                reviewOpen = false
+                return nil
+            default:
+                return nil
+            }
+        }
+
+        /// Follows the commands an exec turn leaves running in a background
+        /// terminal (`turnRunByExec`), and at the turn's end hands back the
+        /// notice for each one still running. Nil lets the record be read
+        /// as it always is.
+        private mutating func backgroundCommandRows(_ obj: [String: Any],
+                                                    _ payload: [String: Any]) -> [AgentSessionHistoryItem]? {
+            switch (obj["type"] as? String, payload["type"] as? String) {
+            case ("response_item", "function_call"):
+                guard let call = payload["call_id"] as? String else { return nil }
+                let arguments = (payload["arguments"] as? String)
+                    .flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } as? [String: Any]
+                switch payload["name"] as? String {
+                case "exec_command":
+                    commandCalls[call] = arguments?["cmd"] as? String ?? ""
+                case "write_stdin":
+                    if let session = arguments?["session_id"] { pollCalls[call] = "\(session)" }
+                default:
+                    break
+                }
+                return nil
+            case ("response_item", "function_call_output"):
+                guard let call = payload["call_id"] as? String,
+                      let output = payload["output"] as? String else { return nil }
+                if let command = commandCalls[call], let session = Self.runningSession(in: output) {
+                    backgroundCommands.append((session, command))
+                } else if let session = pollCalls[call], output.contains("Process exited with code") {
+                    backgroundCommands.removeAll { $0.session == session }
+                }
+                return nil
+            case ("event_msg", "item_completed"):
+                // A command that ended within the turn.
+                if let item = payload["item"] as? [String: Any],
+                   (item["type"] as? String) == "CommandExecution",
+                   let session = item["process_id"] {
+                    backgroundCommands.removeAll { $0.session == "\(session)" }
+                }
+                return nil
+            case ("event_msg", "task_complete"):
+                defer { backgroundCommands = [] }
+                guard turnRunByExec else { return nil }
+                return backgroundCommands.map {
+                    AgentSessionHistoryItem(
+                        kind: .userText(CodexBackgroundNotice.stopped(command: $0.command)),
+                        isSystemNotice: true)
+                }
+            default:
+                return nil
+            }
+        }
+
+        /// The terminal a command's output says it still runs in — codex's
+        /// words to the model, "Process running with session ID 36050" — or
+        /// nil.
+        static func runningSession(in output: String) -> String? {
+            guard let range = output.range(of: "Process running with session ID ") else { return nil }
+            let digits = output[range.upperBound...].prefix { ("0"..."9").contains($0) }
+            return digits.isEmpty ? nil : String(digits)
+        }
+    }
+
+    // MARK: - Answers to a question asked without stopping
+
+    /// One answer in codex's reply to a question it asked without stopping
+    /// (`request_user_input_async`): the question's id
+    /// (`["request_user_input_async","<message id>",<index>]`), the
+    /// question as the reply repeats it, and the answer.
+    struct QuestionReply: Equatable {
+        let questionItemId: String
+        let question: String
+        let answer: String
+    }
+
+    /// The tags codex's own clients wrap such answers in — the user message
+    /// steered into the turn that asked.
+    static let questionReplyOpen = "<send_user_message_question_reply>"
+    static let questionReplyClose = "</send_user_message_question_reply>"
+
+    /// The answers a user message carries, read the way codex's own terminal
+    /// reads them: the whole message, trimmed, is the envelope — optionally
+    /// after the context block codex's desktop app puts above a request —
+    /// holding a list of answers or a single one, every one complete. Nil
+    /// for anything else: a message that merely quotes the tags is the
+    /// user's own words.
+    static func questionReplies(in text: String) -> [QuestionReply]? {
+        var body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if body.hasPrefix("# Context from my IDE setup:\n") {
+            guard let request = body.range(of: "\n## My request for Codex:\n", options: .backwards)
+            else { return nil }
+            body = String(body[request.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard body.hasPrefix(questionReplyOpen), body.hasSuffix(questionReplyClose),
+              body.count >= questionReplyOpen.count + questionReplyClose.count else { return nil }
+        let json = body.dropFirst(questionReplyOpen.count).dropLast(questionReplyClose.count)
+        guard let parsed = try? JSONSerialization.jsonObject(with: Data(json.utf8)) else { return nil }
+        let entries: [Any] = (parsed as? [Any]) ?? [parsed]
+        var replies: [QuestionReply] = []
+        for entry in entries {
+            guard let dict = entry as? [String: Any],
+                  let id = dict["questionItemId"] as? String,
+                  let question = dict["question"] as? String,
+                  let answer = dict["answer"] as? String else { return nil }
+            replies.append(QuestionReply(questionItemId: id, question: question, answer: answer))
+        }
+        return replies.isEmpty ? nil : replies
+    }
+
+    /// Such a message as codex's terminal draws it: each question quoted on
+    /// one line, its answer under it. Nil when the text is not one.
+    static func questionReplyDisplay(of text: String) -> String? {
+        guard let replies = questionReplies(in: text) else { return nil }
+        return replies.map { reply in
+            let question = reply.question
+                .components(separatedBy: .newlines)
+                .joined(separator: " ")
+            return "> \(question)\n\n\(reply.answer)"
+        }.joined(separator: "\n\n")
+    }
+
+    /// An agent message holding a `<proposed_plan>` block — what codex's
+    /// Plan mode wraps a finished plan in — split as codex's app-server
+    /// splits it for a live turn: the words around the block, then the
+    /// plan. Nil when the text holds no complete block.
+    static func proposedPlanSplit(_ text: String) -> (outside: String, plan: String)? {
+        guard let open = text.range(of: "<proposed_plan>"),
+              let close = text.range(of: "</proposed_plan>",
+                                     range: open.upperBound..<text.endIndex)
+        else { return nil }
+        let plan = String(text[open.upperBound..<close.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let outside = [String(text[..<open.lowerBound]), String(text[close.upperBound...])]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+        return (outside, plan)
     }
 
     /// Walk a rollout and emit history items in chronological order.
@@ -1181,8 +1723,9 @@ enum CodexSessionScanner {
     /// A forked rollout is read as codex reads it: the parent's
     /// records below the cut first (`inheritedLines`), then its own.
     ///
-    /// `includeThinking` keeps reasoning summaries as `.thinking` rows,
-    /// for a session with Chat only turns in it; the caller then applies
+    /// `includeThinking` keeps reasoning summaries as `.thinking` rows:
+    /// every one while compact view is on, and for a session with Chat
+    /// only turns in it, where the caller then applies
     /// `AgentSessionHistoryItem.keepingThoughts`.
     static func readHistory(of url: URL, maxTurns: Int = 50,
                             byteBudget: Int? = nil,
@@ -1211,6 +1754,7 @@ enum CodexSessionScanner {
         text.enumerateLines { line, _ in
             items.append(contentsOf: decoder.items(forLine: line))
         }
+        items.append(contentsOf: decoder.finish())
 
         // Same turn-based cap as the Claude reader.
         let userIndices = items.enumerated().compactMap { i, it -> Int? in
@@ -1337,3 +1881,91 @@ enum CodexSessionScanner {
     }
 }
 
+/// The words codex's own terminal puts on a review, spelled once for the
+/// picker, the live rows and the reader.
+enum CodexReviewWords {
+    static var selectPreset: String {
+        String(localized: "Select a review preset",
+               comment: "Title of the review picker shown when /review is typed in a Codex session, in Codex's own words")
+    }
+    static var againstBaseBranch: String {
+        String(localized: "Review against a base branch (PR Style)",
+               comment: "Review picker preset, in Codex's own words: review the changes against a branch the user picks")
+    }
+    static var uncommittedChanges: String {
+        String(localized: "Review uncommitted changes",
+               comment: "Review picker preset, in Codex's own words: review staged, unstaged and untracked changes")
+    }
+    static var aCommit: String {
+        String(localized: "Review a commit",
+               comment: "Review picker preset, in Codex's own words: review one commit the user picks")
+    }
+    static var customInstructions: String {
+        String(localized: "Custom review instructions",
+               comment: "Review picker preset, in Codex's own words: review by the user's own instructions")
+    }
+    static var selectBaseBranch: String {
+        String(localized: "Select a base branch",
+               comment: "Review picker step, in Codex's own words: pick the branch to review against")
+    }
+    static var searchBranches: String {
+        String(localized: "Type to search branches",
+               comment: "Review picker search field placeholder, in Codex's own words")
+    }
+    static var selectCommit: String {
+        String(localized: "Select a commit to review",
+               comment: "Review picker step, in Codex's own words: pick the commit to review")
+    }
+    static var searchCommits: String {
+        String(localized: "Type to search commits",
+               comment: "Review picker search field placeholder, in Codex's own words")
+    }
+    static var typeInstructions: String {
+        String(localized: "Type instructions and press Enter",
+               comment: "Review picker text field placeholder, in Codex's own words")
+    }
+    /// Codex's ">> Code review started: <what> <<", without the chevrons.
+    static func started(_ what: String) -> String {
+        String(localized: "Code review started: \(what)",
+               comment: "Transcript notice when a Codex review begins, in Codex's own words; placeholder is what is reviewed, in Codex's words (e.g. “current changes”)")
+    }
+    /// Codex's "<< Code review finished >>", without the chevrons.
+    static var finished: String {
+        String(localized: "Code review finished",
+               comment: "Transcript notice when a Codex review ends, in Codex's own words")
+    }
+    /// How a review chosen while a turn runs reads above the message box,
+    /// until it runs.
+    static func label(baseBranch branch: String) -> String {
+        String(localized: "Review against “\(branch)”",
+               comment: "A Codex review waiting above the message box for the running turn to end; placeholder is the branch the changes are reviewed against")
+    }
+    static func label(commit shortSha: String, subject: String) -> String {
+        subject.isEmpty
+            ? String(localized: "Review commit \(shortSha)",
+                     comment: "A Codex review waiting above the message box for the running turn to end; placeholder is the commit's short id")
+            : String(localized: "Review commit \(shortSha): \(subject)",
+                     comment: "A Codex review waiting above the message box for the running turn to end; placeholders are the commit's short id and its subject line")
+    }
+    static func label(customInstructions words: String) -> String {
+        String(localized: "Review: \(words)",
+               comment: "A Codex review waiting above the message box for the running turn to end; placeholder is the user's own review instructions")
+    }
+}
+
+/// The words a command codex stopped at the end of a `codex exec` turn is
+/// drawn with: the model may well have said it started the command in the
+/// background and would report on it, and nothing else on screen says the
+/// command did not run to its end. One spelling for the live turn (the
+/// runner, when exec's turn completes with a command still running) and
+/// the reopened one (`CodexSessionScanner.RolloutDecoder`).
+enum CodexBackgroundNotice {
+    static func stopped(command: String) -> String {
+        let shown = BackgroundTaskLine.shown(command)
+        return shown.isEmpty
+            ? String(localized: "A background command was stopped when the turn ended.",
+                     comment: "Transcript notice: Codex stopped a command still running in a background terminal when its turn ended; the command is unknown")
+            : String(localized: "Background command stopped when the turn ended: \(shown)",
+                     comment: "Transcript notice: Codex stopped a command still running in a background terminal when its turn ended; placeholder is the command")
+    }
+}

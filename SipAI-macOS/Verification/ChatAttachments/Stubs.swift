@@ -48,10 +48,6 @@ final class ConfigManager {
     func apiKey(for key: String) -> String? { keys[key] }
 }
 
-enum ProviderHTTP {
-    static let session = URLSession.shared
-}
-
 enum SipaiPaths {
     /// Redirected to a throwaway directory: `UsageLog` writes on every
     /// reply, and the harness must never touch the real usage file.

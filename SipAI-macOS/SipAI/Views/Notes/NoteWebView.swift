@@ -117,7 +117,9 @@ class NoteWebNavigationDelegate: NSObject, WKNavigationDelegate {
             decisionHandler(.cancel); return
         }
         if navigationAction.navigationType == .linkActivated {
-            if let safe = MarkdownInline.safeLink(url.absoluteString) {
+            if FileLinkURL.path(of: url) != nil {
+                FileLinkOpener.open(url)
+            } else if let safe = MarkdownInline.safeLink(url.absoluteString) {
                 NSWorkspace.shared.open(safe)
             }
             decisionHandler(.cancel)
@@ -173,8 +175,9 @@ struct NoteWebView: NSViewRepresentable {
     let metadata: NoteHTML.Metadata
     let dark: Bool
     /// The body size of the on-screen document, 14 at the Default tier.
-    /// Part of the HTML, so a tier change reloads the page through the
-    /// same `loadedHTML` comparison a content change does.
+    /// A change of it alone is applied to the page in place
+    /// (`NoteHTML.resizeScript`), keeping the reader's place; a reload
+    /// would put them back at the top of the note.
     let bodyPointSize: CGFloat
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -186,6 +189,13 @@ struct NoteWebView: NSViewRepresentable {
         /// page — and throw away the reader's scroll position — several
         /// times a second.
         var loadedHTML: String?
+        /// The body size `loadedHTML` was built at. The comparison builds
+        /// the document at THIS size, so a change of size alone does not
+        /// read as new content.
+        var loadedSize: CGFloat = 0
+        /// The body size the page shows now — `loadedSize` until the size
+        /// is changed in place.
+        var shownSize: CGFloat = 0
     }
 
     func makeNSView(context: Context) -> WKWebView {
@@ -200,13 +210,27 @@ struct NoteWebView: NSViewRepresentable {
     }
 
     private func load(_ web: WKWebView, coordinator: Coordinator) {
-        let html = NoteHTML.document(markdown: markdown,
-                                     metadata: metadata,
-                                     dark: dark,
-                                     forPrint: false,
-                                     bodyPointSize: bodyPointSize)
-        guard coordinator.loadedHTML != html else { return }
+        if let loaded = coordinator.loadedHTML,
+           loaded == document(bodyPointSize: coordinator.loadedSize) {
+            guard bodyPointSize != coordinator.shownSize else { return }
+            // The same note at another size. A page still loading has no
+            // place to keep yet; it is loaded again at the new size.
+            if !web.isLoading {
+                coordinator.shownSize = bodyPointSize
+                web.evaluateJavaScript(NoteHTML.resizeScript(bodyPointSize: bodyPointSize)) { result, _ in
+                    guard (result as? Bool) != true else { return }
+                    // Not applied: the page is loaded again at the size
+                    // it should show, the reader's place lost with it.
+                    coordinator.loadedHTML = nil
+                    load(web, coordinator: coordinator)
+                }
+                return
+            }
+        }
+        let html = document(bodyPointSize: bodyPointSize)
         coordinator.loadedHTML = html
+        coordinator.loadedSize = bodyPointSize
+        coordinator.shownSize = bodyPointSize
         guard let staged = try? KaTeXAssets.write(html: html, name: "preview.html") else {
             // Losing the staged assets must not blank the note. Render
             // the same document with no KaTeX rather than nothing: the
@@ -217,6 +241,14 @@ struct NoteWebView: NSViewRepresentable {
         }
         coordinator.delegate.allowedFile = staged.file
         web.loadFileURL(staged.file, allowingReadAccessTo: staged.root)
+    }
+
+    private func document(bodyPointSize: CGFloat) -> String {
+        NoteHTML.document(markdown: markdown,
+                          metadata: metadata,
+                          dark: dark,
+                          forPrint: false,
+                          bodyPointSize: bodyPointSize)
     }
 }
 

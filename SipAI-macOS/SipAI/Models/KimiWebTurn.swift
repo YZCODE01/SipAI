@@ -11,14 +11,14 @@
 // (`KimiToolPolicy`) — but a session that does not exist yet has no
 // directory to put that file in, and a session born through the server
 // but never prompted refuses `--prompt --session` outright
-// ("model.not_configured: Model not set" — measured, even with a
-// `default_model` configured): the model is bound by the FIRST prompt.
+// ("model.not_configured: Model not set", even with a `default_model`
+// configured): the model is bound by the FIRST prompt.
 // So the first prompt goes through the server, which takes
 // `disabled_tools` per prompt, and every later turn is an ordinary
 // `--prompt --session` around the policy file.
 //
-// Measured on kimi-code 2.0.1 over a throwaway `KIMI_CODE_HOME` (the
-// harness reproduces each):
+// What the server does, each fact reproduced by the harness over a
+// throwaway `KIMI_CODE_HOME`:
 //
 //   * `POST /api/v1/sessions {metadata:{cwd}}` creates the directory
 //     (`state.json` with the cwd, `notify/`) before any turn. The cwd
@@ -34,19 +34,38 @@
 //     read out of the wire's `profile.bind` record) and `model:
 //     <alias>`, which the route applies first. With them every listed
 //     tool is off (all 26 listed → 0 tools).
+//   * A newer kimi binds the profile and the model when the session
+//     is CREATED (`agent_config: {profile, model}`): a prompt
+//     naming a profile is refused ("choose the agent profile with
+//     agent_config.profile when creating the session"). And the tools a
+//     prompt's `disabled_tools` names are stored in the policy file and
+//     NOT applied to that prompt's turn — every tool is still sent;
+//     kimi applies the file when it OPENS the session. So on such a kimi
+//     the session is closed once made, its file written by the caller,
+//     and a fresh server opens it for the prompt, which carries no list
+//     (`Binding`; measured: one tool sent, the web lookup Chat only keeps).
 //   * The server writes the session's `tool-policy/state.json` itself
-//     for that prompt, and the file outlives the server — so the caller
-//     restores it (`.absent`) when the turn ends.
+//     for that prompt (a kimi that binds on the first prompt), and the
+//     file outlives the server — so the caller restores it (`.absent`)
+//     when the turn ends.
 //   * `GET /sessions/{id}` answers `busy` and `main_turn_active`;
 //     `/status` answers `busy` alone. Idle is both false.
-//   * Stop: the prompt action route `POST …/prompts/{prompt_id}::abort`
-//     is mounted (it reaches kimi's `abortPromptAction`) but on 2.0.1
-//     answered "prompt …: not found" for a running prompt, as did the
-//     session-level `…/sessions/{id}::abort`; `POST /api/v1/shutdown`
-//     certainly ends it — the wire then records `turn.ended reason:
-//     cancelled` and `prompt.aborted`, and the server exits within a
-//     few seconds. So Stop tries the action route and shuts down
-//     whether or not it answered.
+//   * A turn kimi ends as FAILED — the model unreachable after kimi's
+//     own retries — answers idle all the same, `last_turn_reason:
+//     "failed"` beside `busy`. Why is in the record's `turn.ended`,
+//     written before the session first answers idle, and so is each
+//     retry while it waits (`turn.step.retrying`). Read as "idle" alone,
+//     the turn ends on no row at all — the question with nothing under
+//     it — however long kimi spent retrying.
+//   * Stop: the prompt action route is `POST …/prompts/{prompt_id}:abort`
+//     — ONE colon. Kimi splits the action off the LAST colon, so a
+//     doubled one asks for the prompt `<id>:` and is answered "prompt …:
+//     not found" while the turn runs on. Answered, the route says
+//     `{"aborted": true}`, the session is idle within a second, and the
+//     wire records `turn.cancel`, `turn.ended reason: cancelled` and
+//     `prompt.aborted`. `POST /api/v1/shutdown` then ends the server
+//     (and with it any turn the route did not reach), so Stop sends
+//     both, whatever the route answered.
 //
 // The request layer is pure over bytes and paths; the two async drivers
 // run over `KimiWebServerCall.Session` (start on a free port, PTY,
@@ -70,18 +89,43 @@ enum KimiWebTurn {
     static let promptCeiling: TimeInterval = 15
     static let abortCeiling: TimeInterval = 5
 
+    /// Where a new session's profile and model are bound.
+    enum Binding: Equatable {
+        /// On the first prompt, beside `disabled_tools`: a kimi before
+        /// `atCreationFloor`.
+        case onFirstPrompt
+        /// In `agent_config` when the session is created: the kimi that
+        /// refuses a prompt naming a profile, and applies the tools a
+        /// session's policy file names only when it opens the session.
+        case atCreation
+
+        static let atCreationFloor = "2.6.1"
+
+        /// The binding the installed kimi takes. A version not read yet
+        /// answers the older one; Chat only is not offered before kimi's
+        /// version is read.
+        static func of(kimiVersion: String?) -> Binding {
+            ChatOnlyAvailability.versionAtLeast(kimiVersion, atCreationFloor) ? .atCreation : .onFirstPrompt
+        }
+    }
+
     // MARK: - Request layer (pure)
 
     static var sessionsPath: String { apiPrefix + "/sessions" }
     static func sessionPath(_ id: String) -> String { sessionsPath + "/" + id }
     static func promptsPath(_ id: String) -> String { sessionPath(id) + "/prompts" }
     static func abortPath(session: String, prompt: String) -> String {
-        promptsPath(session) + "/" + prompt + "::abort"
+        promptsPath(session) + "/" + prompt + ":abort"
     }
 
-    /// `{metadata:{cwd}}` — the RESOLVED path (see the header).
-    static func createSessionBody(cwd: URL) -> [String: Any] {
-        ["metadata": ["cwd": resolvedPath(cwd)]]
+    /// `{metadata:{cwd}}` — the RESOLVED path (see the header) — and, for
+    /// a kimi that binds at creation, the profile and the model.
+    static func createSessionBody(cwd: URL, model: String, binding: Binding) -> [String: Any] {
+        var body: [String: Any] = ["metadata": ["cwd": resolvedPath(cwd)]]
+        if binding == .atCreation {
+            body["agent_config"] = ["profile": profileName, "model": model]
+        }
+        return body
     }
 
     /// `realpath(3)` of a directory — what `process.cwd()` answers the
@@ -100,19 +144,23 @@ enum KimiWebTurn {
     }
 
     /// The first prompt's body: the content (image blocks, then the
-    /// text), the profile and model the route needs to bind before it
-    /// can honour `disabled_tools`, and the names. `thinking` is
-    /// deliberately absent — the string the route takes for it is
-    /// unmeasured. Images ride this first turn only, the shape kimi's
-    /// route takes (`source.kind == "base64"`, `ChatOnlyImages`).
+    /// text) and, for a kimi that binds on the first prompt, the profile
+    /// and model the route needs to bind before it can honour
+    /// `disabled_tools`, and the names. A kimi that binds at creation
+    /// gets the content alone: its session's policy file names the tools
+    /// (see the header). `thinking` is deliberately absent — the string
+    /// the route takes for it is unmeasured. Images ride this first turn
+    /// only, the shape kimi's route takes (`source.kind == "base64"`,
+    /// `ChatOnlyImages`).
     static func promptBody(text: String, model: String, disabledTools: [String],
-                           images: [AgentImage] = []) -> [String: Any] {
-        [
-            "content": ChatOnlyImages.kimiContentBlocks(text: text, images: images),
-            "profile": profileName,
-            "model": model,
-            "disabled_tools": disabledTools,
-        ]
+                           binding: Binding, images: [AgentImage] = []) -> [String: Any] {
+        var body: [String: Any] = ["content": ChatOnlyImages.kimiContentBlocks(text: text, images: images)]
+        if binding == .onFirstPrompt {
+            body["profile"] = profileName
+            body["model"] = model
+            body["disabled_tools"] = disabledTools
+        }
+        return body
     }
 
     /// `data.id` of a created session.
@@ -136,6 +184,32 @@ enum KimiWebTurn {
         guard let obj = envelopeData(data), let busy = obj["busy"] as? Bool else { return nil }
         let mainTurn = (obj["main_turn_active"] as? Bool) ?? false
         return !busy && !mainTurn
+    }
+
+    /// How a session answer says its last turn ended
+    /// (`last_turn_reason`: "failed" for a turn whose model never
+    /// answered), or nil where it does not say.
+    static func lastTurnReason(sessionAnswer data: Data) -> String? {
+        guard let obj = envelopeData(data), let reason = obj["last_turn_reason"] as? String,
+              !reason.isEmpty
+        else { return nil }
+        return reason
+    }
+
+    /// Why the turn failed, as its row says it, or nil for a turn that
+    /// did not fail. A failed turn answers idle like any other, so
+    /// "idle" is never "answered": kimi's words are the record's (the
+    /// reader's `.error` row — `KimiSessionScanner.failedTurnReason`),
+    /// and a server saying the turn failed while the record holds no
+    /// such row still ends it, on `wordless`.
+    ///
+    /// - Parameter items: the turn's rows, as the reader drew them.
+    static func failure(in items: [AgentSessionHistoryItem], lastTurnReason: String?,
+                        wordless: String) -> String? {
+        for item in items {
+            if case .error(let message) = item.kind { return message }
+        }
+        return lastTurnReason == "failed" ? wordless : nil
     }
 
     /// Kimi's own sentence out of an error envelope (`msg` beside a
@@ -169,10 +243,10 @@ enum KimiWebTurn {
     }
 
     /// Create the session. Answers its id.
-    static func createSession(_ session: KimiWebServerCall.Session,
-                              cwd: URL) async -> Result<String, Failure> {
-        let answer = await session.request(method: "POST", path: sessionsPath,
-                                           body: createSessionBody(cwd: cwd),
+    static func createSession(_ session: KimiWebServerCall.Session, cwd: URL, model: String,
+                              binding: Binding) async -> Result<String, Failure> {
+        let body = createSessionBody(cwd: cwd, model: model, binding: binding)
+        let answer = await session.request(method: "POST", path: sessionsPath, body: body,
                                            ceiling: createCeiling)
         switch answer {
         case .failure(let error):
@@ -189,12 +263,11 @@ enum KimiWebTurn {
     /// Submit the first prompt. Answers the prompt id.
     static func prompt(_ session: KimiWebServerCall.Session, sessionId: String,
                        text: String, model: String,
-                       disabledTools: [String],
+                       disabledTools: [String], binding: Binding,
                        images: [AgentImage] = []) async -> Result<String, Failure> {
-        let answer = await session.request(method: "POST", path: promptsPath(sessionId),
-                                           body: promptBody(text: text, model: model,
-                                                            disabledTools: disabledTools,
-                                                            images: images),
+        let body = promptBody(text: text, model: model, disabledTools: disabledTools,
+                              binding: binding, images: images)
+        let answer = await session.request(method: "POST", path: promptsPath(sessionId), body: body,
                                            ceiling: promptCeiling)
         switch answer {
         case .failure(let error):
@@ -208,28 +281,36 @@ enum KimiWebTurn {
         }
     }
 
+    /// What the session said once it was idle.
+    struct Idle: Equatable {
+        /// `lastTurnReason(sessionAnswer:)` of the idle answer.
+        let lastTurnReason: String?
+    }
+
     /// Poll until the session is idle, or `isCancelled` says stop.
-    /// Answers true when idle was observed, false when the wait was
+    /// Answers what the idle session said, nil when the wait was
     /// abandoned (cancelled, or the server stopped answering).
     static func waitIdle(_ session: KimiWebServerCall.Session, sessionId: String,
-                         isCancelled: @Sendable () -> Bool) async -> Bool {
+                         isCancelled: @Sendable () -> Bool) async -> Idle? {
         var misses = 0
         while !isCancelled() {
             try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
-            if isCancelled() { return false }
+            if isCancelled() { return nil }
             let answer = await session.request(method: "GET", path: sessionPath(sessionId))
             switch answer {
             case .success(let data):
                 misses = 0
-                if isIdle(sessionAnswer: data) == true { return true }
+                if isIdle(sessionAnswer: data) == true {
+                    return Idle(lastTurnReason: lastTurnReason(sessionAnswer: data))
+                }
             case .failure:
                 // A server that stops answering for a while is a server
                 // that is gone; the turn cannot end, so stop waiting.
                 misses += 1
-                if misses >= 6 { return false }
+                if misses >= 6 { return nil }
             }
         }
-        return false
+        return nil
     }
 
     /// Stop a running prompt: the action route, then the shutdown that

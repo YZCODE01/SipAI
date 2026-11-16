@@ -12,10 +12,12 @@
 // pencil that branches the conversation from that message. Only user
 // messages carry either: the grey block already draws their bounds, so
 // the affordances have an edge to sit on and a hover tint has something
-// to tint. This view is shared by ChatView and the agent transcript, so
-// both get it from one place. While the pointer is over a code block
-// inside the message, the block's own Copy and Save take that corner
-// instead (`CodeBlockHoverPreference`).
+// to tint. The same two acts are the message's own accessibility
+// actions, which need no pointer: drawn under the pointer alone, they
+// would be out of VoiceOver's reach. This view is shared by ChatView and
+// the agent transcript, so both get it from one place. While the pointer
+// is over a code block inside the message, the block's own Copy and Save
+// take that corner instead (`CodeBlockHoverPreference`).
 
 import AppKit
 import SwiftUI
@@ -56,18 +58,28 @@ struct MessageBubble: View {
     /// records the user never typed.
     var userLabelOverride: String? = nil
 
-    /// Begin editing this message in order to branch from it. Nil means
-    /// the host offers no branching here — a chat with nothing to fork
-    /// yet, a read-only codex transcript, a session whose turn is still
-    /// running — and the pencil simply isn't drawn. Editing itself is
-    /// NOT this view's state: the caller swaps the bubble for a
-    /// `BranchEditor`, because a transcript row is re-rendered on every
-    /// streamed event and re-created wholesale by a history swap, and
-    /// half-typed text must not depend on this view surviving either.
+    /// Draw the name over an assistant message. The agent transcript
+    /// passes false for a message inside an answer whose name is already
+    /// drawn above it (the name once per answer: compact view, a Chat
+    /// only turn — `ChatOnlyActivity.names`). A user message always
+    /// carries its header.
+    var showsHeader: Bool = true
+
+    /// Begin editing this message — to send it again in its place, or to
+    /// branch from it. Nil means the host offers no edit here — a chat
+    /// with nothing to fork yet, a read-only codex transcript, a session
+    /// whose turn is still running — and the pencil simply isn't drawn.
+    /// Editing itself is NOT this view's state: the caller swaps the
+    /// bubble for a `BranchEditor`, because a transcript row is
+    /// re-rendered on every streamed event and re-created wholesale by a
+    /// history swap, and half-typed text must not depend on this view
+    /// surviving either.
     var onEdit: (() -> Void)? = nil
-    /// Tooltip for the pencil. The two hosts branch into different
-    /// things ("session" vs "chat"), so the wording is theirs to supply.
-    var editHint: String? = nil
+    /// The skills SipAI loaded with this message (an agent transcript's
+    /// skill chip), named on the label line beside any attachments. Not
+    /// part of `ChatMessage`: that is the chat file format, which both
+    /// apps read.
+    var loadedSkills: [String] = []
 
     private var isUser: Bool { message.role == "user" }
 
@@ -79,6 +91,13 @@ struct MessageBubble: View {
     var body: some View {
         if isUser {
             userContent
+                // SwiftUI hands these to every element of the content —
+                // the label, each paragraph, a link — so whichever one
+                // VoiceOver rests on offers them.
+                .accessibilityActions {
+                    if let onEdit { Button(editName, action: onEdit) }
+                    Button(copyName, action: copyMessage)
+                }
                 .onPreferenceChange(CodeBlockHoverPreference.self) { inside in
                     codeBlockHovered = inside
                 }
@@ -97,7 +116,10 @@ struct MessageBubble: View {
                 )
                 .overlay(alignment: .bottomTrailing) { hoverActions }
                 .contentShape(RoundedRectangle(cornerRadius: 10))
-                .onHover { inside in
+                // Not `onHover`: SwiftUI's own hears nothing while macOS
+                // reports the cursor hidden, and these buttons are the
+                // pointer's only way to the edit and the copy.
+                .onPointerHover { inside in
                     hovering = inside
                     // Leaving resets the confirmation, so the next visit
                     // shows the copy glyph rather than a stale checkmark.
@@ -114,6 +136,19 @@ struct MessageBubble: View {
 
     // MARK: - Hover actions (edit · copy)
 
+    /// The two acts' names: the corner buttons' tooltips, and the
+    /// message's accessibility actions.
+    private var editName: String {
+        String(
+            localized: "Edit this message",
+            comment: "A sent message's edit pencil: its tooltip, and the message's action for VoiceOver")
+    }
+    private var copyName: String {
+        String(
+            localized: "Copy this message",
+            comment: "A sent message's copy button: its tooltip, and the message's action for VoiceOver")
+    }
+
     /// Lower-right corner of the block, only while pointed at. Sized and
     /// inset to sit inside the block's own padding, so they overlap the
     /// last line only when that line runs the full width.
@@ -122,20 +157,13 @@ struct MessageBubble: View {
         if hovering && !codeBlockHovered {
             HStack(spacing: 4) {
                 if let onEdit {
-                    // Left of copy: branching is the bigger act.
-                    CornerIconButton(
-                        systemName: "square.and.pencil",
-                        hint: editHint ?? String(
-                            localized: "Create a new branch from here",
-                            comment: "Default tooltip for the branch-from-here pencil on a sent message"),
-                        action: onEdit
-                    )
+                    // Left of copy: an edit is the bigger act.
+                    CornerIconButton(systemName: "square.and.pencil", hint: editName, action: onEdit)
                 }
                 CornerIconButton(
                     systemName: copied ? "checkmark" : "doc.on.doc",
                     tinted: copied,
-                    hint: String(localized: "Copy this message",
-                                 comment: "Tooltip for the copy button on a sent message"),
+                    hint: copyName,
                     action: copyMessage
                 )
             }
@@ -168,7 +196,7 @@ struct MessageBubble: View {
     @ViewBuilder
     private var assistantContent: some View {
         VStack(alignment: .leading, spacing: 6 * gapScale) {
-            header
+            if showsHeader { header }
             MarkdownRenderer.render(message.content)
         }
     }
@@ -200,17 +228,34 @@ struct MessageBubble: View {
                 .font(.system(size: 12 * SipFont.contentRatio(fontScale)))
                 .foregroundColor(ChatDesign.textSecondary)
             }
+            if isUser, !loadedSkills.isEmpty {
+                HStack(spacing: 4) {
+                    Image("SkillRobot")
+                    Text(verbatim: loadedSkills.joined(separator: ", "))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .font(.system(size: 12 * SipFont.contentRatio(fontScale)))
+                .foregroundColor(ChatDesign.textSecondary)
+                .help(String(localized: "Skills loaded with this message",
+                             comment: "Tooltip on the skill line under a sent agent message"))
+            }
             Spacer(minLength: 0)
         }
     }
 }
 
-// MARK: - Branch editor
+// MARK: - Message editor
 
-/// A sent message, opened for editing so the conversation can be
-/// branched from it. Takes the place of the `MessageBubble` for that one
-/// row — same grey block, same label, so the row keeps its position in
-/// the transcript and the edit reads as happening *in* the conversation.
+/// A sent message, opened for editing. Takes the place of the
+/// `MessageBubble` for that one row — same grey block, same label, so the
+/// row keeps its position in the transcript and the edit reads as
+/// happening *in* the conversation.
+///
+/// Two ways out with the edit: Send goes back to this message in the same
+/// conversation and sends the edit there (each agent's terminal edits a
+/// message this way), Create Branch starts a new conversation from it and
+/// keeps this one as it was.
 ///
 /// The text is a Binding because it lives on the HOST view, not here:
 /// this row is re-rendered on every streamed event and re-created by a
@@ -218,11 +263,11 @@ struct MessageBubble: View {
 /// `expandedToolResults` lives on `AgentSessionView` rather than on the
 /// rows it describes.
 ///
-/// Enter creates the branch, Shift+Enter adds a line, Escape cancels —
-/// the idiom of every other inline editor in this app (the sidebar's
-/// rename row, the empty-state tagline). No dialog, no confirmation:
-/// nothing here destroys anything, since a branch leaves the original
-/// conversation untouched.
+/// Enter takes the filled button — Send, or Create Branch where Send
+/// cannot go — Shift+Enter adds a line, Escape cancels: the idiom of
+/// every other inline editor in this app (the sidebar's rename row, the
+/// empty-state tagline). No confirmation: the sentence under the box says
+/// what Send replaces before it is pressed.
 struct BranchEditor: View {
     @EnvironmentObject var config: ConfigManager
     @Environment(\.sipFontScale) private var fontScale
@@ -233,15 +278,32 @@ struct BranchEditor: View {
     /// go inert rather than vanishing, so the row doesn't resize under
     /// the pointer mid-click.
     var busy: Bool = false
-    /// Sentence under the buttons explaining where the branch will go.
-    /// The two hosts branch into different things, so the wording is
-    /// theirs.
+    /// Sentence under the buttons saying what each one does. The two
+    /// hosts edit different things, so the wording is theirs.
     var explanation: String
+    /// Send: the edit goes into THIS conversation, in place of the
+    /// message and everything after it. nil draws no Send button.
+    var onSend: (() -> Void)? = nil
+    /// Send is drawn but cannot go — the explanation says why.
+    var sendBlocked: Bool = false
     var onCreate: () -> Void
     var onCancel: () -> Void
 
-    private var canCreate: Bool {
-        !busy && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    private var hasText: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    /// Send is the filled button. Where it cannot go, Create Branch is.
+    private var sendLeads: Bool { onSend != nil && !sendBlocked }
+    private var canCreate: Bool { !busy && hasText }
+    private var canSend: Bool { sendLeads && !busy && hasText }
+
+    /// Return takes the filled button, and only that one.
+    private func submit() {
+        if sendLeads {
+            if canSend { onSend?() }
+        } else if canCreate {
+            onCreate()
+        }
     }
 
     var body: some View {
@@ -257,7 +319,7 @@ struct BranchEditor: View {
             // it replaces.
             MultilineTextField(
                 text: $text,
-                onSubmit: { if canCreate { onCreate() } },
+                onSubmit: submit,
                 onCancel: onCancel,
                 autoFocus: true,
                 spellChecking: config.display.spellCheck,
@@ -295,11 +357,23 @@ struct BranchEditor: View {
                 Button(action: onCreate) {
                     Text("Create Branch",
                          comment: "Button that forks the conversation from the edited message")
-                        .font(.system(size: 12 * SipFont.contentRatio(fontScale), weight: .medium))
+                        .font(.system(size: 12 * SipFont.contentRatio(fontScale),
+                                      weight: sendLeads ? .regular : .medium))
                 }
-                .buttonStyle(.borderedProminent)
+                .filled(!sendLeads)
                 .controlSize(.small)
                 .disabled(!canCreate)
+                if let onSend {
+                    Button(action: onSend) {
+                        Text("Send",
+                             comment: "Button that sends an edited message in place of the original, in the same conversation")
+                            .font(.system(size: 12 * SipFont.contentRatio(fontScale),
+                                          weight: sendLeads ? .medium : .regular))
+                    }
+                    .filled(sendLeads)
+                    .controlSize(.small)
+                    .disabled(!canSend)
+                }
             }
         }
         .padding(.horizontal, 12)
@@ -313,5 +387,12 @@ struct BranchEditor: View {
                 .strokeBorder(SipDesign.blue.opacity(0.35), lineWidth: 1)
         )
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private extension View {
+    /// The message editor's filled button — the one Return takes.
+    @ViewBuilder func filled(_ on: Bool) -> some View {
+        if on { buttonStyle(.borderedProminent) } else { self }
     }
 }

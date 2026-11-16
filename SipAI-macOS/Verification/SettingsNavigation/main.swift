@@ -11,8 +11,9 @@
 //      the top bar, the first line where a transcript's first row sits,
 //      a paragraph wrapping at the column's edge, and a page scrolled to
 //      its end stopping as far above the bottom as it starts below the
-//      bar. 2b hosts the REAL chat prompt pane in that page: its two
-//      boxes are fixed heights that never grow with the window.
+//      bar. 2b hosts the REAL system prompt and roles of Chat Settings
+//      in that page: its two boxes are fixed heights that never grow
+//      with the window.
 //   3. The menu over the Settings row and the sidebar's section list
 //      — and 3b, the menu's PLACEMENT: ContentView's real overlay block
 //      (extracted by run.sh) over a stand-in layout, its fill's pixels
@@ -26,8 +27,11 @@
 //      layer over the routes (closed by a search result and a
 //      notification click, never by `startNewChat`), keeps the sidebar's
 //      ordinary list mounted, and hosts the factory reset's alerts where
-//      a partial wipe leaves them standing; the sections' order and the
-//      chat prompt section's name, in both languages; the band shared
+//      a partial wipe leaves them standing; the sections' order and
+//      names, in both languages, Chat Settings' parts in their order,
+//      every in-app link to a section naming one that exists, and the
+//      Privacy page's paragraphs — said there once, not again in Help,
+//      Chat Settings or Updates; the band shared
 //      with the agent session; and no paragraph in a pane capped at a
 //      width of its own, narrower than the column.
 //
@@ -192,12 +196,13 @@ print("2. The page, laid out (the real body, offscreen)")
 /// Stands in for a section: a flexible bar that spans the column, a
 /// fixed-width row and a paragraph — the shape every real pane mixes —
 /// then a last line. Help stands in for a section taller than the
-/// window, so the page has an end to scroll to. The chat prompt section
-/// is the REAL pane (extracted by run.sh), for pass 2b.
+/// window, so the page has an end to scroll to. Chat Settings is its
+/// REAL system prompt and roles (extracted by run.sh) — the part of the
+/// section that holds the text boxes — for pass 2b.
 struct HarnessPane: View {
     let section: SettingsView.Tab
     var body: some View {
-        if section == .prompt {
+        if section == .chat {
             PromptAndRolesPane()
         } else {
             VStack(alignment: .leading, spacing: 8) {
@@ -392,7 +397,7 @@ MainActor.assumeIsolated {
         let expected = [(176 * ratio).rounded(), (80 * ratio).rounded()]
         var seen: [[CGFloat]] = []
         for size in [CGSize(width: 459, height: 420), CGSize(width: 1400, height: 1280)] {
-            let (window, hosting) = host(SettingsView(section: .prompt)
+            let (window, hosting) = host(SettingsView(section: .chat)
                                             .environmentObject(ConfigManager())
                                             .environment(\.sipFontScale, tier.scale)
                                             .environment(\.colorScheme, .light),
@@ -421,7 +426,7 @@ MainActor.assumeIsolated {
     func listRoom(_ sidebar: CGFloat) -> CGFloat { sidebar - 16 - 12 }
     func menuRoom(_ sidebar: CGFloat) -> CGFloat { sidebar - 16 - 12 - 12 }
     for tier in tiers {
-        var widestLabel: (SettingsView.Tab, CGFloat) = (.models, 0)
+        var widestLabel: (SettingsView.Tab, CGFloat) = (.chat, 0)
         var cutInNarrowest: [SettingsView.Tab] = []
         for tab in SettingsView.Tab.allCases {
             let fitting = NSHostingView(rootView: SettingsSectionLabel(tab: tab)
@@ -440,12 +445,8 @@ MainActor.assumeIsolated {
             check(cutInNarrowest.isEmpty,
                   "small: …and in the narrowest \(Int(sidebarNarrowest)) pt sidebar's list", "cut: \(cut)")
         case .standard:
-            // "Chat Prompt and Roles" is the one name longer than the
-            // narrowest sidebar's row at Default — a few points over,
-            // cut at the tail there like any other long sidebar name.
-            // Every other name still fits; a second one cut is a change.
-            check(cutInNarrowest.allSatisfy { $0 == .prompt },
-                  "default: …and in the narrowest \(Int(sidebarNarrowest)) pt sidebar's list, all but Chat Prompt and Roles",
+            check(cutInNarrowest.isEmpty,
+                  "default: …and in the narrowest \(Int(sidebarNarrowest)) pt sidebar's list",
                   "cut: \(cut.isEmpty ? "none" : cut) (\(widest) of \(Int(listRoom(sidebarNarrowest))))")
         default:
             // The larger tiers widen the sidebar's rows too; a name cut at
@@ -674,9 +675,10 @@ check(menuOverlay.contains("SettingsLauncherMenu(isPresented: $showingSettingsMe
       "the menu rises from the Settings row, the sidebar's width less its insets, over a scrim")
 let exclusivity = body(of: "private struct SettingsMenuExclusivity: ViewModifier {", in: content)
 check(exclusivity.contains("search = false") && exclusivity.contains("usage = false")
-      && exclusivity.components(separatedBy: "menu = false").count == 4
+      && exclusivity.contains("sessionView = false")
+      && exclusivity.components(separatedBy: "menu = false").count == 5
       && content.contains(".modifier(SettingsMenuExclusivity("),
-      "one dropdown at a time: the menu, the search palette and the plan-usage window")
+      "one dropdown at a time: the menu, the search palette, the plan-usage window and the agent session view window")
 let menuView = body(of: "struct SettingsLauncherMenu: View {", in: navigation)
 check(menuView.contains(".onKeyPress(.escape)") && menuView.contains(".onKeyPress(.downArrow)")
       && menuView.contains(".onKeyPress(.upArrow)") && menuView.contains(".onKeyPress(.return)")
@@ -699,17 +701,39 @@ check(list.contains("\"Factory reset?\"") && list.contains("\"Reset was incomple
 check(!settings.contains("Factory reset") && !settings.contains("FactoryReset.perform("),
       "…and not on the page")
 
-// Every section still opens its own pane, the same nine as before.
+// Every section opens its own pane.
 let pane = body(of: "private func pane(_ proxy: ScrollViewProxy) -> some View {", in: settings)
-let panes = ["case .models:    ModelsPane(", "case .agents:    AgentGuidePane()",
-             "case .prompt:    PromptAndRolesPane()", "case .files:     FilesPane()",
+let panes = ["case .chat:      ChatSettingsPane(", "case .agents:    AgentGuidePane()",
+             "case .skills:    SkillsPane()", "case .files:     FilesPane()",
              "case .display:   DisplayPane()", "case .labels:    LabelsPane()",
-             "case .language:  LanguagePane()", "case .updates:   UpdatesPane()",
+             "case .language:  LanguagePane()", "case .usage:     UsagePane()",
+             "case .updates:   UpdatesPane()",
+             "case .privacy:   PrivacyPane()",
              "HelpPane(initialTopic: initialHelpTopic)"]
-check(panes.allSatisfy { pane.contains($0) } && SettingsView.Tab.allCases.count == 9,
-      "each of the nine sections opens its own pane")
-check(settings.contains("ModelsPane(switchTab: { appState.settingsSection = $0 })"),
-      "Chat models' Agent Guide link moves Settings to the Guide")
+check(panes.allSatisfy { pane.contains($0) } && SettingsView.Tab.allCases.count == 11,
+      "each of the eleven sections opens its own pane")
+check(settings.contains("ChatSettingsPane(switchTab: { appState.settingsSection = $0 })"),
+      "the Agent Initialization link in About chats moves Settings to that section")
+
+// Chat Settings is one page in the order a chat needs it: what a chat
+// is, the models, then the system prompt and the roles.
+let chatPane = codeOnly(body(of: "struct ChatSettingsPane: View {", in: settings))
+let modelsPart = codeOnly(body(of: "struct ModelsPane: View {", in: settings))
+let promptPart = codeOnly(body(of: "struct PromptAndRolesPane: View {", in: settings))
+func inOrder(_ text: String, _ marks: [String]) -> Bool {
+    var from = text.startIndex
+    for mark in marks {
+        guard let r = text.range(of: mark, range: from..<text.endIndex) else { return false }
+        from = r.upperBound
+    }
+    return true
+}
+check(inOrder(chatPane, ["ModelsPane(switchTab: switchTab)", "Divider()", "PromptAndRolesPane()"]),
+      "Chat Settings draws the models' part, then the system prompt and roles")
+check(inOrder(modelsPart, ["aboutChats", "Text(\"Chat models\""]),
+      "…opening on About chats, then the Chat models list")
+check(inOrder(promptPart, ["Text(\"System Prompt\"", "Text(\"Roles\""]),
+      "…then System Prompt, then Roles")
 check(settings.contains(".id(section)"), "each section opens at its top")
 /// Whitespace removed, so a check about a modifier chain does not hang on
 /// its indentation.
@@ -735,12 +759,15 @@ check(sessionView.contains("Spacer().frame(height: SipDesign.pageTopBand)")
       && sessionView.contains(".padding(.vertical, SipDesign.pageContentInset)"),
       "…the same two values the agent session's band and transcript inset are spelled with")
 
-// The sections' order: the chat's two first — the system prompt and the
-// roles reach chat turns alone — then the Agent Guide. The menu and the
-// sidebar list both draw `allCases`, so the enum's order is theirs.
+// The sections' order: Chat Settings first — its system prompt and
+// roles reach chat turns alone — then the agents' two, Agent
+// Initialization and Agent Skills; Usage between Language and Updates,
+// Privacy between Updates and Help (the user's two choices).
+// The menu and the sidebar list both draw `allCases`, so the enum's
+// order is theirs.
 let order = SettingsView.Tab.allCases.map(\.rawValue)
-check(order == ["models", "prompt", "agents", "files", "display", "labels", "language", "updates", "help"],
-      "the sections run Chat models, Chat Prompt and Roles, Agent Guide, Files & Notes, Display, Labels, Language, Updates, Help",
+check(order == ["chat", "agents", "skills", "files", "display", "labels", "language", "usage", "updates", "privacy", "help"],
+      "the sections run Chat Settings, Agent Initialization, Agent Skills, Files & Notes, Display, Labels, Language, Usage, Updates, Privacy, Help",
       order.joined(separator: ", "))
 check(menuView.contains("private let sections = SettingsView.Tab.allCases")
       && list.contains("ForEach(SettingsView.Tab.allCases) { tab in"),
@@ -751,10 +778,82 @@ check(squashed(menuView).contains(squashed("SettingsSectionLabel(tab: tab) .padd
       && squashed(list).contains(squashed("SettingsSectionLabel(tab: tab, selected: selected) .padding(.horizontal, 6)"))
       && squashed(list).contains(squashed("factoryResetRow } .padding(.horizontal, 8)")),
       "the menu's and the list's row insets are the ones pass 3 measured the names against")
-check(settings.contains("case .prompt:    return \"Chat Prompt and Roles\""),
-      "the chat prompt section is called Chat Prompt and Roles")
+check(settings.contains("case .chat:      return \"Chat Settings\"")
+      && settings.contains("case .agents:    return \"Agent Initialization\"")
+      && settings.contains("case .skills:    return \"Agent Skills\"")
+      && settings.contains("case .privacy:   return \"Privacy\"")
+      && settings.contains("case .usage:     return \"Usage\""),
+      "the sections are called Chat Settings, Agent Initialization, Agent Skills, Usage and Privacy")
+check(navigation.contains("case .privacy:  return \"hand.raised\""),
+      "Privacy's glyph is the raised hand")
+check(navigation.contains("case .usage:    return \"t.circle\""),
+      "Usage's glyph is the toolbar coin's T")
 
-// The name and the Help answer that quotes it, in both languages.
+// The Privacy page: three paragraphs in Help's prose rhythm — the
+// tier's line spacing once at its root, its gaps by line pitch.
+let privacyPane = codeOnly(body(of: "struct PrivacyPane: View {", in: settings))
+let privacyParagraphs = ["SipAI collects no data.",
+                         "What you send to an AI model goes straight from your Mac to its provider",
+                         "Apart from your AI providers, SipAI goes online only for updates."]
+check(inOrder(privacyPane, ["Text(\"Privacy\""] + privacyParagraphs.map { "Text(\"" + $0 }),
+      "the Privacy page: its header, then what SipAI collects, what reaches a provider, and the update checks")
+check(privacyPane.contains(".lineSpacing(HelpRhythm.lineSpacing(fontScale, lineSpacingFactor))")
+      && privacyPane.contains("HelpRhythm.vertical(fontScale, lineSpacingFactor)")
+      && privacyPane.contains(".sipFont(HelpRhythm.bodySize)"),
+      "…in Help's prose rhythm: the tier's line spacing, gaps by line pitch, Help's body size")
+check(!privacyPane.contains("http") && !privacyPane.contains("](sipai://"),
+      "…naming no provider's page: the reader looks up their own provider's policy")
+check(source("SipAI/Views/Settings/AgentGuidePane.swift").contains("Text(\"Agent Initialization\", comment: \"Settings pane header\")")
+      && source("SipAI/Views/Settings/SkillsPane.swift").contains("Text(\"Agent Skills\", comment: \"Settings pane header\")"),
+      "…and their pages' headers say the same")
+
+// Every place that names a section names it as it is now. The source
+// is read whole — a translator comment saying where a string appears is
+// as stale as the string when it names a section that is gone.
+let oldNames = ["Settings → Chat models", "Settings → Chat Prompt and Roles", "Settings → Agent Guide",
+                "Settings → Skills", "[Agent Guide](", "\"Chat Prompt and Roles\"", "\"Agent Guide\""]
+let oldChinese = ["设置 → 对话模型", "对话提示词与角色", "智能体指南", "设置 → 技能"]
+func swiftFiles(under rel: String) -> [String] {
+    let path = root + "/" + rel
+    return (FileManager.default.enumerator(atPath: path)?.allObjects as? [String] ?? [])
+        .filter { $0.hasSuffix(".swift") }.map { rel + "/" + $0 }
+}
+let appSources = swiftFiles(under: "SipAI")
+let stale = appSources.flatMap { file -> [String] in
+    let text = codeOnly(source(file))
+    return oldNames.filter { text.contains($0) }.map { "\(file.replacingOccurrences(of: "SipAI/", with: "")): \($0)" }
+}
+check(!appSources.isEmpty && stale.isEmpty,
+      "no string in the app names a section by its old name", stale.joined(separator: "; "))
+
+// …and nowhere a section's OLD path survives the line it wraps on: a
+// README sentence or a source comment broken across lines — a comment
+// marker between any two of its words — is what a single-line grep for
+// "Settings → Agent Guide" walks past. "Chat Settings → Chat models"
+// names the section's own part, not the old section.
+let oldPath = try! NSRegularExpression(
+    pattern: #"(?<!Chat\s)Settings(?:\s|//)*→(?:\s|//)*(?:Agent(?:\s|//)+Guide|Chat(?:\s|//)+models|Chat(?:\s|//)+Prompt(?:\s|//)+and(?:\s|//)+Roles|Skills\b)"#)
+func oldPaths(in text: String, named name: String) -> [String] {
+    oldPath.matches(in: text, range: NSRange(text.startIndex..., in: text)).map { match in
+        let line = text[..<Range(match.range, in: text)!.lowerBound].filter { $0 == "\n" }.count + 1
+        return "\(name):\(line)"
+    }
+}
+let readme = (try? String(contentsOfFile: root + "/../README.md", encoding: .utf8)) ?? ""
+let stalePaths = oldPaths(in: readme, named: "README.md") + appSources.flatMap { oldPaths(in: source($0), named: $0) }
+check(!readme.isEmpty && stalePaths.isEmpty,
+      "no README sentence or source comment names a section by its old path, however the line wraps",
+      stalePaths.joined(separator: "; "))
+
+// Every in-app link to a section names one that exists.
+let linkPattern = try! NSRegularExpression(pattern: #"sipai://settings/([a-z]+)"#)
+func linkedSections(_ text: String) -> [String] {
+    linkPattern.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap {
+        Range($0.range(at: 1), in: text).map { String(text[$0]) }
+    }
+}
+
+// The names and the Help answers that quote them, in both languages.
 if let catalog = try? JSONSerialization.jsonObject(
         with: Data(source("SipAI/Resources/Localizable.xcstrings").utf8)) as? [String: Any],
    let strings = catalog["strings"] as? [String: Any] {
@@ -763,16 +862,62 @@ if let catalog = try? JSONSerialization.jsonObject(
         let zh = (entry?["localizations"] as? [String: Any])?["zh-Hans"] as? [String: Any]
         return ((zh?["stringUnit"] as? [String: Any])?["value"] as? String) ?? ""
     }
-    check(chinese("Chat Prompt and Roles").contains("对话") && strings["Prompt and Roles"] == nil,
-          "the catalog carries the new name with its Chinese, and not the old one",
-          chinese("Chat Prompt and Roles"))
-    let answer = strings.keys.first { $0.hasPrefix("The system prompt (Settings → Chat Prompt and Roles)") }
-    // The name, whatever quotation marks surround it.
-    check(answer.map { chinese($0).contains("设置 → 对话提示词与角色") } == true
-          && !strings.keys.contains { $0.contains("Settings → Prompt and Roles") }
-          && settings.contains("Settings → Chat Prompt and Roles")
-          && !settings.contains("Settings → Prompt and Roles"),
-          "Help's answer about prompts and roles names the section by its new name, in both languages")
+    func comment(_ key: String) -> String { ((strings[key] as? [String: Any])?["comment"] as? String) ?? "" }
+    check(chinese("Chat Settings") == "对话设置" && chinese("Agent Initialization") == "智能体初始化"
+          && chinese("Agent Skills") == "智能体技能" && chinese("Privacy") == "隐私",
+          "the catalog carries the four names with their Chinese",
+          "\(chinese("Chat Settings")) · \(chinese("Agent Initialization")) · \(chinese("Agent Skills")) · \(chinese("Privacy"))")
+    for prefix in privacyParagraphs {
+        let key = strings.keys.first { $0.hasPrefix(prefix) }
+        check(key.map { !chinese($0).isEmpty } == true,
+              "the Privacy paragraph \"\(prefix.prefix(40))…\" is in the catalog with its Chinese")
+    }
+    // Said once, on the Privacy page (and on the welcome page, for a
+    // first launch) — not again in Help, Chat Settings or Updates.
+    let repeated = ["Does anything leave my Mac?", "SipAI is completely a local tool", "never sees a login token",
+                    "nothing is stored or sent anywhere", "no server in between",
+                    "no usage data, account or system profile is ever sent", "Nothing about you or your machine is sent"]
+    let stillSaid = strings.keys.filter { key in repeated.contains { key.contains($0) } }
+    check(stillSaid.isEmpty && !repeated.contains { settings.contains($0) },
+          "the privacy claims are not repeated in Help, Chat Settings or Updates",
+          stillSaid.map { String($0.prefix(50)) }.joined(separator: " | "))
+    let whereStored = strings.keys.first { $0.hasPrefix("Chats, notes, roles, API keys and settings are in ~/Library/Application Support/SipAI.") }
+    check(strings["Where is my data stored?"] != nil
+          && whereStored.map { $0.contains("Settings → Privacy") && chinese($0).contains("设置 → 隐私") } == true,
+          "Help keeps \"Where is my data stored?\" — the folders — and sends the rest to Settings → Privacy, in both languages")
+    check(strings.keys.contains { $0.hasPrefix("No sign-up required, no data collection, no tracking from the app.") }
+          && source("SipAI/Views/OnboardingView.swift").contains("No sign-up required, no data collection, no tracking from the app."),
+          "the welcome page keeps its line for a first launch")
+    check(strings["Chat Prompt and Roles"] == nil && strings["Agent Guide"] == nil
+          && !comment("Skills").contains("Settings pane header") && !chinese("Skills").isEmpty,
+          "…and not the old ones — Skills stays, for the skill chip and the task panel")
+    let staleKeys = strings.keys.filter { key in oldNames.contains { key.contains($0) } }
+    let staleChinese = strings.keys.filter { key in oldChinese.contains { chinese(key).contains($0) } }
+    let staleComments = strings.keys.filter { key in oldNames.contains { comment(key).contains($0) } }
+    check(staleKeys.isEmpty && staleChinese.isEmpty && staleComments.isEmpty,
+          "no catalog key, Chinese value or translator comment names a section by its old name",
+          (staleKeys + staleChinese + staleComments).map { String($0.prefix(50)) }.joined(separator: " | "))
+    // The answers, whatever quotation marks surround a name in Chinese.
+    let answers: [(prefix: String, english: String, chinese: String)] = [
+        ("Each provider issues keys from its own dashboard.", "Settings → Chat Settings", "设置 → 对话设置"),
+        ("Open Settings → Agent Initialization.", "Settings → Agent Initialization", "设置 → 智能体初始化"),
+        ("The system prompt (Settings → Chat Settings)", "Settings → Chat Settings", "设置 → 对话设置"),
+        ("Share With, in a skill's … menu in Settings → Agent Skills", "Settings → Agent Skills", "设置 → 智能体技能"),
+    ]
+    for answer in answers {
+        let key = strings.keys.first { $0.hasPrefix(answer.prefix) }
+        check(key.map { $0.contains(answer.english) && chinese($0).contains(answer.chinese) } == true
+              && settings.contains(answer.english),
+              "Help names \(answer.english) in both languages", String(answer.prefix.prefix(40)))
+    }
+    let links = Set(strings.keys.flatMap(linkedSections) + strings.keys.flatMap { linkedSections(chinese($0)) }
+                    // Raw source: `codeOnly` would cut a line at the
+                    // link's own "//".
+                    + appSources.flatMap { linkedSections(source($0)) })
+    let unknown = links.filter { SettingsView.Tab(rawValue: $0) == nil }
+    check(links.contains("chat") && links.contains("agents") && unknown.isEmpty,
+          "every sipai://settings/ link names a section that exists — the chat page's Learn more opens Chat Settings",
+          "linked: \(links.sorted().joined(separator: ", ")); unknown: \(unknown.sorted().joined(separator: ", "))")
 } else {
     check(false, "the String Catalog parses")
 }
@@ -790,7 +935,8 @@ check(promptPane.contains("promptEditor($text, height: 176, monospaced: true)")
 // inside the page's: its lines stop short of the rows and rules beside
 // it. The literal caps left are on controls alone — the segmented
 // pickers, the language list, the sign-in sheet's fields.
-for file in ["SipAI/Views/Settings/SettingsView.swift", "SipAI/Views/Settings/AgentGuidePane.swift"] {
+for file in ["SipAI/Views/Settings/SettingsView.swift", "SipAI/Views/Settings/AgentGuidePane.swift",
+             "SipAI/Views/Settings/UsagePane.swift"] {
     let lines = codeOnly(source(file)).components(separatedBy: "\n")
     var capped: [Int] = []
     for (i, line) in lines.enumerated()
@@ -806,15 +952,17 @@ for file in ["SipAI/Views/Settings/SettingsView.swift", "SipAI/Views/Settings/Ag
 }
 
 // The sheets the panes present hang off the main window now: each takes
-// the app's theme and is reported to the update announcer, which holds
-// a line while a sheet covers the logo. Chat models' Add Model rides
-// ContentView's one Add Model sheet, which already does both.
-check(guidePane.components(separatedBy: ".preferredColorScheme(appState.theme.colorScheme)").count == 4
-      && guidePane.contains(".onChange(of: sheetUp) { _, up in UpdateAnnouncer.shared.setSheetPresented(up) }")
-      && guidePane.contains(".onDisappear { if sheetUp { UpdateAnnouncer.shared.setSheetPresented(false) } }")
+// the app's look — the application's appearance, so no colour scheme of
+// its own (`Verification/DisplayPane`) — and is reported to the
+// notices beside the logo, which hold one back while a sheet covers it.
+// Chat models' Add Model rides ContentView's one Add Model sheet, which
+// already does both.
+check(!guidePane.contains(".preferredColorScheme(")
+      && guidePane.contains(".onChange(of: sheetUp) { _, up in SidebarNotices.shared.setSheetPresented(up) }")
+      && guidePane.contains(".onDisappear { if sheetUp { SidebarNotices.shared.setSheetPresented(false) } }")
       && body(of: "private var sheetUp: Bool {", in: guidePane)
         .contains("showingSignIn || showingInstall || actions.browserStep?.agentKey == key"),
-      "the Guide's three sheets take the app's theme and are reported to the announcer, torn down included")
+      "the Guide's three sheets take the app's theme and are reported to the notices beside the logo, torn down included")
 check(!settings.contains(".sheet(") && !settings.contains("showingModelSetup")
       && settings.contains("NotificationCenter.default.post(name: .openModelSetup, object: nil)"),
       "Chat models' Add Model opens ContentView's one Add Model sheet — no sheet of the page's own")

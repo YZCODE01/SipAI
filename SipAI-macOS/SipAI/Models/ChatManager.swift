@@ -146,6 +146,11 @@ struct ChatTurn {
     /// handle does NOT cancel the task, which is what lets a reply
     /// asked for and then walked away from still arrive.
     let task: Task<Void, Never>
+    /// The model provider's name and the chat group's, as they stood when
+    /// the message was sent — what the notice beside the logo says when
+    /// the reply lands unread. The group is nil for a chat outside one.
+    var provider: String = ""
+    var group: String? = nil
 }
 
 /// How a chat turn ended, for whichever view opens the chat next.
@@ -239,9 +244,11 @@ final class ChatManager: ObservableObject {
     /// ends — a marker cleared by whatever identity happens to be open
     /// would strand the row of a chat the user has since left.
     func beginTurn(slug: String, project: String?,
+                   provider: String = "", group: String? = nil,
                    startedAt: Date, task: Task<Void, Never>) {
         let key = Self.liveKey(slug: slug, project: project)
-        liveTurns[key] = ChatTurn(startedAt: startedAt, task: task)
+        liveTurns[key] = ChatTurn(startedAt: startedAt, task: task,
+                                  provider: provider, group: group)
         if key == openChatKey { openChatHeldTier = .running }
     }
 
@@ -249,7 +256,7 @@ final class ChatManager: ObservableObject {
         let key = Self.liveKey(slug: slug, project: project)
         // Nothing to remove means the turn was already torn down — the
         // chat was deleted or moved — and there is nothing to open.
-        guard liveTurns.removeValue(forKey: key) != nil else { return }
+        guard let turn = liveTurns.removeValue(forKey: key) else { return }
         // A reply (or a failure to say why there is none) landed while
         // the user was elsewhere: the steady dot, until they open the
         // chat. Not when they are looking at it, and not when they
@@ -257,6 +264,12 @@ final class ChatManager: ObservableObject {
         // leaving before the stop lands is still their own act.
         guard key != openChatKey, turnOutcomes[key] != .interrupted else { return }
         config?.markChatUnread(key: key)
+        // Said beside the logo for a few seconds too; the dot is what
+        // stays. A reply cut at the model's limit is still a reply.
+        var failed = false
+        if case .failed = turnOutcomes[key] { failed = true }
+        SidebarNotices.shared.post(.chatTurnEnded(provider: turn.provider, group: turn.group,
+                                                  slug: slug, project: project, failed: failed))
     }
 
     // MARK: - Unread replies and the open chat

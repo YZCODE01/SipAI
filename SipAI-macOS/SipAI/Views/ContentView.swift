@@ -12,6 +12,15 @@ private struct UsageCoinLeadingKey: PreferenceKey {
     }
 }
 
+/// The agent session view button's leading edge, reported the same way.
+private struct SessionViewButtonLeadingKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > 0 { value = next }
+    }
+}
+
 struct ContentView: View {
     static let mainLayoutSpace = "sipMainLayout"
 
@@ -54,6 +63,16 @@ struct ContentView: View {
         String(localized: "Plan usage",
                comment: "Tooltip for the toolbar plan-usage button")
     }
+    /// The agent session view button and its window (Compact view). The
+    /// button is drawn whenever an agent is listed — plan or API key —
+    /// and before the coin, which a plan alone draws, so it never moves
+    /// when the coin comes or goes. Kept while its window is open, the
+    /// coin's rule.
+    @State private var sessionViewHovered: Bool = false
+    @State private var showingSessionView: Bool = false
+    /// Its leading edge, read off the button like the coin's; the
+    /// fallback is the insets before it.
+    @State private var sessionViewLeading: CGFloat = 116
 
     /// User-resizable sidebar width, persisted across launches.
     /// Window-chrome preference, so UserDefaults rather than the
@@ -164,7 +183,10 @@ struct ContentView: View {
                 Button {
                     showingSearch.toggle()
                     // One dropdown at a time.
-                    if showingSearch { showingUsage = false }
+                    if showingSearch {
+                        showingUsage = false
+                        showingSessionView = false
+                    }
                 } label: {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 14, weight: .medium))
@@ -178,10 +200,38 @@ struct ContentView: View {
                              comment: "Tooltip for the global search button"))
                 .keyboardShortcut("f", modifiers: [.command, .shift])
 
+                if !agents.listedAgents.isEmpty || showingSessionView {
+                    Button {
+                        showingSessionView.toggle()
+                        if showingSessionView {
+                            showingSearch = false
+                            showingUsage = false
+                        }
+                    } label: {
+                        Image(systemName: "rectangle.compress.vertical")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(sessionViewHovered || showingSessionView
+                                             ? .primary : .secondary)
+                            .onHover { hovering in sessionViewHovered = hovering }
+                    }
+                    .buttonStyle(.plain)
+                    .background(GeometryReader { geo in
+                        Color.clear.preference(
+                            key: SessionViewButtonLeadingKey.self,
+                            value: geo.frame(in: .named(Self.mainLayoutSpace)).minX)
+                    })
+                    .padding(.leading, 4)
+                    .help(CompactViewWords.title)
+                    .accessibilityLabel(CompactViewWords.title)
+                }
+
                 if usage.showsIcon || showingUsage {
                     Button {
                         showingUsage.toggle()
-                        if showingUsage { showingSearch = false }
+                        if showingUsage {
+                            showingSearch = false
+                            showingSessionView = false
+                        }
                     } label: {
                         // A "T", for tokens. Not a currency sign: at
                         // this size a dollar sign's strokes thin to
@@ -215,9 +265,9 @@ struct ContentView: View {
         // Nothing about updates is drawn over the window. An update on
         // offer — or a SipAI install waiting for a running turn — puts
         // the download badge on Settings and on its Updates row
-        // (`UpdateBadge`); an update that happened, or an install that
-        // will, is said for a few seconds in place of the sidebar's
-        // wordmark (`UpdateAnnouncer`).
+        // (`UpdateBadge`) and stands beside the sidebar's logo with an
+        // Update button; an update that happened is said there for a few
+        // seconds (`SidebarNotices`).
         // Anchored under its own button rather than presented as a
         // sheet: the conversation the reader came from stays visible
         // behind it, which is usually the thing they are searching
@@ -270,6 +320,23 @@ struct ContentView: View {
             }
         }
         .animation(.easeOut(duration: 0.12), value: showingUsage)
+        // The agent session view window, the same shape: Compact view's
+        // switch under its button.
+        .overlay(alignment: .topLeading) {
+            if showingSessionView {
+                ZStack(alignment: .topLeading) {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { showingSessionView = false }
+                    TranscriptViewWindow(setting: config, isPresented: $showingSessionView)
+                        .padding(.leading, sessionViewLeading)
+                        .padding(.top, 8)
+                }
+                .transition(.opacity)
+                .zIndex(1)
+            }
+        }
+        .animation(.easeOut(duration: 0.12), value: showingSessionView)
         // The menu of settings sections, the same shape again: an
         // overlay over a click-anywhere-else scrim, as wide as the
         // sidebar and rising from its Settings row — placed by the row's
@@ -296,7 +363,16 @@ struct ContentView: View {
         .modifier(SettingsMenuExclusivity(menu: $showingSettingsMenu,
                                           search: $showingSearch,
                                           usage: $showingUsage,
+                                          sessionView: $showingSessionView,
                                           sidebarVisible: appState.leftSidebarVisible))
+        // While any of them is up, the keys are its own: the cards a
+        // turn waits on stand down (`AppState.overlayHoldsKeys`), or the
+        // Return that picks a settings section would allow a tool call
+        // behind the scrim.
+        .onChange(of: showingSettingsMenu || showingSearch || showingUsage || showingSessionView,
+                  initial: true) { _, up in
+            appState.overlayHoldsKeys = up
+        }
         // The space the coin's position is measured in: the main
         // layout itself, which every overlay above shares.
         .coordinateSpace(name: Self.mainLayoutSpace)
@@ -307,6 +383,11 @@ struct ContentView: View {
             let rounded = leading.rounded()
             if rounded != usageCoinLeading { usageCoinLeading = rounded }
         }
+        .onPreferenceChange(SessionViewButtonLeadingKey.self) { leading in
+            guard leading > 0 else { return }
+            let rounded = leading.rounded()
+            if rounded != sessionViewLeading { sessionViewLeading = rounded }
+        }
         .onAppear {
             if appState.activeModel == nil {
                 appState.activeModel = config.defaultModel
@@ -316,7 +397,6 @@ struct ContentView: View {
             ModelSetupSheet()
                 .environmentObject(appState)
                 .environmentObject(config)
-                .preferredColorScheme(appState.theme.colorScheme)
         }
         // What the centre pane shows, told to the two managers that own
         // the sidebar's steady dot: opening a session or a chat is what
@@ -335,14 +415,14 @@ struct ContentView: View {
         .onChange(of: appState.pendingClaudeSessionDraft?.id, initial: true) { _, id in
             agents.noteOpenDraft(id)
         }
-        // A line beside the logo that lands while Add Model is up shows at
-        // once if the sheet leaves the logo in view, and waits for it to
-        // close if it covers it (`UpdateAnnouncer.sheetCoversLockup`).
+        // A notice beside the logo that comes while Add Model is up shows
+        // at once if the sheet leaves the logo in view, and waits for it
+        // to close if it covers it (`SidebarNotices.sheetCoversLockup`).
         // Settings is no sheet: it keeps the logo in view at the top of
         // the sidebar, so an update run from Settings → Updates is said
         // the moment it lands.
         .onChange(of: showingModelSetup) { _, showing in
-            UpdateAnnouncer.shared.setSheetPresented(showing)
+            SidebarNotices.shared.setSheetPresented(showing)
         }
         .onChange(of: appState.settingsSection) { _, section in
             if section != .help { settingsHelpTopic = nil }
@@ -452,15 +532,16 @@ struct ContentView: View {
 
 // MARK: - One dropdown at a time
 
-/// The settings menu and the two toolbar dropdowns never show together:
-/// opening the menu closes the search palette and the plan-usage window,
-/// and either of those — a toolbar click or ⌘⇧F, which the menu's scrim
-/// does not cover — closes the menu. A hidden sidebar takes the menu
-/// with it, since the row it rises from is gone.
+/// The settings menu and the toolbar's dropdowns never show together:
+/// opening the menu closes the search palette, the plan-usage window and
+/// the agent session view window, and any of those — a toolbar click or
+/// ⌘⇧F, which the menu's scrim does not cover — closes the menu. A hidden
+/// sidebar takes the menu with it, since the row it rises from is gone.
 private struct SettingsMenuExclusivity: ViewModifier {
     @Binding var menu: Bool
     @Binding var search: Bool
     @Binding var usage: Bool
+    @Binding var sessionView: Bool
     let sidebarVisible: Bool
 
     func body(content: Content) -> some View {
@@ -469,12 +550,16 @@ private struct SettingsMenuExclusivity: ViewModifier {
                 if open {
                     search = false
                     usage = false
+                    sessionView = false
                 }
             }
             .onChange(of: search) { _, open in
                 if open { menu = false }
             }
             .onChange(of: usage) { _, open in
+                if open { menu = false }
+            }
+            .onChange(of: sessionView) { _, open in
                 if open { menu = false }
             }
             .onChange(of: sidebarVisible) { _, visible in

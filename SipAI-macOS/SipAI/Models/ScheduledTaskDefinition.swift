@@ -18,7 +18,7 @@
 //
 // Frontmatter keys this app owns:
 //     name, description, schedule, cwd, mode, model, effort, fast_mode,
-//     service_tier, agent, enabled, catchup
+//     service_tier, skills, agent, enabled, catchup
 // Any OTHER key found in an existing file is preserved verbatim on
 // rewrite — Claude Desktop writes its own task files into the same
 // directory and must not lose fields it cares about just because we
@@ -501,7 +501,17 @@ struct ScheduledTaskDefinition: Equatable {
     /// no schedule and only ever runs when the user presses Run now.
     var scheduleExpression: String = ""
     var workingDirectory: URL?
+    /// The mode each run runs in, as the chip spells it; nil is Default —
+    /// the agent's own default setting. Kept as written: a value for a row
+    /// no longer offered is read as Default where the task is shown and
+    /// run (`AgentAskingMode.normalized`).
     var mode: String?
+    /// Each run is Chat only, written `chat_only: true` and only when on.
+    var chatOnly: Bool = false
+    /// Each run is Non-stop — a question it asks is answered for the user
+    /// rather than waiting on a card — written `non_stop: true` and only
+    /// when on. Never on unless the task says so.
+    var nonStop: Bool = false
     var model: String?
     var effort: String?
     /// Claude Code's fast mode for the unattended run, written
@@ -515,6 +525,10 @@ struct ScheduledTaskDefinition: Equatable {
     /// claude and kimi runs ignore it. See
     /// `AgentLaunchOptions.scheduledRun`.
     var serviceTier: String?
+    /// The skills each run loads with its prompt, by name, in order —
+    /// `skills: a, b`. A run whose skill is missing or switched off for
+    /// the task's agent in the task's folder does not start.
+    var skills: [String] = []
     var agent: String = "claude_code"
     /// `enabled: false` pauses firing without losing the schedule.
     var enabled: Bool = true
@@ -555,10 +569,13 @@ struct ScheduledTaskDefinition: Equatable {
             && lhs.scheduleExpression == rhs.scheduleExpression
             && lhs.workingDirectory == rhs.workingDirectory
             && lhs.mode == rhs.mode
+            && lhs.chatOnly == rhs.chatOnly
+            && lhs.nonStop == rhs.nonStop
             && lhs.model == rhs.model
             && lhs.effort == rhs.effort
             && lhs.fastMode == rhs.fastMode
             && lhs.serviceTier == rhs.serviceTier
+            && lhs.skills == rhs.skills
             && lhs.agent == rhs.agent
             && lhs.enabled == rhs.enabled
             && lhs.catchUpMissed == rhs.catchUpMissed
@@ -572,8 +589,8 @@ struct ScheduledTaskDefinition: Equatable {
     /// Keys this app understands. Everything else round-trips through
     /// `passthroughFields`.
     private static let ownedKeys: Set<String> = [
-        "name", "description", "schedule", "cwd", "mode", "model",
-        "effort", "fast_mode", "service_tier", "agent", "enabled", "catchup",
+        "name", "description", "schedule", "cwd", "mode", "chat_only", "non_stop", "model",
+        "effort", "fast_mode", "service_tier", "skills", "agent", "enabled", "catchup",
     ]
 
     /// Parse a task directory's SKILL.md. Returns nil when the file is
@@ -595,8 +612,22 @@ struct ScheduledTaskDefinition: Equatable {
             return def
         }
 
+        // `skills:` written as a YAML list — one `- name` per line below
+        // an empty value. Read here because a hand-written file may well
+        // spell it that way, and unread the run would start WITHOUT its
+        // skills, with nothing saying so.
+        var listingSkills = false
         for line in lines[1..<close] {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if listingSkills {
+                if trimmed == "-" { continue }
+                if trimmed.hasPrefix("- ") {
+                    def.skills = skillList((def.skills + [unquoted(String(trimmed.dropFirst(2))
+                        .trimmingCharacters(in: .whitespaces))]).joined(separator: ","))
+                    continue
+                }
+                if !trimmed.isEmpty { listingSkills = false }
+            }
             guard let colon = trimmed.firstIndex(of: ":") else { continue }
             let key = String(trimmed[trimmed.startIndex..<colon])
                 .trimmingCharacters(in: .whitespaces)
@@ -609,12 +640,18 @@ struct ScheduledTaskDefinition: Equatable {
             case "schedule":    def.scheduleExpression = value
             case "cwd":         def.workingDirectory = expandedDirectory(value)
             case "mode":        def.mode = value.isEmpty ? nil : value
+            // On only when the file says so, like fast mode.
+            case "chat_only":   def.chatOnly = isTrue(value)
+            case "non_stop":    def.nonStop = isTrue(value)
             case "model":       def.model = value.isEmpty ? nil : value
             case "effort":      def.effort = value.isEmpty ? nil : value
             // On only when the file says so — the opposite default to
             // `enabled`, since fast mode spends usage credits.
             case "fast_mode":   def.fastMode = isTrue(value)
             case "service_tier": def.serviceTier = value.isEmpty ? nil : value
+            case "skills":
+                def.skills = skillList(value)
+                listingSkills = value.isEmpty
             case "agent":       if !value.isEmpty { def.agent = value }
             case "enabled":     def.enabled = !isFalse(value)
             case "catchup":     def.catchUpMissed = !isFalse(value)
@@ -628,6 +665,19 @@ struct ScheduledTaskDefinition: Equatable {
         def.prompt = lines.joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return def
+    }
+
+    /// `skills:`'s value: names split on commas, blanks and duplicates
+    /// dropped, the order kept.
+    static func skillList(_ value: String) -> [String] {
+        var seen = Set<String>()
+        // A flow list (`[a, b]`) is the same names inside brackets, each
+        // possibly quoted.
+        var inner = value.trimmingCharacters(in: .whitespaces)
+        if inner.hasPrefix("["), inner.hasSuffix("]") { inner = String(inner.dropFirst().dropLast()) }
+        return inner.split(separator: ",")
+            .map { unquoted($0.trimmingCharacters(in: .whitespaces)) }
+            .filter { !$0.isEmpty && seen.insert($0.lowercased()).inserted }
     }
 
     private static func isFalse(_ value: String) -> Bool {
@@ -686,9 +736,13 @@ struct ScheduledTaskDefinition: Equatable {
         if let cwd = workingDirectory {
             fields.append("cwd: \(Self.frontmatterSafe(cwd.path))")
         }
-        if let mode = mode.map(Self.frontmatterSafe), !mode.isEmpty {
+        // Chat only carries no mode (`ChatOnlyMode.select` clears it).
+        if chatOnly {
+            fields.append("chat_only: true")
+        } else if let mode = mode.map(Self.frontmatterSafe), !mode.isEmpty {
             fields.append("mode: \(mode)")
         }
+        if nonStop { fields.append("non_stop: true") }
         if let model = model.map(Self.frontmatterSafe), !model.isEmpty {
             fields.append("model: \(model)")
         }
@@ -698,6 +752,12 @@ struct ScheduledTaskDefinition: Equatable {
         if fastMode { fields.append("fast_mode: true") }
         if let tier = serviceTier.map(Self.frontmatterSafe), !tier.isEmpty {
             fields.append("service_tier: \(tier)")
+        }
+        let skillNames = skills.map(Self.frontmatterSafe)
+            .map { $0.replacingOccurrences(of: ",", with: "") }
+            .filter { !$0.isEmpty }
+        if !skillNames.isEmpty {
+            fields.append("skills: " + skillNames.joined(separator: ", "))
         }
         if agent != "claude_code" {
             fields.append("agent: \(Self.frontmatterSafe(agent))")

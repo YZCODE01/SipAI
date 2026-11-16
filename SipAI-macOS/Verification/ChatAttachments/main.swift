@@ -631,16 +631,19 @@ check("the drop closures are re-pointed on every body pass",
       messageInput.contains("applyDropHandlers(to: tv)"))
 check("staged files are drawn as removable chips",
       chatView.contains("AttachmentChipRow(") && chatView.contains("onRemoveAttachment"))
+// The composer's send and an edited message's send share one path,
+// handed the composer's staged files or none.
 check("an attachment alone is enough to send",
-      chatView.contains("!text.isEmpty || !pendingAttachments.isEmpty"))
+      chatView.contains("sendMessage(draft, attachments: pendingAttachments, fromComposer: true)")
+      && chatView.contains("guard !text.isEmpty || !attachments.isEmpty, !sending"))
 check("the send arrow appears for an attachment with no text",
       chatView.contains("hasSomethingToSend"))
 check("only non-text attachments are carried into the request",
-      chatView.contains("pendingAttachments.filter { !$0.isText }"))
+      chatView.contains("let sentAttachments = attachments.filter { !$0.isText }"))
 check("the turn is handed the attachments",
       chatView.contains("attachments: sentAttachments"))
 check("the stored message still records the file names",
-      chatView.contains("userMessage.files = pendingAttachments.map(\\.name)"))
+      chatView.contains("userMessage.files = attachments.map(\\.name)"))
 check("the transcript strips inlined blocks",
       chatView.contains("ChatAttachment.strippingInlineBlocks(from: m.content)"))
 // Twice: once for the bubble, once for the find. One without the

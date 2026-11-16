@@ -415,6 +415,8 @@ check("settings.local.json outranks settings.json — claude's own precedence",
 let composer = read("SipAI/Views/Chat/AgentComposer.swift")
 let parser = read("SipAI/Models/AgentEventParsing.swift")
 let panel = read("SipAI/Views/Chat/ScheduledTaskPanel.swift")
+// The rule a model pick fits its chips by (`AgentLaunchOptions.fitted`).
+let launchRules = read("SipAI/Models/AgentLaunchOptions.swift")
 check("the composer draws an \"Other models\" section",
       composer.contains(".header(String(localized: \"Other models\""))
 check("the composer's Default row reads the configured default first",
@@ -422,7 +424,9 @@ check("the composer's Default row reads the configured default first",
 check("the composer offers the fast switch under the model rows",
       composer.contains("footer: { fastModeFooter }"))
 check("picking a model without fast mode clears the switch",
-      composer.contains("if updated.fastMode, !fastModeSupported(forModel: value)"))
+      composer.contains("options = updated.fitted(to: modelPickOffer(forModel: value))")
+      && composer.contains("fastMode: fastModeSupported(forModel: value),")
+      && launchRules.contains("if out.fastMode, offer.fastMode == false {"))
 check("claude's fast switch is gated on the model's own catalog flag, not the family",
       composer.contains("caps.fastModeSupported(forModelId: id)"))
 check("codex's speed is gated on the model's advertised tiers",
@@ -434,8 +438,9 @@ check("the parser reads fast_mode_state off init and result",
       parser.components(separatedBy: "fast_mode_state").count >= 3)
 check("the view mirrors the fast report behind its own guard",
       view.contains("guard report != liveFastModeReport else { return }"))
-check("the scheduled-task picker carries the same section",
-      panel.contains("capabilities.otherModels"))
+check("the scheduled-task picker carries the same section — the composer's own rows, one builder",
+      panel.contains("AgentMenus.modelRows(agentKey: taskAgentKey, config: config,")
+        && composer.contains("return caps.otherModels.filter {"))
 
 // ─────────────────────────── 6. the catalog baked into the binary
 
@@ -687,6 +692,20 @@ check("the switches are consulted in claude's order",
       ClaudeModelCatalog.childEnvironmentFacts(
         environment: ["CLAUDE_CODE_USE_FOUNDRY": "1", "CLAUDE_CODE_USE_BEDROCK": "1"],
         settingsEnvironment: [:]).provider == "bedrock")
+// Where the child sends its requests: Settings → Usage names Anthropic's
+// console for a key only when this is Anthropic's own API.
+check("ANTHROPIC_BASE_URL is a child fact, trimmed, the settings block winning",
+      ClaudeModelCatalog.childEnvironmentFacts(
+        environment: ["ANTHROPIC_BASE_URL": "https://gateway.example.com"],
+        settingsEnvironment: ["ANTHROPIC_BASE_URL": " https://api.example.org/anthropic "]).baseURL
+        == "https://api.example.org/anthropic"
+      && ClaudeModelCatalog.childEnvironmentFacts(
+        environment: ["ANTHROPIC_BASE_URL": "https://gateway.example.com"], settingsEnvironment: [:]).baseURL
+        == "https://gateway.example.com")
+check("…and none when it is unset or blank",
+      ClaudeModelCatalog.childEnvironmentFacts(environment: [:], settingsEnvironment: [:]).baseURL == nil
+      && ClaudeModelCatalog.childEnvironmentFacts(
+        environment: ["ANTHROPIC_BASE_URL": "  "], settingsEnvironment: [:]).baseURL == nil)
 check("an empty override is no override",
       ClaudeModelCatalog.childEnvironmentFacts(
         environment: ["ANTHROPIC_DEFAULT_OPUS_MODEL": "  "], settingsEnvironment: [:])
@@ -898,10 +917,10 @@ check("the chip's title does not read the id the session last ran under",
 check("the hover names the resolution, the source and the last-run id",
       composer.contains("last ran as \\(last)") && composer.contains("set by \\("))
 check("the composer's appearance recomputes Other models",
-      composer.contains("if !isCodex && !isKimi {\n                ClaudeModelCatalog.refreshOtherModels(config: config)"))
+      composer.contains("if isClaude {\n                ClaudeModelCatalog.refreshOtherModels(config: config)"))
 check("the Other models rows are titled by the row, not re-derived",
-      composer.contains("ComposerOptionRow(value: $0.fullId,\n                                  title: $0.displayName")
-      && panel.contains("Text(verbatim: model.displayName)"))
+      composer.contains("AgentMenuRow(value: $0.fullId,\n                                  title: $0.displayName")
+      && panel.contains("Text(verbatim: row.title).tag(row.value ?? \"\")"))
 check("the Default row resolves through the same rule",
       composer.contains("config.resolvedModelId(forAlias: \"\")"))
 check("the view passes selectedFullId only for a concrete pick",
@@ -916,7 +935,7 @@ check("no per-child fact is read from the login shell",
       && !view.contains("resolveIfCaptured(\"ANTHROPIC_DEFAULT"))
 check("the scans share one binary key",
       options.components(separatedBy: "binaryKey(at: path) ?? \"\\(path)|missing\"").count == 5)
-let flagsBody = body(of: "func flags(for agentKey: String = \"claude_code\")", in: options)
+let flagsBody = body(of: "func flags(for agentKey: String)", in: options)
 check("no resolved name reaches the command line",
       !flagsBody.isEmpty && !flagsBody.contains("resolvedModel") && !flagsBody.contains("displayName")
       && !flagsBody.contains("binaryCatalog"))
@@ -1164,14 +1183,16 @@ check("the composer's claude branch reads the per-model rule",
 check("the composer no longer offers claude one flat list",
       !composer.contains("return caps.effortLevels\n"))
 check("a model pick clears a stranded level for every agent, claude included",
-      composer.contains("if let effort = updated.effort, !effort.isEmpty,\n                   !effortLevels(forModel: value).contains(effort) {")
+      composer.contains("options = updated.fitted(to: modelPickOffer(forModel: value))")
+      && composer.contains("efforts: effortLevels(forModel: value),")
+      && launchRules.contains("if let effort = out.effort, !effort.isEmpty,\n           let levels = offer.efforts, !levels.contains(effort) {")
       && !composer.contains("if isCodex || isKimi, let effort = updated.effort"))
 check("the composer hides the chip for a model that takes no level",
       composer.contains("isCodex || !effortLevels.isEmpty"))
 check("the task panel's claude branch reads the same rule",
       panel.contains("return capabilities.effortLevels(forModelId: config.resolvedClaudeModelId(\n            picked: draft.model, configuredDefault: claudeConfiguredDefault))"))
 check("the task panel's model picker clears a stranded level",
-      panel.contains("Picker(\"\", selection: modelBinding)")
+      panel.contains("menuPicker(rows: modelRows, selection: modelBinding)")
       && body(of: "private var modelBinding: Binding<String> {", in: panel)
         .contains("!taskEffortLevels.contains(effort)"))
 check("the task panel hides its effort picker the same way",

@@ -43,13 +43,14 @@ struct AgentLaunchOptions: Equatable, Hashable {
     /// anything else is a tier id ("priority" is the one codex names
     /// Fast). Persisted as `service_tier`; claude and kimi ignore it.
     var serviceTier: String? = nil
-    /// The exact value a codex SEND passes as `-c service_tier=`, nil to
-    /// pass nothing — resolved per send from `serviceTier` by
+    /// The exact speed a codex SEND states — `serviceTier` on the
+    /// app-server's `turn/start`, `-c service_tier=` on `codex exec` — nil
+    /// to state none: resolved per send from `serviceTier` by
     /// `CodexCatalog.serviceTierOverride(for:)` for a composer send, and
     /// taken verbatim from the task's own pick for a scheduled run
-    /// (`scheduledRun`). Never persisted. A turn that sets nothing — a
-    /// scheduled run left on Default — runs at whatever `codex exec`
-    /// itself resolves.
+    /// (`scheduledRun`). Never persisted. A turn that states none — a
+    /// scheduled run left on Default — runs at the folder's configured
+    /// tier, as `codex exec` resolves it by itself.
     var codexServiceTierOverride: String? = nil
     /// "Chat only" — a turn whose only tools look things up on the web
     /// (no file or command tools, no MCP servers) and (where the agent
@@ -66,13 +67,46 @@ struct AgentLaunchOptions: Equatable, Hashable {
     /// it adds lives in `ChatOnlyArgv`; whether the row is offered at
     /// all in `ChatOnlyAvailability`.
     var chatOnly: Bool = false
+    /// "Non-stop" — the agent is never stopped to ask the user a question
+    /// in the middle of a turn: a question it asks is answered at once —
+    /// claude with words telling it to choose for itself and carry on
+    /// (`AgentQuestionReplies.nonStop`), codex and kimi with their own
+    /// "not answered" — and off, a question is drawn as a card and the
+    /// turn waits for the answer. For any turn that can ask
+    /// (`AgentAskingMode.asksQuestions`), and APP-SIDE only: nothing
+    /// reaches the command line — the bridge reads it from the turn when a
+    /// question arrives, so turning it on mid-turn applies to that turn's
+    /// next question (and declines one on screen).
+    /// Persisted as `non_stop` in both prefs maps (absent = false), and as
+    /// `non_stop: true` in a scheduled task's file. Never turned on by
+    /// SipAI itself — a scheduled run included: a run is Non-stop only when
+    /// its task has the box ticked.
+    var nonStop: Bool = false
+    /// The skills THIS send loads: the session's chosen skills the
+    /// conversation does not hold yet (`SkillPreload.toLoad`), or a
+    /// scheduled task's skills. Set on the send's own copy and never
+    /// persisted — which skills a session has chosen is kept per session
+    /// (`ConfigManager.agentSessionSkillPicks`), and what each send loads
+    /// follows from that and the conversation.
+    var skillTriggers: [SkillTrigger] = []
+    /// The claude entry THIS send resumes at — an earlier message edited
+    /// in place (`AgentSessionRewind`): passed as
+    /// `ClaudeCapabilities.resumeSessionAtFlag` beside `--resume`, so
+    /// claude parents the message there. Set on the send's own copy and
+    /// never persisted.
+    var claudeResumeAt: String? = nil
 
     /// Flag list for an agent invocation. Blank values are skipped.
     /// Branches per agent: the three CLIs spell all three options
-    /// differently.
-    func flags(for agentKey: String = "claude_code") -> [String] {
-        if agentKey == "codex" { return codexFlags() }
-        if agentKey == "kimi" { return kimiFlags() }
+    /// differently. An agent with no spelling here gets no flags: another
+    /// CLI's flag is a startup error at best, a different meaning at worst.
+    func flags(for agentKey: String) -> [String] {
+        switch agentKey {
+        case "codex": return codexFlags()
+        case "kimi": return kimiFlags()
+        case "claude_code": break
+        default: return []
+        }
         var argv: [String] = []
         // A Chat only turn keeps only its pre-approved web lookups, so
         // there is nothing a permission mode could decide; the flag is
@@ -148,12 +182,12 @@ struct AgentLaunchOptions: Equatable, Hashable {
     ///    nothing. Kimi rejects the combination at startup, one
     ///    message per flag — "error: Cannot combine --prompt with
     ///    --yolo." / "…--auto." / "…--plan." — because print mode
-    ///    approves every tool call itself. SipAI drives kimi only
-    ///    through `--prompt`, so any mode flag here exits before a
-    ///    single event, killing every turn. (The composer therefore
-    ///    shows kimi a fixed auto-approve chip rather than a picker, and
-    ///    a value saved from another agent's sticky slot lands here
-    ///    harmlessly.)
+    ///    approves every tool call itself. These flags are `kimi
+    ///    --prompt`'s — kimi's Never Ask, the one mode that command
+    ///    runs — so any mode flag here exits before a single event,
+    ///    killing the turn. (Kimi's other modes run through `kimi acp`,
+    ///    which takes no flags from here; a value saved from another
+    ///    agent's sticky slot lands here harmlessly.)
     ///  * `effort` emits nothing here because kimi has no effort FLAG —
     ///    not because it has no effort. It grades thinking low → max
     ///    and takes the per-run override through the ENVIRONMENT
@@ -174,18 +208,36 @@ struct AgentLaunchOptions: Equatable, Hashable {
     /// `-c service_tier=` — a picked speed always does, as it does from
     /// the composer — and no pick passes nothing, so the run gets what
     /// `codex exec` resolves by itself: the config's tier for the task's
-    /// folder, never a model's catalog default. Default must stay that
-    /// rule: under the composer's picker rule, every task on a model
-    /// whose catalog starts it on Fast would run Fast without anyone
-    /// choosing it. The task card names what Default resolves to
-    /// (`CodexSpeed.scheduled`).
+    /// folder, never a model's catalog default. A run through codex's
+    /// front end (every mode but Chat only, where codex has it) keeps the
+    /// same rule: with no pick it states the tier codex's own answer for
+    /// the folder names (`CodexAppServer.turnSettings`), which is the
+    /// config's alone.
+    /// Default must stay that rule: under the composer's picker rule,
+    /// every task on a model whose catalog starts it on Fast would run
+    /// Fast without anyone choosing it. The task card names what Default
+    /// resolves to (`CodexSpeed.scheduled`).
+    ///
+    /// The run does exactly what the task says, and nothing the task does
+    /// not say: its mode as picked (an asking mode, or a Default that runs
+    /// through the agent's own front end, stops on a card and waits for
+    /// the user, as a turn sent from the composer does), Chat only when the
+    /// task is Chat only, and Non-stop only when the task has it ticked.
+    /// Nothing is swapped for a mode that cannot ask.
     static func scheduledRun(agent: String, mode: String?, model: String?,
                              effort: String?, fastMode: Bool,
-                             serviceTier: String?) -> AgentLaunchOptions {
+                             serviceTier: String?, nonStop: Bool = false,
+                             chatOnly: Bool = false) -> AgentLaunchOptions {
         var options = AgentLaunchOptions()
-        options.permissionMode = mode
+        // One writer for the mode and Chat only — see `ChatOnlyMode.select`.
+        // `mode` is the task FILE's: a kimi file with none is Never Ask
+        // (`AgentAskingMode.taskMode`).
+        ChatOnlyMode.select(chatOnly ? ChatOnlyMode.rowValue
+                                     : AgentAskingMode.taskMode(agentKey: agent, fileMode: mode),
+                            into: &options)
         options.model = model
         options.effort = effort
+        options.nonStop = nonStop
         switch agent {
         case "codex":
             if let tier = CodexSpeed.normalized(serviceTier) {
@@ -194,10 +246,134 @@ struct AgentLaunchOptions: Equatable, Hashable {
             }
         case "kimi":
             break
-        default:
+        case "claude_code":
             options.fastMode = fastMode
+        default:
+            // An agent with no speed of its own known here runs at none.
+            break
         }
         return options
+    }
+}
+
+// MARK: - What a model offers on the chips
+
+/// What a model offers on the composer's chips: the levels its effort
+/// chip lists, whether it takes fast mode, and the codex speeds it lists.
+/// nil where that is not known — a catalog not read yet, a model newer
+/// than it — and what is not known drops nothing (`fitted`).
+struct ModelOffer: Equatable {
+    var efforts: [String]? = nil
+    var fastMode: Bool? = nil
+    /// The tier ids codex lists for the model; nil for another agent.
+    var tiers: [String]? = nil
+}
+
+extension AgentLaunchOptions {
+    /// These chips with what the model does not offer dropped: an effort
+    /// it lists no level of, fast mode it does not take, a codex speed it
+    /// does not list (Standard every model has). The picker stops offering
+    /// those, and a value the user can no longer see would still be sent:
+    /// picking `gpt-5.5` while `ultra` was selected would send
+    /// `-c model_reasoning_effort=ultra` for a model whose catalog stops at
+    /// `xhigh`, a kimi model that publishes no levels would keep a
+    /// KIMI_MODEL_THINKING_EFFORT the picker no longer shows, and claude
+    /// runs Haiku with no effort at all. The composer's model menu fits
+    /// its chips to the model picked; an unsent new session's kept chips
+    /// are fitted to the model they land on (`NewSessionChipEdits`).
+    func fitted(to offer: ModelOffer) -> AgentLaunchOptions {
+        var out = self
+        if let effort = out.effort, !effort.isEmpty,
+           let levels = offer.efforts, !levels.contains(effort) {
+            out.effort = nil
+        }
+        if out.fastMode, offer.fastMode == false {
+            out.fastMode = false
+        }
+        if let tier = out.serviceTier, tier != CodexSpeed.standard, let listed = offer.tiers,
+           !(CodexSpeed.normalized(tier).map(listed.contains) ?? false) {
+            out.serviceTier = nil
+        }
+        return out
+    }
+}
+
+/// What the user changed on an unsent new session's chips, chip by chip —
+/// what its place keeps (`AppState.newSessionChipEdits`). Only the chips
+/// changed on the page are kept: the others follow what the place starts
+/// with (its group's newest session, else the agent's latest choices) as
+/// that moves on.
+///
+/// Recorded where a pick is made (`AgentSessionView.saveUserPick`), never
+/// read off a change of the chips' state: SipAI's own updates look the
+/// same there, and kept as changes they would stop a place following its
+/// group in a chip the user never touched.
+struct NewSessionChipEdits: Equatable {
+    /// One of the composer's chips, by the fields it writes.
+    enum Chip: CaseIterable {
+        /// A mode, or Chat only: one chip, the two written together
+        /// (`ChatOnlyMode.select`).
+        case mode
+        case nonStop
+        case model
+        case effort
+        /// Claude's fast mode, codex's speed switches.
+        case speed
+
+        func differs(_ a: AgentLaunchOptions, _ b: AgentLaunchOptions) -> Bool {
+            switch self {
+            case .mode: return a.permissionMode != b.permissionMode || a.chatOnly != b.chatOnly
+            case .nonStop: return a.nonStop != b.nonStop
+            case .model: return a.model != b.model
+            case .effort: return a.effort != b.effort
+            case .speed: return a.fastMode != b.fastMode || a.serviceTier != b.serviceTier
+            }
+        }
+
+        func copy(from source: AgentLaunchOptions, into target: inout AgentLaunchOptions) {
+            switch self {
+            case .mode:
+                target.permissionMode = source.permissionMode
+                target.chatOnly = source.chatOnly
+            case .nonStop:
+                target.nonStop = source.nonStop
+            case .model:
+                target.model = source.model
+                target.modelFullId = source.modelFullId
+            case .effort:
+                target.effort = source.effort
+            case .speed:
+                target.fastMode = source.fastMode
+                target.serviceTier = source.serviceTier
+            }
+        }
+    }
+
+    /// The chips changed, and what they were changed to.
+    private(set) var chips: Set<Chip> = []
+    private(set) var values = AgentLaunchOptions()
+
+    /// A pick moved the chips from `old` to `new`. Every chip it moved is
+    /// kept, one a model pick dropped (`fitted`) included: the page showed
+    /// it move, and it comes back as it was left.
+    mutating func note(from old: AgentLaunchOptions, to new: AgentLaunchOptions) {
+        for chip in Chip.allCases where chip.differs(old, new) {
+            chips.insert(chip)
+            chip.copy(from: new, into: &values)
+        }
+    }
+
+    /// `start` with the changed chips laid over it, fitted to the model the
+    /// chips land on where the two mix — a model kept over the start's
+    /// effort, an effort kept over the start's model: an effort, fast mode
+    /// or speed that model does not offer goes back to Default, as a model
+    /// pick drops it. Where nothing mixes, `start` stands as it was saved.
+    func applied(to start: AgentLaunchOptions,
+                 offer: (_ model: String?) -> ModelOffer) -> AgentLaunchOptions {
+        var out = start
+        for chip in chips { chip.copy(from: values, into: &out) }
+        guard !chips.isDisjoint(with: [.model, .effort, .speed]) else { return out }
+        return out.fitted(to: offer(out.model))
     }
 }
 
@@ -356,6 +532,360 @@ enum ChatOnlyMode {
     }
 }
 
+// MARK: - Asking modes: the turns that can ask the user
+
+/// The modes in which codex and kimi run their turns through their OWN
+/// interactive protocol — codex's app-server, kimi's ACP server — the only
+/// front ends through which either can ask the user anything mid-turn: a
+/// permission, a plan to review, a question. Each is the agent's own mode,
+/// under the agent's own name; the value carries the agent's prefix, so a
+/// claude `manual` or `plan` restored onto another agent's session never
+/// switches it into an asking mode.
+///
+/// Default (no mode picked) is each agent's own default setting, and on
+/// codex and kimi it runs through the same front end wherever the
+/// installed CLI has one (`runsThroughFrontEnd`): codex's own default
+/// permissions, asked of codex for the folder on every turn, and kimi's
+/// own configured default mode. So do codex's three fixed modes
+/// (`isCodexFixed`), which never ask. Kimi's Never Ask and Chat only keep
+/// the agent's headless command (`kimi --prompt`, `codex exec`).
+enum AgentAskingMode {
+    /// Codex's Plan collaboration mode, with codex's own default
+    /// permissions, as codex's own clients run it.
+    static let codexPlan = "codex-plan"
+    /// Kimi's Ask When Needed (`yolo`).
+    static let kimiAskWhenNeeded = "kimi-yolo"
+    /// Kimi's plan mode, with Always Ask's permissions.
+    static let kimiPlan = "kimi-plan"
+    /// Kimi's Never Ask: its headless run, which approves every tool call
+    /// itself and is told not to ask (`kimi --prompt`). Not an asking mode.
+    static let kimiNeverAsk = "kimi-never-ask"
+
+    static let codex: [String] = [codexPlan]
+    static let kimi: [String] = [kimiAskWhenNeeded, kimiPlan]
+
+    /// Values written for rows that are no longer offered: codex's Agent
+    /// (codex's own Default preset) and kimi's Always Ask (kimi's own
+    /// default mode). Each is what Default runs now, so both read as
+    /// Default (`normalized`).
+    static let legacyCodexAgent = "codex-agent"
+    static let legacyKimiAlwaysAsk = "kimi-manual"
+
+    /// A saved mode as it runs today: blank, or a value for a row that is
+    /// no longer offered, is Default (nil) — and so is a kimi task file's
+    /// own spelling of Default (`kimiTaskDefault`).
+    static func normalized(_ mode: String?) -> String? {
+        guard let mode, !mode.isEmpty, mode != kimiTaskDefault,
+              mode != legacyCodexAgent, mode != legacyKimiAlwaysAsk else { return nil }
+        return mode
+    }
+
+    /// How a kimi task's FILE spells Default. A kimi task file with no
+    /// `mode:` is not Default: every such file was written when a kimi run
+    /// had one mode — its headless run, which approves its own tool calls
+    /// — and reads as Never Ask (`taskMode`). Read as Default, a task that
+    /// ran unattended would stop on its first approval card after an
+    /// update, with nobody there, and every later slot would be passed
+    /// over behind it.
+    static let kimiTaskDefault = "kimi-default"
+
+    /// The mode a scheduled task runs in, from its file's `mode:` (nil:
+    /// Default). Kimi: no mode is Never Ask, and Default is written out.
+    static func taskMode(agentKey: String, fileMode: String?) -> String? {
+        if agentKey == "kimi", (fileMode ?? "").isEmpty { return kimiNeverAsk }
+        return normalized(fileMode)
+    }
+
+    /// The `mode:` a task file carries for a mode as the chip spells it
+    /// (nil: none written). Kimi's Default is written out — and where the
+    /// installed kimi has no front end, its one row is the headless Never
+    /// Ask whatever the chip holds, and that is what the file says: the
+    /// task must not turn into an asking one the day kimi is updated.
+    static func taskFileMode(agentKey: String, mode: String?,
+                             frontEnd: Availability = .offered) -> String? {
+        guard agentKey == "kimi", normalized(mode) == nil else { return mode }
+        return frontEnd == .unavailable ? kimiNeverAsk : kimiTaskDefault
+    }
+
+    /// The scheduled-task card's Mode selection for a task as its file
+    /// stands: "" is the list's first row (Default — on a kimi with no
+    /// front end, Never Ask), `ChatOnlyMode.rowValue` Chat only, else the
+    /// mode. Claude's ask-before-each-edit mode is one row under either
+    /// spelling (`manual`, `default`): a file written with the one the
+    /// installed claude no longer lists selects the one it does, rather
+    /// than standing as a second row of the same name.
+    static func taskPickerValue(agentKey: String, fileMode: String?, chatOnly: Bool,
+                                frontEnd: Availability, listedModes: [String]) -> String {
+        if chatOnly { return ChatOnlyMode.rowValue }
+        guard let mode = taskMode(agentKey: agentKey, fileMode: fileMode) else { return "" }
+        if agentKey == "kimi" {
+            return mode == kimiNeverAsk && frontEnd == .unavailable ? "" : mode
+        }
+        if agentKey != "codex", !listedModes.contains(mode) {
+            if mode == "default", listedModes.contains("manual") { return "manual" }
+            if mode == "manual", listedModes.contains("default") { return "default" }
+        }
+        return mode
+    }
+
+    /// Whether `mode` is one of `agentKey`'s asking modes.
+    static func isAsking(_ mode: String?, agentKey: String) -> Bool {
+        guard let mode else { return false }
+        switch agentKey {
+        case "codex": return codex.contains(mode)
+        case "kimi": return kimi.contains(mode)
+        default: return false
+        }
+    }
+
+    /// Codex's three fixed modes — Read Only, Workspace Write, Full Access
+    /// (`CodexCapabilities.modePresets`). They never ask, and a turn in one
+    /// does the same on either of codex's front ends: codex enforces the
+    /// sandbox and "never ask" on both, MCP servers' asks included
+    /// (measured). Only the app-server takes a speed per message — `codex
+    /// exec` keeps a thread's saved one — and keeps a command left running
+    /// in a background terminal alive past the answer, which `codex exec`
+    /// stops with its turn. So they run there wherever the installed codex
+    /// has it, and on `codex exec` on a codex without it.
+    static func isCodexFixed(_ mode: String?) -> Bool {
+        guard let mode else { return false }
+        return CodexCapabilities.sandboxArgv(for: mode) != nil
+    }
+
+    /// Whether a turn runs through the agent's own front end: an asking
+    /// mode always, and Default and codex's fixed modes wherever the
+    /// installed CLI has the front end (`frontEndOffered`). Chat only
+    /// never — it has nothing to ask, and its switches are `codex exec`'s.
+    static func runsThroughFrontEnd(agentKey: String, mode: String?, chatOnly: Bool,
+                                    frontEndOffered: Bool) -> Bool {
+        guard !chatOnly else { return false }
+        if isAsking(mode, agentKey: agentKey) { return true }
+        guard agentKey == "codex" || agentKey == "kimi" else { return false }
+        if agentKey == "codex", isCodexFixed(mode) { return frontEndOffered }
+        return mode == nil && frontEndOffered
+    }
+
+    /// Whether a turn in `mode` can ask the user a QUESTION — what the
+    /// Non-stop switch decides. Claude: any mode but Chat only. Kimi: its
+    /// asking modes, and Default where Default runs through kimi's front
+    /// end in a mode that asks — not where kimi's own configured default
+    /// is Never Ask (`kimiDefaultPermission` `auto`), in which a question
+    /// never reaches the user (measured). Codex: Plan, and Default where
+    /// Default runs through codex's front end — where an MCP server's form
+    /// or link stops the turn as a question does (`McpElicitation`);
+    /// never a fixed mode, where codex declines those itself on either
+    /// front end (measured), and nothing ever stops the turn. Any other
+    /// agent: no — a turn SipAI cannot run asks nothing.
+    static func asksQuestions(agentKey: String, mode: String?, chatOnly: Bool,
+                              frontEndOffered: Bool = false,
+                              kimiDefaultPermission: String? = nil) -> Bool {
+        if chatOnly { return false }
+        switch agentKey {
+        case "claude_code": return true
+        case "codex": return mode == codexPlan || (mode == nil && frontEndOffered)
+        case "kimi":
+            return isAsking(mode, agentKey: agentKey)
+                || (mode == nil && frontEndOffered && kimiDefaultPermission != "auto")
+        default: return false
+        }
+    }
+
+    /// The mode's name on the chip and its row: the agent's own.
+    static func title(for mode: String) -> String {
+        switch mode {
+        case codexPlan, kimiPlan:
+            return String(localized: "Plan",
+                          comment: "Permission-mode chip label for plan")
+        case kimiAskWhenNeeded:
+            return String(localized: "Ask When Needed",
+                          comment: "Kimi mode chip label: kimi's own Ask When Needed permission mode")
+        case kimiNeverAsk:
+            return KimiCapabilities.neverAskTitle
+        default:
+            return mode
+        }
+    }
+
+    /// The kimi the asking modes were measured on: its ACP server's
+    /// permission requests, plan reviews and question forms, and the
+    /// runtime binding an ACP turn leaves behind.
+    static let kimiVersionFloor = "2.1.1"
+
+    /// The codex the asking modes were measured on: its app-server's
+    /// approval requests and their answers, Plan's question tool and plan
+    /// item, and the thread's sticky collaboration mode.
+    static let codexVersionFloor = "0.159.3"
+
+    /// Whether the installed CLI can run an asking mode — read off what the
+    /// app has learnt of it, never assumed.
+    enum Availability: Equatable {
+        case offered
+        /// What decides it has not been read yet.
+        case pending
+        case unavailable
+    }
+
+    /// Whether the installed CLI has its front end at all — what an asking
+    /// mode needs, and what Default needs to run through it. Positive, as
+    /// Chat only's gate is: below the floor there is none.
+    static func frontEndAvailability(agentKey: String, kimiVersion: String?,
+                                     codexVersion: String? = nil) -> Availability {
+        switch agentKey {
+        case "kimi":
+            guard let kimiVersion else { return .pending }
+            return ChatOnlyAvailability.versionAtLeast(kimiVersion, kimiVersionFloor)
+                ? .offered : .unavailable
+        case "codex":
+            guard let codexVersion else { return .pending }
+            return ChatOnlyAvailability.versionAtLeast(codexVersion, codexVersionFloor)
+                ? .offered : .unavailable
+        default:
+            return .unavailable
+        }
+    }
+
+    /// Whether the installed CLI can run the asking mode `mode`. Codex's
+    /// Plan also needs the installed codex to LIST a plan collaboration
+    /// mode (`collaborationMode/list`, by name).
+    static func availability(of mode: String, agentKey: String, kimiVersion: String?,
+                             codexVersion: String? = nil,
+                             codexModes: [String]? = nil) -> Availability {
+        guard isAsking(mode, agentKey: agentKey) else { return .unavailable }
+        let frontEnd = frontEndAvailability(agentKey: agentKey, kimiVersion: kimiVersion,
+                                            codexVersion: codexVersion)
+        guard frontEnd == .offered else { return frontEnd }
+        if mode == codexPlan {
+            guard let codexModes else { return .pending }
+            return codexModes.contains("plan") ? .offered : .unavailable
+        }
+        return .offered
+    }
+
+    /// The asking modes `agentKey` offers, or nil while nothing that
+    /// decides any of them has been read.
+    static func offered(agentKey: String, kimiVersion: String?,
+                        codexVersion: String? = nil,
+                        codexModes: [String]? = nil) -> [String]? {
+        let modes: [String]
+        switch agentKey {
+        case "kimi": modes = kimi
+        case "codex": modes = codex
+        default: return []
+        }
+        let verdicts = modes.map {
+            availability(of: $0, agentKey: agentKey, kimiVersion: kimiVersion,
+                         codexVersion: codexVersion, codexModes: codexModes)
+        }
+        if verdicts.allSatisfy({ $0 == .pending }) { return nil }
+        return zip(modes, verdicts).filter { $0.1 == .offered }.map(\.0)
+    }
+
+    /// What a turn says when the agent's own protocol server answers in a
+    /// shape this app was not written against: another protocol version, a
+    /// session opened without the id it must carry, a turn that cannot be
+    /// told its mode. Both drivers end such a turn here, on this row —
+    /// never run on a guess, and never ended without a word.
+    static func unreadableAnswerMessage(agentName: String) -> String {
+        String(localized: "The installed \(agentName) answered in a protocol version SipAI doesn’t speak. Pick another mode to send.",
+               comment: "Runner error: the agent's own protocol server (kimi's ACP, codex's app-server) answered in a shape SipAI was not written against; placeholder is the agent label")
+    }
+
+    /// What a turn says when the agent refused a step, or recorded a
+    /// failed turn, and gave no words for it. The agent's own words are
+    /// what a failure row carries; this stands in when there are none, so
+    /// a failed turn is never one that simply stops.
+    static func wordlessFailureMessage(agentName: String) -> String {
+        String(localized: "\(agentName) reported an error but gave no detail.",
+               comment: "Runner error: the agent's own protocol server refused a request, or recorded a failed turn, with an empty message; placeholder is the agent label")
+    }
+
+    /// What a Default turn on codex or kimi says when the installed CLI's
+    /// version could not be read: which front end Default runs through
+    /// rests on it, and the turn is not run on a guess.
+    static func unreadVersionMessage(agentName: String) -> String {
+        String(localized: "SipAI couldn’t read the installed \(agentName)’s version, so it can’t tell how Default runs here. Send again, or pick another mode.",
+               comment: "Runner error: a Default-mode turn on codex or kimi was not started because the installed CLI's version could not be read in time; placeholder is the agent label")
+    }
+
+    /// What a card's answer does to the chip (`CardChoice.adoptsMode`): a
+    /// mode's own value, `adoptDefault` for Default, or `adoptLeavingPlan`
+    /// for an answer that only ends the planning.
+    static let adoptDefault = ""
+    static let adoptLeavingPlan = "leave-plan"
+
+    enum Adoption: Equatable {
+        /// The chip stays where it is.
+        case keep
+        /// The chip moves to this mode; nil is Default.
+        case set(String?)
+    }
+
+    /// Where an answer adopting `target` moves a chip that is on
+    /// `current`. A mode the answer NAMES is the user's choice for the
+    /// session, wherever the chip was. An answer that only ends the
+    /// planning moves a chip that is on Plan, to Default, and no other:
+    /// kimi reviews a plan in any mode (its model may enter plan mode on
+    /// its own), and ending that planning must not take a session out of
+    /// the mode it was picked in.
+    static func adoption(of target: String, from current: String?) -> Adoption {
+        switch target {
+        case adoptLeavingPlan:
+            return (current == codexPlan || current == kimiPlan) ? .set(nil) : .keep
+        case adoptDefault:
+            return .set(nil)
+        default:
+            return .set(target)
+        }
+    }
+}
+
+/// Which front end a turn runs through. A pure function of the send, so
+/// the rule compiles headless: Chat only never takes an asking driver —
+/// it has nothing to ask — an asking mode always does, and Default and
+/// codex's fixed modes do wherever the installed CLI has the front end
+/// (`frontEndOffered`): that is where codex's and kimi's own default
+/// settings live, and where a codex turn takes its speed per message.
+/// Without it, they keep the headless command.
+enum AgentTurnDriver: Equatable {
+    case claudePrint
+    case codexExec
+    case codexAppServer
+    case kimiPrint
+    /// A kimi draft's first Chat only turn, through kimi's local server.
+    case kimiWeb
+    case kimiAcp
+    /// An agent this app has no route for. The runner refuses the turn
+    /// with words and spawns nothing: run as another CLI's turn, it would
+    /// get that CLI's flags and its output that CLI's parser.
+    case unsupported
+
+    /// Whether the turn is a JSON-RPC conversation with its child.
+    var speaksJSONRPC: Bool { self == .codexAppServer || self == .kimiAcp }
+
+    static func pick(agentKey: String, options: AgentLaunchOptions,
+                     isNewSession: Bool, frontEndOffered: Bool = false) -> AgentTurnDriver {
+        let frontEnd = AgentAskingMode.runsThroughFrontEnd(
+            agentKey: agentKey, mode: options.permissionMode,
+            chatOnly: options.chatOnly, frontEndOffered: frontEndOffered)
+        switch agentKey {
+        case "codex":
+            return frontEnd ? .codexAppServer : .codexExec
+        case "kimi":
+            if options.chatOnly { return isNewSession ? .kimiWeb : .kimiPrint }
+            // Kimi's headless run reads `/skill:name` as text; its own
+            // front end loads the skill. A turn that loads one goes
+            // there in any mode — Never Ask in kimi's own `auto`, which
+            // never asks either (`KimiAcp.modeId(for:…loadingSkill:)`).
+            if frontEndOffered, !options.skillTriggers.isEmpty { return .kimiAcp }
+            return frontEnd ? .kimiAcp : .kimiPrint
+        case "claude_code":
+            return .claudePrint
+        default:
+            return .unsupported
+        }
+    }
+}
+
 /// The plain-assistant persona a Chat only turn carries where the agent
 /// lets a turn carry one — claude on `--system-prompt`, codex through a
 /// file SipAI keeps in its data directory (`SipaiPaths
@@ -443,21 +973,40 @@ enum ChatOnlyArgv {
     /// turn, Chat only or not — but only when the installed `--help`
     /// lists it, since an unknown flag is a startup error.
     static let claudeSnapshotOff = ["--system-prompt-snapshot", "off"]
-    /// Readable thinking for a Chat only turn. Without it `claude -p`
-    /// asks the API to leave thinking text OUT — every thinking block
-    /// arrives empty — and the turn's activity line has no thoughts to
+    /// Readable thinking. Without it a `claude -p` turn asks the API for
+    /// claude's own display — short notes in some thinking blocks, the
+    /// rest empty — and a Chat only turn's activity line has little to
     /// show (`ChatOnlyActivity`). Visibility only: thinking is billed the
     /// same under every display. Not listed by `--help`, so it rides only
     /// behind the positive probe (`ChatOnlyAvailability
     /// .acceptsThinkingDisplay`) — an unknown flag is a startup error.
-    /// Never on an agent turn, whose transcript draws no thoughts.
+    /// On an agent turn only where the user's own `showThinkingSummaries`
+    /// asks for it (`claudeAsksThinkingSummaries`).
     static let claudeThinkingSummaries = ["--thinking-display", "summarized"]
+
+    /// Claude Code's own `showThinkingSummaries`, read from its settings
+    /// files in the order claude applies them, a later file winning.
+    /// Claude Code's terminal asks for thinking summaries while it is on;
+    /// its headless run does not apply it — with it on, a `-p` turn asks
+    /// the API for no display at all, so its thinking comes back empty —
+    /// and SipAI passes `claudeThinkingSummaries` instead, so the setting
+    /// does in a SipAI session what it does in claude's terminal.
+    static func claudeAsksThinkingSummaries(_ settings: [Data]) -> Bool {
+        var asks = false
+        for data in settings {
+            guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let value = obj["showThinkingSummaries"] as? Bool else { continue }
+            asks = value
+        }
+        return asks
+    }
 
     /// The claude list, in THIS order: each variadic flag is followed by
     /// another `-`-prefixed flag, and the runner appends `--resume <id>`
     /// after the whole list, so no variadic can swallow a value.
     static func claude(options: AgentLaunchOptions, snapshotFlagListed: Bool,
-                       thinkingDisplayAccepted: Bool = false) -> [String] {
+                       thinkingDisplayAccepted: Bool = false,
+                       thinkingSummariesAsked: Bool = false) -> [String] {
         var argv: [String] = []
         if options.chatOnly {
             argv += claudeToolsWebOnly
@@ -467,6 +1016,8 @@ enum ChatOnlyArgv {
             if thinkingDisplayAccepted {
                 argv += claudeThinkingSummaries
             }
+        } else if thinkingDisplayAccepted, thinkingSummariesAsked {
+            argv += claudeThinkingSummaries
         }
         if snapshotFlagListed {
             argv += claudeSnapshotOff
@@ -727,12 +1278,16 @@ enum ChatOnlyAvailability {
     /// have them.
     static let codexRequiredFeatures: Set<String> = ["shell_tool", "unified_exec"]
 
-    /// What `claude --help` says about the two flags this mode needs.
+    /// What `claude --help` says about the flags SipAI turns on per
+    /// installed claude.
     struct ClaudeHelp: Equatable {
         /// `--tools` is listed — the row is offered.
         let listsTools: Bool
         /// `--system-prompt-snapshot` is listed — the flag is emitted.
         let listsSnapshot: Bool
+        /// `--replay-user-messages` is listed — a turn can take a message
+        /// while it works (`ClaudeSteer`).
+        var listsReplayUserMessages: Bool = false
     }
 
     /// Scrape the two flags off the help text. A flag is "listed" when
@@ -747,7 +1302,8 @@ enum ChatOnlyAvailability {
             }
         }
         return ClaudeHelp(listsTools: listed("--tools"),
-                          listsSnapshot: listed("--system-prompt-snapshot"))
+                          listsSnapshot: listed("--system-prompt-snapshot"),
+                          listsReplayUserMessages: listed(ClaudeSteer.replayFlag))
     }
 
     /// `--thinking-display` is not in `--help`, so it is probed: handed a
@@ -848,6 +1404,8 @@ enum ChatOnlyAvailability {
         case "kimi":
             return kimiVersion != nil
         default:
+            // Nothing to read: `offered` answers no for an agent it does
+            // not name, and that answer is final.
             return true
         }
     }
@@ -1013,6 +1571,17 @@ enum AgentSlashCommands {
         }
     }
 
+    /// The same verdict for the front end a send actually runs through.
+    /// Kimi's ACP server — the asking modes' — answers every `/word`
+    /// itself (measured: `/help`, `/status`, `/usage` and `/compact`
+    /// answer with no model call, and an unknown one is "Unknown ACP
+    /// command"), so nothing reaches the model there. Every other front
+    /// end is the headless one `resolvesLocally(agentKey:)` speaks for.
+    static func resolvesLocally(agentKey: String, driver: AgentTurnDriver) -> Bool? {
+        if driver == .kimiAcp { return true }
+        return resolvesLocally(agentKey: agentKey)
+    }
+
     /// The draft's leading token when it reads as a command name.
     ///
     /// `/mcp`, `/skill:name` and `/code-style.review` qualify.
@@ -1051,19 +1620,33 @@ enum AgentSlashCommands {
 /// `-c sandbox_mode=… -c approval_policy=…` is accepted by BOTH
 /// subcommands — and enforced, not merely accepted — so one spelling
 /// covers the whole session.
+///
+/// That argv is the presets' route on a codex without the app-server.
+/// Where the installed codex has one, they run through it
+/// (`AgentAskingMode.isCodexFixed`), stating `sandbox` and an approval
+/// policy of `never` instead (`CodexAppServer.fixedPermissions`) — which
+/// codex enforces exactly as it enforces this argv (measured: the same
+/// files written or refused, the same folder trust recorded, an MCP
+/// server's asks declined by codex itself).
 enum CodexCapabilities {
-    /// (mode value, argv, one-line hint) — the sandbox presets the
-    /// composer offers for a codex session.
-    static let modePresets: [(value: String, argv: [String], hint: String)] = [
+    /// (mode value, `codex exec` argv, the sandbox codex's app-server
+    /// takes for it, one-line hint) — the sandbox presets the composer
+    /// offers for a codex session.
+    static let modePresets: [(value: String, argv: [String], sandbox: String, hint: String)] = [
         ("workspace-write",
          ["-c", "sandbox_mode=workspace-write", "-c", "approval_policy=never"],
+         "workspace-write",
          "edit files in the workspace; never asks"),
         ("read-only",
          ["-c", "sandbox_mode=read-only", "-c", "approval_policy=never"],
+         "read-only",
          "look but don't touch"),
         ("full-access",
-         // The one FLAG both `exec` and `exec resume` take verbatim.
+         // The one FLAG both `exec` and `exec resume` take verbatim: no
+         // sandbox and no approvals, what `danger-full-access` and
+         // `never` state through the app-server.
          ["--dangerously-bypass-approvals-and-sandbox"],
+         "danger-full-access",
          "no sandbox, no approvals"),
     ]
 
@@ -1072,34 +1655,13 @@ enum CodexCapabilities {
     // list would not offer, and levels it never mentions would be
     // offered anyway. Effort is harvested instead; see `CodexCatalog`.
 
-    /// Mode the unattended surfaces (scheduled runs) open with.
-    static let unattendedDefaultMode = "workspace-write"
-
     static func sandboxArgv(for mode: String) -> [String]? {
         modePresets.first { $0.value == mode }?.argv
     }
 
-    /// Friendly label + SF Symbol for a codex stdout item type, so a
-    /// codex tool row reads like a claude one instead of showing the
-    /// raw `command_execution` with a generic wrench.
-    /// Returns nil for anything unknown — the caller then keeps its own
-    /// default rather than inventing a name for a type we've not seen.
-    static func toolDisplay(for itemType: String)
-    -> (title: String, symbol: String)? {
-        switch itemType {
-        case "command_execution":
-            return ("Shell", "terminal")
-        case "file_change", "patch_apply":
-            return ("Update", "pencil")
-        case "web_search", "web_search_call":
-            return ("Search", "globe")
-        case "mcp_tool_call":
-            return ("MCP", "puzzlepiece.extension")
-        case "todo_list":
-            return ("Todo", "checklist")
-        default:
-            return nil
-        }
+    /// The sandbox mode codex's app-server takes for a preset.
+    static func sandboxMode(for mode: String) -> String? {
+        modePresets.first { $0.value == mode }?.sandbox
     }
 
     /// Chip label for a codex sandbox mode, the counterpart of
@@ -1138,64 +1700,405 @@ enum ClaudePrintMode {
     /// foreground.
     static let disableBackgroundTasksEnvVar = "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"
 
-    /// Environment a claude child needs on top of the ordinary one.
+    /// The oldest claude known to keep a headless run going until a
+    /// background task ends and then report the task in a turn of its
+    /// own — with stdin at EOF, which is how every SipAI turn runs. A
+    /// task that hits its own time limit is stopped and reported the
+    /// same way. An older claude starts winding down at EOF and kills a
+    /// still-running task five seconds after the turn's `result`; what it
+    /// says about the kill is three `system` records and an exit code 0,
+    /// and its transcript records nothing — the user is told the work
+    /// started and never told anything again.
+    static let backgroundTasksFloor = "2.1.309"
+
+    /// The remote setting claude's wait for a background shell sits
+    /// behind. Claude's own default is on, and Anthropic's servers may
+    /// turn it off for an account; off, claude kills a background task
+    /// five seconds after the answer, as an older claude does.
+    static let shellWaitSetting = "tengu_tidy_sloth"
+
+    /// That setting as claude last cached it in `~/.claude.json`
+    /// (`cachedGrowthBookFeatures`): nil when nothing is cached, or the
+    /// value is not a boolean. Claude fetches the settings afresh at every
+    /// start and rewrites the cache, so this is the last answer it was
+    /// given — the best word available, before a turn starts, that the
+    /// next run would kill a background task.
+    static func cachedShellWait(claudeJSON data: Data?) -> Bool? {
+        guard let data,
+              let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let cached = root["cachedGrowthBookFeatures"] as? [String: Any],
+              let value = cached[shellWaitSetting] as? NSNumber,
+              CFGetTypeID(value) == CFBooleanGetTypeID()
+        else { return nil }
+        return value.boolValue
+    }
+
+    /// Whether a claude turn may start background tasks: the installed
+    /// claude waits for them and reports them, as far as anything can say
+    /// before the turn runs. A version not read yet is an unmeasured CLI,
+    /// and answers no.
+    static func allowsBackgroundTasks(installedClaude: String?, cachedShellWait: Bool?) -> Bool {
+        ChatOnlyAvailability.versionAtLeast(installedClaude, backgroundTasksFloor)
+            && cachedShellWait != false
+    }
+
+    /// Environment a claude child needs on top of the ordinary one: the
+    /// switch, wherever background tasks are not allowed. There the agent
+    /// works the constraint out from the schema and runs the command in
+    /// the foreground, where its result lands in the turn.
     ///
-    /// **Background tasks do not survive `claude -p`, and they fail
-    /// silently.** Print mode begins winding down the moment stdin is
-    /// at EOF — which for a SipAI child is the first instant, since it
-    /// is handed `/dev/null` — and a still-running background task is
-    /// TERMINATED five seconds after the turn's `result`. Measured
-    /// repeatedly at 5.05-5.10 s. What the app is told is three
-    /// `system` records (`background_tasks_changed` with an empty list,
-    /// `task_updated` with `status: "killed"`, `task_notification` with
-    /// `status: "stopped"`), none of which any reader renders; the
-    /// child then exits with code 0 and an empty stderr, and the
-    /// transcript on disk records nothing at all. So the user asks for
-    /// something long, is told it started, and is never told anything
-    /// again — on the live feed or on reopen.
-    ///
-    /// Disabling the feature is therefore strictly better than leaving
-    /// it: the agent works the constraint out from the schema and runs
-    /// the command in the foreground instead, where the turn clock
-    /// keeps counting and the result actually lands. Measured, with a
-    /// prompt explicitly demanding `run_in_background=true`: "This Bash
-    /// tool has no `run_in_background` parameter, so I ran it in the
-    /// foreground instead."
-    ///
-    /// **This must OVERRIDE rather than default.** Unlike
+    /// **Where it is set it must OVERRIDE rather than default.** Unlike
     /// `AgentRunner.overlayProxyVars`, which only fills in names the
-    /// process environment lacks, a value inherited from the user's
-    /// shell has to lose: a `…=0` exported there would re-enable a
-    /// mechanism that cannot work here, and the failure leaves no
-    /// evidence anywhere.
+    /// process environment lacks, a `…=0` inherited from the environment
+    /// has to lose: it would re-enable tasks that claude then kills with
+    /// nothing on screen saying so. Where tasks are allowed nothing is
+    /// set, so a user's own `=1` (claude's settings `env`, say) still
+    /// keeps them off.
     ///
-    /// **Claude only, and the other two must be left alone** — not
-    /// merely because this is where the bug is:
+    /// **Claude only, and the other two must be left alone:**
     ///
-    ///  * `codex exec` has no background-execution parameter to
-    ///    disable. Asked to background something it improvises
-    ///    `nohup … &`, which its own process reaping kills at turn end
-    ///    in every sandbox mode. There is nothing to switch.
-    ///  * Kimi already does the right thing. Its print mode defaults to
-    ///    `steer` — the run stays alive while tasks are pending and
-    ///    each completion drives a new main turn — and a 40 s
-    ///    backgrounded command was measured running to completion and
-    ///    being reported. Do NOT reach for
+    ///  * Codex has no such switch to set. A command it leaves running
+    ///    in a background terminal is stopped by `codex exec` when its
+    ///    turn ends — which the runner says (`CodexBackgroundNotice`) —
+    ///    and through its app-server the turn waits for it
+    ///    (`CodexAppServerTurn.heldTurn`).
+    ///  * Kimi does the right thing by itself. Its print mode defaults to
+    ///    `steer` — the run stays alive while tasks are pending and each
+    ///    completion drives a new main turn. Do NOT reach for
     ///    `KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT` here: it reads like
-    ///    the same fix and is a downgrade, mapping to `drain`, which
-    ///    waits for the task and can no longer steer a turn to report
-    ///    it.
+    ///    the same thing and is a downgrade, mapping to `drain`, which
+    ///    waits for the task and can no longer steer a turn to report it.
     ///
-    /// The cost, accepted: background SUBAGENTS become synchronous, since
-    /// the same predicate omits the parameter from the `Agent` tool.
-    /// Under `-p` the wall clock is unchanged (a background subagent
-    /// already held the turn open for its whole life), and parallel
-    /// fan-out is untouched — several `Agent` blocks in one assistant
-    /// message still run at once, a path that never used the parameter.
-    static func environmentOverlay(agentKey: String) -> [String: String] {
-        guard agentKey == "claude_code" else { return [:] }
+    /// Where the switch is set, background SUBAGENTS run in the
+    /// foreground too, since the same predicate omits the parameter from
+    /// the `Agent` tool; several `Agent` blocks in one assistant message
+    /// still run at once, a path that never used the parameter.
+    static func environmentOverlay(agentKey: String, installedClaude: String?,
+                                   cachedShellWait: Bool?) -> [String: String] {
+        guard agentKey == "claude_code",
+              !allowsBackgroundTasks(installedClaude: installedClaude,
+                                     cachedShellWait: cachedShellWait)
+        else { return [:] }
         return [disableBackgroundTasksEnvVar: "1"]
     }
+}
+
+// MARK: - A message sent while the agent works
+
+/// A message sent while a turn runs. It is held above the message box —
+/// the user steers it into the running turn, sends it, or takes it back
+/// into the box to change it — and otherwise goes as the next message when
+/// the turn ends. Each tool's
+/// own terminal does one of these: Claude Code's and Codex's hand a
+/// message typed mid-turn to the model at its next step, and Kimi Code's
+/// holds it until the turn ends and steers it on request.
+struct HeldMessage: Identifiable, Equatable {
+    let id: UUID
+    /// The message as it goes out: the composed text, attachment markers
+    /// included.
+    let text: String
+    /// The user's own words, as the strip and a transcript row show them.
+    let display: String
+    /// The files it carries, for the paperclip line.
+    let attachedFiles: [String]
+    let images: [AgentImage]
+    /// What it is sent with: the chips as they stood when it was sent, its
+    /// skills included. A held message goes when the turn ends whether or
+    /// not its page is still open, so nothing is read off the page then.
+    let options: AgentLaunchOptions
+    /// One of codex's own commands, run as a turn of its own when the turn
+    /// ends (`/compact`, a `/review` picked in its picker); nil for a
+    /// message.
+    let codexCommand: CodexCommandTurn?
+    /// What the message box held when it was sent — the words as typed and
+    /// the files staged beside them — which × puts back in the box.
+    let boxText: String
+    let boxFiles: [URL]
+    /// A `!` command, run the agent's terminal's way when the turn ends
+    /// (`ShellCommands`); nil for a message.
+    let shellCommand: String?
+    /// Steered into the running turn, and not yet taken: the agent reads
+    /// it at its next step. It stays above the box until the agent takes
+    /// it, and is drawn in the transcript at that moment — where the
+    /// agent's own record puts it.
+    var steered = false
+
+    init(text: String, display: String, attachedFiles: [String], images: [AgentImage],
+         options: AgentLaunchOptions, codexCommand: CodexCommandTurn? = nil,
+         shellCommand: String? = nil, boxText: String? = nil, boxFiles: [URL] = []) {
+        id = UUID()
+        self.text = text
+        self.display = display
+        self.attachedFiles = attachedFiles
+        self.images = images
+        self.options = options
+        self.codexCommand = codexCommand
+        self.shellCommand = shellCommand
+        self.boxText = boxText ?? display
+        self.boxFiles = boxFiles
+    }
+
+    /// The box once × has put this message back in it: its words ahead of
+    /// what is typed there now, a line between — as Claude Code's and
+    /// Codex's own terminals put a queued message taken back to edit — and
+    /// what is typed left as it is when the message was files alone.
+    func boxText(over typing: String) -> String {
+        if boxText.isEmpty { return typing }
+        if typing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return boxText }
+        return boxText + "\n" + typing
+    }
+
+    /// Whether it can go into a running turn at all. A message that opens
+    /// on a command of its own (`/compact`, `/mcp`) waits for the turn's
+    /// end — an agent runs a command between turns, and claude prints
+    /// none back for `ClaudeSteerTracker` to read — and so does one that
+    /// loads skills: they load with a message of their own.
+    /// A `!` command waits too: the terminals run one between turns.
+    var canGoIntoTurn: Bool {
+        codexCommand == nil && shellCommand == nil
+            && AgentSlashCommands.leadingCommand(in: display) == nil
+            && options.skillTriggers.isEmpty
+    }
+
+    static func == (a: HeldMessage, b: HeldMessage) -> Bool { a.id == b.id && a.steered == b.steered }
+}
+
+/// How a claude turn takes a message while it works.
+///
+/// Under `--input-format stream-json` claude reads its messages from
+/// stdin, and one written there while a turn runs reaches the model at
+/// its next step — with a tool's result, in claude's own words ("The user
+/// sent a new message while you were working") — or, when the answer is
+/// already being written, as a turn of its own right after it, in the
+/// same process (measured on 2.1.310–2.1.312). So a turn that can take
+/// one keeps its stdin open while it works, its prompt going in as the
+/// first message there, and closes it when the turn ends: claude then
+/// winds down, reporting a background task it still owes first.
+///
+/// `--replay-user-messages` makes claude print each message back on stdout
+/// at the moment it takes it: with the step that carries it, or as its own
+/// turn starts. A `result` that arrives while a message written into the
+/// turn is still unread is not the turn's end (`ClaudeSteerTracker`).
+enum ClaudeSteer {
+    /// The oldest claude measured to take a message mid-turn this way.
+    static let floor = "2.1.310"
+    static let replayFlag = "--replay-user-messages"
+
+    /// Whether a claude turn runs with its input open: the installed
+    /// claude is at least the floor and its `--help` lists the flag. A
+    /// version not read yet answers no, and the turn runs as before — its
+    /// prompt positional, stdin empty — taking no message until it ends.
+    static func takesInput(installedClaude: String?, replayListed: Bool) -> Bool {
+        replayListed && ChatOnlyAvailability.versionAtLeast(installedClaude, floor)
+    }
+
+    /// One user message as claude's stream-json input takes it.
+    static func userLine(text: String) -> String {
+        line(["type": "user",
+              "message": ["role": "user", "content": text],
+              "parent_tool_use_id": NSNull(),
+              "session_id": ""])
+    }
+
+    /// Claude's own request to stop one background task. Measured: the
+    /// task stops at once (`task_notification` stopped, the list empty),
+    /// claude starts no turn to report it, and its transcript keeps
+    /// nothing of the stop.
+    static func stopTaskLine(taskId: String, requestId: String) -> String {
+        line(["type": "control_request",
+              "request_id": requestId,
+              "request": ["subtype": "stop_task", "task_id": taskId]])
+    }
+
+    private static func line(_ object: [String: Any]) -> String {
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        else { return "" }
+        return String(decoding: data, as: UTF8.self) + "\n"
+    }
+}
+
+/// What Send does with a `!` command (`ShellCommands`), read off the
+/// installed tool. In claude's and codex's own terminals a line that
+/// starts with `!` is always the user's shell command, so where SipAI
+/// cannot run one the agent's way yet the line waits — it is never handed
+/// to the model as words under a hint that said it would run.
+enum ShellCommandVerdict: Equatable {
+    /// Run the agent's way.
+    case runs
+    /// The installed tool has not been read yet: Send waits for it.
+    case pending
+    /// The installed tool is older than the oldest one the route was
+    /// measured on: Send waits for an update.
+    case needsNewer
+    /// The agent offers apps no way to run one (Kimi Code): sent as an
+    /// ordinary message, as the composer says.
+    case noRoute
+}
+
+enum ShellCommandSupport {
+    /// The oldest codex measured to run `thread/shellCommand`.
+    static let codexFloor = "0.165.0"
+
+    /// Claude runs one through its input held open, so its gate is the
+    /// steer gate (`ClaudeSteer`): the version and the `--help` that lists
+    /// the replay flag, each nil until read. Nil for an agent nobody has
+    /// measured: no claim is made about its terminal.
+    static func verdict(agentKey: String, claudeVersion: String?, claudeReplayListed: Bool?,
+                        codexVersion: String?) -> ShellCommandVerdict? {
+        switch agentKey {
+        case "claude_code":
+            guard let claudeVersion, let claudeReplayListed else { return .pending }
+            return ClaudeSteer.takesInput(installedClaude: claudeVersion,
+                                          replayListed: claudeReplayListed) ? .runs : .needsNewer
+        case "codex":
+            guard let codexVersion else { return .pending }
+            return ChatOnlyAvailability.versionAtLeast(codexVersion, codexFloor) ? .runs : .needsNewer
+        case "kimi":
+            return .noRoute
+        default:
+            return nil
+        }
+    }
+}
+
+/// The messages written into a claude turn that claude has not taken yet,
+/// read off what `--replay-user-messages` prints when it takes each one.
+/// The turn's own prompt is printed back too, once, and is told apart from
+/// a message of the same words written later.
+struct ClaudeSteerTracker: Equatable {
+    /// The words of each message written into the turn, oldest first, not
+    /// yet printed back.
+    private(set) var unread: [String] = []
+    /// The prompt's own words, until claude prints them back. A prompt
+    /// that is a command is never printed back, and nothing written into
+    /// a turn is a command (`HeldMessage.canGoIntoTurn`), so it never
+    /// takes a later message's echo.
+    private var promptEcho: String?
+    /// Claude has answered since it last took a message: what it takes now
+    /// it runs as a turn of its own, after the answer, and saves as an
+    /// ordinary user record. Taken while it still works, a message goes
+    /// into that turn, saved as a queued command (`AgentSessionScanner
+    /// .queuedPrompt`).
+    private var answered = false
+
+    /// A message written into the turn, as claude took it.
+    struct Taken: Equatable {
+        let words: String
+        let opensTurn: Bool
+    }
+
+    init(prompt: String? = nil) {
+        promptEcho = prompt.map(Self.key)
+    }
+
+    /// A message written into the turn is still unread.
+    var pending: Bool { !unread.isEmpty }
+
+    mutating func wrote(_ text: String) { unread.append(Self.key(text)) }
+
+    /// Read one stdout line. When it is claude taking a message written
+    /// into the turn: that message's words, as they were written, and
+    /// whether it opened a turn of its own.
+    mutating func read(line: String) -> Taken? {
+        if line.contains("\"type\":\"result\""), let data = line.data(using: .utf8),
+           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+           obj["type"] as? String == "result" {
+            answered = true
+            return nil
+        }
+        guard line.contains("\"type\":\"user\""),
+              let data = line.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              obj["type"] as? String == "user",
+              let message = obj["message"] as? [String: Any],
+              let words = Self.words(message["content"])
+        else { return nil }
+        let key = Self.key(words)
+        if let prompt = promptEcho, prompt == key {
+            promptEcho = nil
+            return nil
+        }
+        guard let index = unread.firstIndex(of: key) else { return nil }
+        defer { answered = false }
+        return Taken(words: unread.remove(at: index), opensTurn: answered)
+    }
+
+    /// The messages written into the turn and never taken — the child is
+    /// gone, or was stopped — given up on.
+    mutating func dropUnread() -> [String] {
+        defer { unread = [] }
+        return unread
+    }
+
+    /// The key a message is matched on: its words, trimmed.
+    static func key(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// A message's words: its text, or its text blocks joined — never a
+    /// tool's result, which is claude's and not the user's.
+    private static func words(_ content: Any?) -> String? {
+        if let text = content as? String { return text }
+        guard let blocks = content as? [[String: Any]],
+              !blocks.contains(where: { $0["type"] as? String == "tool_result" })
+        else { return nil }
+        let texts = blocks.compactMap { $0["type"] as? String == "text" ? $0["text"] as? String : nil }
+        return texts.isEmpty ? nil : texts.joined(separator: "\n")
+    }
+}
+
+/// What a codex review looks at — `review/start`'s `target` — as codex's
+/// own review picker offers it.
+enum CodexReviewTarget: Equatable {
+    case uncommittedChanges
+    case baseBranch(String)
+    case commit(sha: String, title: String?)
+    case custom(String)
+
+    var wire: [String: Any] {
+        switch self {
+        case .uncommittedChanges:
+            return ["type": "uncommittedChanges"]
+        case .baseBranch(let branch):
+            return ["type": "baseBranch", "branch": branch]
+        case .commit(let sha, let title):
+            return ["type": "commit", "sha": sha, "title": title.map { $0 as Any } ?? NSNull()]
+        case .custom(let instructions):
+            return ["type": "custom", "instructions": instructions]
+        }
+    }
+}
+
+/// Codex's own commands that SipAI runs through codex's app-server, as
+/// codex's own terminal runs them, instead of sending them to the model as
+/// words: through `codex exec` (and to the model) a slash command is an
+/// ordinary message — billed, and answered as prose.
+enum CodexCommand: Equatable {
+    /// Summarise the conversation now (`thread/compact/start`).
+    case compact
+    /// Review code (`review/start`), after the user picks what in codex's
+    /// own review picker.
+    case review
+
+    /// The command a message is, typed alone.
+    static func parse(_ text: String) -> CodexCommand? {
+        switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "/compact": return .compact
+        case "/review": return .review
+        default: return nil
+        }
+    }
+}
+
+/// One of codex's own commands as a turn runs it (`CodexAppServerTurn`):
+/// summarise the conversation now — its terminal's `/compact` — review
+/// code — its `/review`, once the user picked what in its review picker —
+/// or run the user's own shell command — its `!` (`thread/shellCommand`,
+/// `ShellCommands`).
+enum CodexCommandTurn: Equatable {
+    case compact
+    case review(CodexReviewTarget)
+    case shell(String)
 }
 
 /// Kimi Code's counterpart to the claude / codex capability tables.
@@ -1205,19 +2108,28 @@ enum ClaudePrintMode {
 /// the permission mode not at all. See `AgentLaunchOptions.kimiFlags`
 /// for the argv rules.
 enum KimiCapabilities {
-    /// Chip label for the permission state a SipAI-driven kimi turn
-    /// actually runs in. Not a choice — a statement, which is why the
-    /// composer renders it as a readout instead of a picker:
-    /// `--prompt` refuses `--yolo` / `--auto` / `--plan` outright, so
-    /// print mode's own auto-approval is the only mode there is.
-    static var autoApproveTitle: String {
-        String(localized: "Auto-approve",
-               comment: "Composer chip on a Kimi session — print mode approves every tool call")
+    /// Kimi's own name for the mode its headless run is in: print mode
+    /// approves every tool call itself and tells the model not to ask, which
+    /// is what kimi calls Never Ask ("never interrupts you; everything runs
+    /// and is decided automatically"). The `kimiNeverAsk` row, and the
+    /// readout that stands in the chip's place where the installed kimi has
+    /// nothing else to run: `--prompt` refuses `--yolo` / `--auto` /
+    /// `--plan` outright.
+    static var neverAskTitle: String {
+        String(localized: "Never Ask",
+               comment: "Kimi mode chip label: kimi's own Never Ask permission mode — its headless run, which approves every tool call and decides questions itself")
     }
 
-    static func autoApproveHint(agentName: String) -> String {
-        String(localized: "\(agentName) runs non-interactively here, so it approves its own tool calls. Its CLI rejects a permission mode on a headless run, so there is nothing to choose.",
-               comment: "Hover hint on the Kimi auto-approve chip; placeholder is the agent label")
+    /// Under the Never Ask row, in kimi's own words.
+    static var neverAskSubtitle: String {
+        String(localized: "Never interrupts you; everything runs and is decided automatically",
+               comment: "Hint under the kimi Never Ask mode row, in kimi's own words")
+    }
+
+    /// The hover hint on the readout: why there is nothing to pick.
+    static func neverAskHint(agentName: String) -> String {
+        String(localized: "The installed \(agentName) can only run headless here, which approves its own tool calls and never stops to ask. Update \(agentName) to choose another mode.",
+               comment: "Hover hint on the Kimi Never Ask readout, shown where the installed kimi has no other mode SipAI can run; placeholder is the agent label")
     }
 
     /// The environment variable kimi reads a per-run thinking effort
@@ -1330,6 +2242,13 @@ final class KimiCatalog: ObservableObject {
     /// in place of a bare "Model", exactly as the codex chip names its
     /// own default.
     @Published private(set) var defaultModel: String? = nil
+    /// Kimi's own default permission mode, as `config.toml` names it
+    /// (`default_permission_mode`: manual, yolo or auto) — what a Default
+    /// turn runs in through kimi's front end. nil: kimi's own default,
+    /// Always Ask. The snapshot the composer and the task card read for
+    /// what Default amounts to (whether it can ask at all); a turn reads
+    /// the file itself (`readDefaultPermissionMode`).
+    @Published private(set) var defaultPermissionMode: String? = nil
 
     /// Effort levels valid for a given model, fast → deep.
     ///
@@ -1432,6 +2351,7 @@ final class KimiCatalog: ObservableObject {
             await MainActor.run {
                 self.models = found.models
                 self.defaultModel = found.defaultModel
+                self.defaultPermissionMode = found.defaultPermissionMode
                 // Stamped with the fingerprint READ BEFORE the harvest:
                 // a config rewritten mid-harvest must leave the two
                 // disagreeing, so the next appearance re-reads rather
@@ -1459,8 +2379,9 @@ final class KimiCatalog: ObservableObject {
     // MARK: - Harvest
 
     nonisolated private static func harvest()
-    -> (models: [KimiModel], defaultModel: String?) {
+    -> (models: [KimiModel], defaultModel: String?, defaultPermissionMode: String?) {
         let config = readConfig()
+        let permissionMode = readDefaultPermissionMode()
         // Only when config.toml told us nothing at all. See the type
         // comment: an alias absent from config.toml is a turn-killer,
         // so observed models may fill a VOID, never extend a real list.
@@ -1471,9 +2392,9 @@ final class KimiCatalog: ObservableObject {
                 KimiModel(slug: $0, displayName: $0, efforts: [],
                           defaultEffort: nil)
             }
-            return (observed, config.defaultModel)
+            return (observed, config.defaultModel, permissionMode)
         }
-        return (config.models, config.defaultModel)
+        return (config.models, config.defaultModel, permissionMode)
     }
 
     /// What the picker needs out of kimi's `config.toml`: the declared
@@ -1504,6 +2425,40 @@ final class KimiCatalog: ObservableObject {
         guard let data = try? Data(contentsOf: KimiSessionScanner.configFile)
         else { return (nil, []) }
         return parseConfig(String(decoding: data, as: UTF8.self))
+    }
+
+    /// Kimi's own default permission mode as `config.toml` says it right
+    /// now — read at the turn that runs in it, never from a snapshot that
+    /// may predate the user's last change. A file read; the file is small.
+    nonisolated static func readDefaultPermissionMode() -> String? {
+        (try? Data(contentsOf: KimiSessionScanner.configFile))
+            .flatMap { parseDefaultPermissionMode(String(decoding: $0, as: UTF8.self)) }
+    }
+
+    /// Kimi's own default permission mode from `config.toml`'s top level:
+    /// `default_permission_mode` (manual, yolo or auto, the values kimi's
+    /// schema takes), the key bare or quoted. nil when the file says
+    /// nothing kimi would read — kimi then starts in manual (Always Ask).
+    /// Only the TOP level counts, as for `default_model`. Pure, so a
+    /// harness can drive it with text.
+    ///
+    /// The legacy `default_yolo = true` is NOT read: kimi ignores it when
+    /// it runs (measured: a command asks) — only its migration of an old
+    /// home rewrites it — and read here, Default would run commands unasked
+    /// where kimi's own default asks.
+    nonisolated static func parseDefaultPermissionMode(_ text: String) -> String? {
+        var mode: String? = nil
+        for rawLine in text.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") { break }
+            for key in ["default_permission_mode", "\"default_permission_mode\"",
+                        "'default_permission_mode'"] {
+                if let value = TomlScalar.string(line, key: key) {
+                    mode = ["manual", "yolo", "auto"].contains(value) ? value : nil
+                }
+            }
+        }
+        return mode
     }
 
     /// The parse itself, split out as a PURE function of the file's
@@ -3108,6 +4063,9 @@ enum ClaudeModelCatalog {
         let overridesByFamily: [String: String]
         /// `ANTHROPIC_MODEL`, trimmed, or nil.
         let configuredModel: String?
+        /// `ANTHROPIC_BASE_URL`, trimmed, or nil: where the child sends
+        /// its requests — Anthropic's own API when nil.
+        var baseURL: String? = nil
 
         func override(forFamily family: String) -> String? {
             overridesByFamily[family.lowercased()]
@@ -3159,10 +4117,13 @@ enum ClaudeModelCatalog {
         }
         let configured = merged["ANTHROPIC_MODEL"]?
             .trimmingCharacters(in: .whitespaces)
+        let base = merged["ANTHROPIC_BASE_URL"]?
+            .trimmingCharacters(in: .whitespaces)
         return ChildEnvironmentFacts(
             provider: provider,
             overridesByFamily: overrides,
-            configuredModel: (configured?.isEmpty == false) ? configured : nil)
+            configuredModel: (configured?.isEmpty == false) ? configured : nil,
+            baseURL: (base?.isEmpty == false) ? base : nil)
     }
 
     /// The user-level settings files claude reads, in the order it
@@ -3519,6 +4480,38 @@ final class ClaudeCapabilities: ObservableObject {
     /// runs exactly as it did, its line naming lookups only.
     @Published private(set) var acceptsThinkingSummaries: Bool? = nil
 
+    /// Whether the installed claude names `resumeSessionAtFlag`, the flag
+    /// an in-place edit is sent with (`AgentSessionRewind`). nil until
+    /// the executable has been read; nil or false offers no Send.
+    @Published private(set) var namesResumeSessionAt: Bool? = nil
+
+    /// The flag that sends a message at an earlier entry of the session
+    /// it resumes: claude parents the message there, and what came after
+    /// that entry is a branch it never loads again. Not in `--help`.
+    nonisolated static let resumeSessionAtFlag = "--resume-session-at"
+
+    /// Whether the executable at `path` carries `flag` among its own
+    /// strings — the check for a flag `--help` does not list. Running the
+    /// flag to find out is no check: claude refuses it without `--resume`
+    /// only once a turn is being set up, so a claude that dropped that
+    /// refusal would start a turn. Streamed and unmapped, 8 MB at a time
+    /// (an updater rewrites claude's versions in place). nil when the
+    /// file cannot be read.
+    nonisolated static func executable(_ path: String, names flag: String) -> Bool? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        let needle = Data(flag.utf8)
+        var carry = Data()
+        while true {
+            let chunk = handle.readData(ofLength: 8 * 1024 * 1024)
+            if chunk.isEmpty { return false }
+            var window = carry
+            window.append(chunk)
+            if window.range(of: needle) != nil { return true }
+            carry = window.count > needle.count ? window.suffix(needle.count) : window
+        }
+    }
+
     /// The composer's "Other models" section: per family, the previous
     /// version this Mac has actually run that the installed claude
     /// still names. Computed by `ClaudeModelCatalog.refreshOtherModels`
@@ -3629,6 +4622,7 @@ final class ClaudeCapabilities: ObservableObject {
             // — and the two spawns below take a second or two each.
             let catalog = ClaudeModelCatalog.binaryCatalog(at: binary)
             _ = ClaudeModelCatalog.windowTable(at: binary)
+            let resumeAt = Self.executable(binary, names: Self.resumeSessionAtFlag)
             let environment = await makeEnvironment?()
             let help = Self.helpText(binary: binary, environment: environment)
             let modes = help.isEmpty ? [] : Self.scrapePermissionModes(help)
@@ -3644,6 +4638,9 @@ final class ClaudeCapabilities: ObservableObject {
                 guard self.scrapedKey == key else { return }
                 if thinkingDisplay != self.acceptsThinkingSummaries {
                     self.acceptsThinkingSummaries = thinkingDisplay
+                }
+                if resumeAt != self.namesResumeSessionAt {
+                    self.namesResumeSessionAt = resumeAt
                 }
                 // A help read that produced nothing is not a verdict
                 // about this binary. Forget the key so the next composer
@@ -3852,7 +4849,7 @@ struct CodexServiceTier: Hashable {
 
 /// Codex's speed rule — which service tier a turn runs at — restated
 /// from codex's own resolution so the composer can say it and a send
-/// can make `codex exec` do it. Pure, so the harness drives every case.
+/// can make codex do it. Pure, so the harness drives every case.
 ///
 /// Two resolutions, and they differ on purpose:
 ///
@@ -3860,20 +4857,21 @@ struct CodexServiceTier: Hashable {
 ///    the user's choice — the config's `service_tier` — else the
 ///    model's catalog `default_service_tier`. That default is how a
 ///    model ships Fast out of the box.
-///  * `codex exec`, the command every SipAI turn runs, applies the
-///    config alone: its core never reads the catalog default.
+///  * `codex exec` and codex's app-server — the two ways a SipAI turn
+///    runs — apply the config alone: codex's core never reads the
+///    catalog default.
 ///
 /// A composer send follows the interactive rule, since a session here
 /// is the same conversation someone would have in codex's own window,
-/// and hands exec the tier the way codex's own picker hands it to its
-/// core (`override`). A scheduled run is unattended exec work: it passes
+/// and hands codex the tier the way codex's own picker hands it to its
+/// core (`override`). A scheduled run is unattended work: it passes
 /// the task's own pick, else nothing (`scheduled`). `codex exec resume`
 /// re-resolves the tier on every
 /// turn — a thread does not remember the one it last ran with — so what
 /// one send passes decides that turn alone. In both resolutions, a tier
 /// the model does not advertise is dropped (codex says so in an `error`
-/// item), `flex` always passes, `default` is an explicit standard, and
-/// codex's `fast_mode` feature switched off sends no tier but flex.
+/// item), `flex` always passes, `default` is an explicit standard, and a
+/// speed whose switch codex holds off (`Gates`) is not sent at all.
 ///
 /// "The config" is codex's MERGED config for the session's folder
 /// (`Settings`, asked of codex through `CodexConfigRead`), not the
@@ -3885,6 +4883,8 @@ enum CodexSpeed {
     static let standard = "default"
     /// The one tier codex accepts whether or not a model lists it.
     static let flex = "flex"
+    /// The tier codex gates under a switch of its own (`ultrafast_mode`).
+    static let ultrafast = "ultrafast"
 
     /// A model's advertised tiers and its catalog default, in the
     /// catalog's order.
@@ -3893,32 +4893,105 @@ enum CodexSpeed {
         var defaultTier: String?
     }
 
+    /// Codex's own switches for the faster speeds, as one folder sees
+    /// them. A turn may ask for a speed only while its switch is on:
+    /// `flex` always; `ultrafast` under the `ultrafast_mode` feature;
+    /// every other speed under `fast_mode`. An administrator's
+    /// requirement pins either one, over whatever the user's config says.
+    /// A codex that predates `ultrafast_mode` gates Ultrafast by
+    /// `fast_mode` as well; it is told apart the way codex's own clients
+    /// tell it apart, by `configRequirements/read` not answering
+    /// `supportsIndependentSpeedModes: true`.
+    struct Gates: Equatable {
+        /// `[features] fast_mode` in codex's merged config; nil when no
+        /// layer sets it, which is on.
+        var fastMode: Bool? = nil
+        /// `[features] ultrafast_mode`, the same way.
+        var ultrafastMode: Bool? = nil
+        /// An administrator's pin on either (`featureRequirements`).
+        var requiredFastMode: Bool? = nil
+        var requiredUltrafastMode: Bool? = nil
+        /// Whether this codex gates Ultrafast apart from Fast.
+        var independent = false
+
+        /// Why a speed's switch is off.
+        enum Off: Equatable {
+            /// The user's codex config turns this feature off.
+            case config(feature: String)
+            /// An administrator's requirement does.
+            case administrator
+        }
+
+        /// What holds this speed off, nil when codex lets a turn ask
+        /// for it.
+        func off(_ tier: String) -> Off? {
+            switch CodexSpeed.normalized(tier) {
+            case nil, CodexSpeed.flex?:
+                return nil
+            case CodexSpeed.ultrafast?:
+                if requiredUltrafastMode == false { return .administrator }
+                guard independent else { return off("priority") }
+                if requiredUltrafastMode == nil, ultrafastMode == false {
+                    return .config(feature: "ultrafast_mode")
+                }
+                return nil
+            default:
+                if requiredFastMode == false { return .administrator }
+                if requiredFastMode == nil, fastMode == false {
+                    return .config(feature: "fast_mode")
+                }
+                return nil
+            }
+        }
+
+        func allows(_ tier: String) -> Bool { off(tier) == nil }
+
+        /// Either faster speed's switch is on — codex's own test for
+        /// handing its core a tier at all (`override`).
+        var allowsAnyFaster: Bool { allows("priority") || allows(CodexSpeed.ultrafast) }
+    }
+
     /// What codex's merged config says about speed in one folder.
     struct Settings: Equatable {
         /// `service_tier`, else `default` under `[notice]
         /// fast_default_opt_out` — codex's own configured tier. Raw;
         /// `normalized` reads it.
         var configured: String?
-        /// Codex's `fast_mode` feature: on unless set to false.
-        var featureEnabled: Bool = true
+        /// Codex's switches for the faster speeds.
+        var gates = Gates()
         /// The model codex runs when the command line names none.
         var model: String? = nil
+        /// `model_reasoning_effort` — the level codex runs at when the
+        /// command line names none.
+        var effort: String? = nil
     }
 
     /// The settings out of a `config/read` answer's `config` object —
     /// codex's merged config as JSON, where a key nothing set arrives
-    /// absent or as JSON null, and reads as unset either way.
-    static func settings(fromEffectiveConfig config: [String: Any]) -> Settings {
+    /// absent or as JSON null, and reads as unset either way — and, when
+    /// codex answered it, the `configRequirements/read` result: an
+    /// administrator's pins on the two switches, and whether this codex
+    /// gates them apart.
+    static func settings(fromEffectiveConfig config: [String: Any],
+                         requirements: [String: Any]? = nil) -> Settings {
         let tier = (config["service_tier"] as? String)
             .flatMap { normalized($0) == nil ? nil : $0 }
         let optedOut = ((config["notice"] as? [String: Any])?["fast_default_opt_out"]
                         as? Bool) == true
-        let feature = (config["features"] as? [String: Any])?["fast_mode"] as? Bool
+        let features = config["features"] as? [String: Any]
+        let pins = (requirements?["requirements"] as? [String: Any])?["featureRequirements"]
+            as? [String: Any]
+        let gates = Gates(fastMode: features?["fast_mode"] as? Bool,
+                          ultrafastMode: features?["ultrafast_mode"] as? Bool,
+                          requiredFastMode: pins?["fast_mode"] as? Bool,
+                          requiredUltrafastMode: pins?["ultrafast_mode"] as? Bool,
+                          independent: requirements?["supportsIndependentSpeedModes"] as? Bool == true)
         let model = (config["model"] as? String)
             .flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
+        let effort = (config["model_reasoning_effort"] as? String)
+            .flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
         return Settings(configured: tier ?? (optedOut ? standard : nil),
-                        featureEnabled: feature != false,
-                        model: model)
+                        gates: gates, model: model, effort: effort)
     }
 
     /// Codex's own normalisation: `fast` is another spelling of the
@@ -3935,20 +5008,21 @@ enum CodexSpeed {
     /// does not know: codex then judges whatever it is handed, so the
     /// pick (else the config) passes through as exec would take it.
     static func effective(pick: String?, configured: String?,
-                          model: ModelTiers?, featureEnabled: Bool) -> String? {
+                          model: ModelTiers?, gates: Gates) -> String? {
         guard let model else {
             return execWould(configured: normalized(pick) ?? configured,
-                             model: nil, featureEnabled: featureEnabled)
+                             model: nil, gates: gates)
         }
         let requested = normalized(pick) ?? normalized(configured)
         if requested == flex { return flex }
-        guard featureEnabled else { return nil }
         if let requested {
             if requested == standard { return nil }
+            guard gates.allows(requested) else { return nil }
             return model.tiers.contains { $0.id == requested } ? requested : nil
         }
         guard let fallback = normalized(model.defaultTier),
-              model.tiers.contains(where: { $0.id == fallback })
+              model.tiers.contains(where: { $0.id == fallback }),
+              gates.allows(fallback)
         else { return nil }
         return fallback
     }
@@ -3958,11 +5032,11 @@ enum CodexSpeed {
     /// default. An unknown model keeps the configured tier; codex
     /// judges it then.
     static func execWould(configured: String?, model: ModelTiers?,
-                          featureEnabled: Bool) -> String? {
+                          gates: Gates) -> String? {
         guard let requested = normalized(configured),
               requested != standard else { return nil }
         if requested == flex { return flex }
-        guard featureEnabled else { return nil }
+        guard gates.allows(requested) else { return nil }
         guard let model else { return requested }
         return model.tiers.contains { $0.id == requested } ? requested : nil
     }
@@ -3974,9 +5048,9 @@ enum CodexSpeed {
     /// it — so a model that starts on Fast in codex's own window can run
     /// a task at Standard, and the task card says which.
     static func scheduled(pick: String?, configured: String?,
-                          model: ModelTiers?, featureEnabled: Bool) -> String? {
+                          model: ModelTiers?, gates: Gates) -> String? {
         execWould(configured: normalized(pick) ?? configured, model: model,
-                  featureEnabled: featureEnabled)
+                  gates: gates)
     }
 
     /// The `-c service_tier=` a composer send passes, nil for none —
@@ -3985,15 +5059,18 @@ enum CodexSpeed {
     /// `default`, an explicit standard. Pinned on every such turn, so no
     /// config layer below the command line — one edited since codex was
     /// last asked about this folder, say — can run the turn at a tier
-    /// other than the one the composer states. Nothing only where codex's
-    /// picker sends nothing, which leaves the tier to codex's config: its
-    /// `fast_mode` feature off, or a model its catalog does not list —
-    /// unless the speed was PICKED, which always travels.
+    /// other than the one the composer states. (A codex that keeps a
+    /// thread's speed, `CodexKeptSpeed`, takes the pin on a thread's first
+    /// turn and ignores it after; the composer then states the saved
+    /// speed.) Nothing only where codex's
+    /// picker sends nothing, which leaves the tier to codex's config: both
+    /// speed switches off, or a model its catalog does not list — unless
+    /// the speed was PICKED, which always travels.
     static func override(pick: String?, effective: String?,
-                         model: ModelTiers?, featureEnabled: Bool) -> String? {
+                         model: ModelTiers?, gates: Gates) -> String? {
         if let effective { return effective }
         if normalized(pick) != nil { return standard }
-        guard featureEnabled, model != nil else { return nil }
+        guard gates.allowsAnyFaster, model != nil else { return nil }
         return standard
     }
 
@@ -4009,15 +5086,59 @@ enum CodexSpeed {
         return effective
     }
 
-    /// The tier a Fast mode switch turns on: the one codex sends as
-    /// `priority` (the tier its pickers name Fast), else one it names
-    /// Fast, else the model's first advertised tier. nil for a model that
-    /// advertises none — the switch is then not offered.
+    /// The tier a model's Fast mode switch turns on: the one codex sends
+    /// as `priority`, else the one codex names Fast — the tier codex's own
+    /// fast-mode key toggles. nil when the model lists neither; its other
+    /// speeds have switches of their own (`switches`).
     static func fastTier(_ model: ModelTiers?) -> CodexServiceTier? {
-        guard let tiers = model?.tiers, !tiers.isEmpty else { return nil }
+        guard let tiers = model?.tiers else { return nil }
         return tiers.first { $0.id == "priority" }
             ?? tiers.first { $0.name.caseInsensitiveCompare("fast") == .orderedSame }
-            ?? tiers.first
+    }
+
+    /// One speed switch in a model menu.
+    struct SpeedSwitch: Equatable {
+        /// The speed it turns on, with codex's name and description — the
+        /// selected model's own entry where that model lists it.
+        let tier: CodexServiceTier
+        /// The Fast mode switch, titled as both agents' switches are;
+        /// every other speed is titled with codex's name for it.
+        let isFast: Bool
+        /// The selected model lists this speed.
+        let offered: Bool
+        /// What holds the speed off in codex, nil when nothing does.
+        let off: Gates.Off?
+        /// Whether a turn on the selected model can run at it.
+        var enabled: Bool { offered && off == nil }
+    }
+
+    /// The speed switches a model menu draws: Fast mode first, always,
+    /// then one for every other faster speed any model in `catalog` lists,
+    /// in the catalog's order — each greyed out on a model that does not
+    /// list it, as the Fast switch is. A speed no model lists has no
+    /// switch, so an account codex offers no Ultrafast sees Fast mode
+    /// alone. Codex's terminal makes the same list: one command per speed
+    /// the model lists (`/fast`, `/ultrafast`).
+    static func switches(model: ModelTiers?, catalog: [ModelTiers],
+                         gates: Gates) -> [SpeedSwitch] {
+        let ownFast = fastTier(model)
+        let fast = ownFast
+            ?? catalog.lazy.compactMap { fastTier($0) }.first
+            ?? CodexServiceTier(id: "priority", name: "Fast", description: "")
+        var out = [SpeedSwitch(tier: fast, isFast: true, offered: ownFast != nil,
+                               off: gates.off(fast.id))]
+        var seen: Set<String> = [fast.id]
+        for listed in catalog + [model].compactMap({ $0 }) {
+            let listedFast = fastTier(listed)?.id
+            for tier in listed.tiers
+            where isFaster(tier.id) && tier.id != listedFast && !seen.contains(tier.id) {
+                seen.insert(tier.id)
+                let own = model?.tiers.first { $0.id == tier.id }
+                out.append(SpeedSwitch(tier: own ?? tier, isFast: false,
+                                       offered: own != nil, off: gates.off(tier.id)))
+            }
+        }
+        return out
     }
 
     /// Whether a tier is a FASTER one — anything but standard and flex,
@@ -4025,6 +5146,197 @@ enum CodexSpeed {
     static func isFaster(_ tier: String?) -> Bool {
         guard let tier = normalized(tier) else { return false }
         return tier != standard && tier != flex
+    }
+
+    /// Whether codex will run the faster speed a message asked for, read off
+    /// its answer when it opened the session for that message — a
+    /// `thread/start` or `thread/resume` naming the speed. Codex answers the
+    /// speed it will send: the one asked for when its own list includes it
+    /// for the model, else none, with a warning (`droppedTier`). Its list is
+    /// its built-in one whenever its saved copy is stale and a download does
+    /// not finish in time, and that list knows no account's Ultrafast. Named
+    /// only on `turn/start`, the same speed is dropped without a word. nil
+    /// when nothing faster was asked, or the answer carries no
+    /// `serviceTier` at all.
+    static func served(asked: String?, openAnswer: [String: Any]?) -> Bool? {
+        guard isFaster(asked), let asked = normalized(asked),
+              let value = openAnswer?["serviceTier"] else { return nil }
+        return normalized(value as? String) == asked
+    }
+
+    /// The speed codex's own warning says it is dropping — the sentence it
+    /// sends when a session opens on a speed its list does not include for
+    /// the model, which `codex exec` prints as an error item: "Configured
+    /// service tier `ultrafast` is not advertised as supported for model
+    /// `gpt-6-astra` and will be omitted from requests." nil for any other
+    /// text.
+    static func droppedTier(warning: String) -> String? {
+        let pattern = #"^Configured service tier `([^`]+)` is not advertised as supported for model `[^`]*` and will be omitted from requests\.?$"#
+        let text = warning.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let range = Range(match.range(at: 1), in: text) else { return nil }
+        return normalized(String(text[range]))
+    }
+}
+
+/// What codex said about the faster speed the session's latest message asked
+/// for: the switch is the request, this is the answer — the shape of
+/// `ClaudeFastModeReport`. Live only: codex's record keeps the speed a
+/// message asked for, never the one it ran, so a reopened session starts
+/// with nothing to say.
+struct CodexSpeedReport: Equatable {
+    /// The faster speed the latest message asked for, normalized; nil when
+    /// it asked for none.
+    var asked: String? = nil
+    /// Codex dropped it — its list for the model did not include it — and
+    /// the message ran at standard speed.
+    var dropped = false
+
+    /// The report a message starts with: what it asks for, nothing heard yet.
+    static func asking(_ pin: String?) -> CodexSpeedReport {
+        CodexSpeedReport(asked: CodexSpeed.isFaster(pin) ? CodexSpeed.normalized(pin) : nil)
+    }
+
+    /// Whether `tier` — the speed switched on now — is the one codex dropped.
+    func drops(_ tier: String?) -> Bool {
+        dropped && asked != nil && asked == CodexSpeed.normalized(tier)
+    }
+}
+
+/// A codex session's speed once it exists. Codex keeps the speed a thread
+/// SAVED: `codex exec resume` sends that tier and ignores `-c
+/// service_tier`, whatever it names (`flex` and `default` included), while
+/// the model, the effort and the sandbox are still taken per turn. The
+/// saved speed is set by the thread's first message; by a turn through
+/// codex's app-server (`turn/start` `serviceTier`, which later exec turns
+/// then keep); and for a branch by `thread/fork`'s own `serviceTier`, else
+/// by codex's config — never the parent's. Codex records it on every turn
+/// (`event_msg` `thread_settings_applied` → `thread_settings
+/// .service_tier`, `default` for standard). So on the exec route a speed
+/// switch flipped after a session's first message changes the chip and
+/// not the turn: the switches say so and show the speed the turns run at.
+enum CodexKeptSpeed {
+    /// The oldest codex known to keep a thread's speed. Below it, exec
+    /// resolves the tier again on every turn and the switches work as
+    /// before.
+    static let floor = "0.164.0"
+
+    /// What a session's rollout says it runs at.
+    enum Saved: Equatable {
+        /// Nothing recorded (a thread from a codex before the floor, or a
+        /// rollout SipAI cannot read): the switches stay as they were.
+        case unknown
+        /// The tier codex saved; nil is standard.
+        case tier(String?)
+    }
+
+    /// Whether the installed codex keeps a session's speed on the route a
+    /// turn takes: `codex exec` alone — codex's app-server takes a speed
+    /// per turn.
+    static func applies(codexVersion: String?, driver: AgentTurnDriver) -> Bool {
+        driver == .codexExec && keeps(codexVersion: codexVersion)
+    }
+
+    /// Whether the installed codex keeps a thread's speed at all.
+    static func keeps(codexVersion: String?) -> Bool {
+        guard let codexVersion else { return false }
+        return ChatOnlyAvailability.versionAtLeast(codexVersion, floor)
+    }
+
+    /// The tier a saved speed runs at, nil for standard.
+    static func runningTier(_ saved: Saved) -> String? {
+        guard case .tier(let tier) = saved,
+              let value = CodexSpeed.normalized(tier), value != CodexSpeed.standard
+        else { return nil }
+        return value
+    }
+
+    /// The `serviceTier` a branch is forked with so it keeps its parent's
+    /// speed: the saved tier, `default` for standard (a fork naming none
+    /// takes codex's config); nil, leaving it to codex, when nothing is
+    /// recorded.
+    static func forkTier(_ saved: Saved) -> String? {
+        guard case .tier = saved else { return nil }
+        return runningTier(saved) ?? CodexSpeed.standard
+    }
+
+    /// The speed a new session takes from the session its group's + starts
+    /// it like, where codex keeps that session's speed: the one it keeps —
+    /// what that session's chips show — else that session's own pick. They
+    /// differ when the speed was picked in a mode where codex takes one per
+    /// turn — every mode but Chat only — and the session then went on in
+    /// Chat only, where codex keeps the speed it saved.
+    static func startingTier(pick: String?, saved: Saved) -> String? {
+        forkTier(saved) ?? pick
+    }
+}
+
+/// Every sentence SipAI says under one of codex's speed switches, spelled
+/// once for the composer's model menu and the scheduled-task card.
+enum CodexSpeedWords {
+    /// The line under codex's speed switches where codex keeps a session's
+    /// speed (`CodexKeptSpeed`): before the session's first message, that
+    /// the pick holds for the whole session; after it, why the switches no
+    /// longer move. `mode` is the mode chip's own title.
+    static func keptNote(started: Bool, mode: String, agentName: String) -> String {
+        if started {
+            return String(localized: "\(agentName) keeps this session's speed in \(mode). Start a new session to use another.",
+                          comment: "Model menu, under codex's speed switches greyed out after a session's first message: codex keeps the speed a session started with in this mode; placeholders are the agent label and the mode chip's title (Chat only)")
+        }
+        return String(localized: "\(agentName) keeps this speed for the whole session in \(mode).",
+                      comment: "Model menu, under codex's speed switches before a session's first message: the speed picked now holds for the whole session in this mode; placeholders are the agent label and the mode chip's title (Chat only)")
+    }
+
+    /// The lines under a speed's switch: why it is greyed out — codex
+    /// holding it off first, since that holds it off on every model —
+    /// else codex's own description of the speed, and, while it is on
+    /// only because codex itself turns it on here, that. `dropped`: codex
+    /// ran the session's latest message without this speed
+    /// (`CodexSpeedReport`) — said as claude's fast switch says it.
+    static func lines(_ speed: CodexSpeed.SpeedSwitch, on: Bool, picked: Bool,
+                      agentName: String, dropped: Bool = false) -> [String] {
+        if let off = speed.off { return [why(off, agentName: agentName)] }
+        guard speed.offered else {
+            return [String(localized: "Not offered for this model",
+                           comment: "Model menu switch subtitle: the selected model has no fast mode")]
+        }
+        var lines = [speed.tier.description.isEmpty ? speed.tier.name : speed.tier.description]
+        if on, !picked {
+            lines.append(String(localized: "On by default in \(agentName)",
+                                comment: "Fast mode switch: on because codex itself turns it on here — its config, or the model's own default — and not because it was picked; the placeholder is the agent label"))
+        }
+        if on, dropped {
+            lines.append(String(localized: "Not running · \(notServed(agentName: agentName))",
+                                comment: "Fast mode switch, while on: it is not running; the placeholder is the reason (“your usage credits are used up”)"))
+            lines.append(String(localized: "The last reply ran at standard speed",
+                                comment: "Fast mode status: fast mode was requested but the newest API call ran at standard speed"))
+        }
+        return lines
+    }
+
+    /// Why codex ran a message without the speed asked for: its own list
+    /// for the model, at that message, did not include it — which is its
+    /// built-in list whenever it could not download the account's in time.
+    static func notServed(agentName: String) -> String {
+        String(localized: "\(agentName) couldn't load your account's speeds in time",
+               comment: "Codex speed, switched on but not used for the last message: codex could not download the account's list of speeds before the message started, so it ran at standard speed; the placeholder is the agent label")
+    }
+
+    /// What holds a speed off in codex, in one line. The feature keys are
+    /// codex's own config spelling, so the user can find them.
+    static func why(_ off: CodexSpeed.Gates.Off, agentName: String) -> String {
+        switch off {
+        case .config(let feature) where feature == "ultrafast_mode":
+            return String(localized: "Turned off in \(agentName)'s config (features.ultrafast_mode)",
+                          comment: "Codex speed: the ultrafast_mode feature is disabled in the user's codex config; placeholder is the agent label")
+        case .config:
+            return String(localized: "Turned off in \(agentName)'s config (features.fast_mode)",
+                          comment: "Codex speed: the fast_mode feature is disabled in the user's codex config; placeholder is the agent label")
+        case .administrator:
+            return String(localized: "Turned off by your organization",
+                          comment: "Fast mode status: the organization disabled fast mode")
+        }
     }
 }
 
@@ -4059,6 +5371,21 @@ enum CodexConfigRead {
         (answer?["result"] as? [String: Any])?["config"] as? [String: Any]
     }
 
+    /// The `configRequirements/read` request, sent in the same
+    /// conversation: an administrator's pins on codex's features, which
+    /// `config/read` does not reflect, and whether this codex gates its
+    /// two speeds apart. Static text — codex takes no parameters for it.
+    nonisolated static func requirementsRequest(id: Int) -> String {
+        #"{"jsonrpc":"2.0","id":\#(id),"method":"configRequirements/read"}"#
+    }
+
+    /// That answer's result; nil for an error (a codex without the
+    /// method) or no answer — which reads as no pins, and one shared
+    /// speed switch.
+    nonisolated static func requirements(fromAnswer answer: [String: Any]?) -> [String: Any]? {
+        answer?["result"] as? [String: Any]
+    }
+
     /// The folder as a turn spawned in it sees its own working directory
     /// — every symlink resolved, `/private` included (`realpath(3)`).
     /// Codex matches a trusted project against that form: asked with a
@@ -4081,15 +5408,18 @@ struct CodexModel: Identifiable, Hashable {
     /// Reasoning levels this model accepts, in codex's own order
     /// (fast → deep). Empty when unknown.
     let efforts: [String]
+    /// The entry's `default_reasoning_level` — what the model runs at when
+    /// neither the pick nor the config names a level. nil when unknown.
+    var defaultEffort: String? = nil
     /// Every `service_tiers` entry, in the catalog's order; empty when
-    /// the model lists none — the composer then offers no speed choice
-    /// for it.
+    /// the model lists none — the composer's speed switches are then
+    /// greyed out for it.
     var serviceTiers: [CodexServiceTier] = []
     /// The entry's `default_service_tier` — the tier codex's own
     /// pickers start the model on (see `CodexSpeed`). Written only by
     /// codex builds that know the field, so an older client's cache
-    /// leaves it out; the installed codex's own `model/list` answer is
-    /// read ahead of it (`CodexCatalog.listedTiers`).
+    /// leaves it out. Whether it or the installed codex's `model/list`
+    /// answer speaks for a model is `CodexCatalog.preferred`'s rule.
     var defaultServiceTier: String? = nil
     /// The EFFECTIVE context window: the catalog's `context_window`
     /// scaled by its `effective_context_window_percent`, which is the
@@ -4117,6 +5447,11 @@ struct CodexModel: Identifiable, Hashable {
     /// The raw `max_context_window` itself: the value to WRITE into
     /// config to reach `maxContextWindow`. nil on the same models.
     var maxContextWindowSetting: Int? = nil
+    /// The entry is codex's SAVED list's — `models_cache.json`, the newest
+    /// list codex downloaded for the account — not a model only seen in
+    /// the config or a rollout, whose speeds and default effort nobody
+    /// stated.
+    var inSavedList = false
 
     var id: String { slug }
 }
@@ -4127,6 +5462,14 @@ struct CodexModel: Identifiable, Hashable {
 struct CodexCatalogStamp: Equatable {
     let clientVersion: String?
     let fetchedAt: Date?
+}
+
+/// What the installed codex's `model/list` answer says a turn runs as
+/// when nothing names a model or an effort: the model it marks as its own
+/// default, and each model's default effort.
+struct CodexListedDefaults: Equatable {
+    var model: String? = nil
+    var efforts: [String: String] = [:]
 }
 
 /// Codex model + effort catalog, read from codex's OWN sources rather
@@ -4192,11 +5535,21 @@ final class CodexCatalog: ObservableObject {
     /// stand-in for a folder codex has not yet answered for
     /// (`speedSettings(forFolder:)`).
     @Published private(set) var configuredServiceTier: String? = nil
-    /// Codex's `fast_mode` feature as the user's file states it. Only an
-    /// explicit `false` turns it off; with it off codex sends no tier
-    /// but flex, whatever the command line says. A stand-in, like the
-    /// tier above.
-    @Published private(set) var fastModeFeatureEnabled: Bool = true
+    /// Codex's `fast_mode` and `ultrafast_mode` features as the user's
+    /// file states them, nil when it does not (on). Only an explicit
+    /// `false` turns one off, and then codex sends no speed that switch
+    /// holds, whatever the command line says. Stand-ins, like the tier
+    /// above.
+    @Published private(set) var configuredFastMode: Bool? = nil
+    @Published private(set) var configuredUltrafastMode: Bool? = nil
+    /// The user's own top-level `model_reasoning_effort`, a stand-in for
+    /// a folder codex has not answered for, like the tier above.
+    @Published private(set) var configuredEffort: String? = nil
+    /// The collaboration modes the INSTALLED codex lists (`collaborationMode
+    /// /list`, by mode name) — what offers the Plan row. nil until asked,
+    /// read once per binary (`collaborationModesKey`), like `featureNames`.
+    @Published var collaborationModes: [String]? = nil
+    var collaborationModesKey: String? = nil
     /// Codex's own speed settings per session folder (`CodexConfigRead`)
     /// — what the user's file alone cannot show, since a trusted
     /// project's `.codex/config.toml` may name its own `service_tier`
@@ -4217,11 +5570,43 @@ final class CodexCatalog: ObservableObject {
     /// The model menu opening asks regardless.
     static let folderSettingsLifetime: TimeInterval = 60
     /// Tiers per model as the INSTALLED codex answered `model/list` —
-    /// the binary every SipAI turn runs. Read ahead of the cache file,
-    /// which another codex client on the same machine may have written
-    /// with an older catalog (fewer tiers, no `default_service_tier`).
-    /// Empty until codex has answered this launch.
+    /// the binary every SipAI turn runs. Codex answers it from its
+    /// BUILT-IN list whenever its saved copy is stale and a download does
+    /// not finish in time, so the answer speaks for a model only where
+    /// `preferred` says it does. Empty until codex has answered this
+    /// launch.
     @Published private(set) var listedTiers: [String: CodexSpeed.ModelTiers] = [:]
+    /// Codex's OWN default model, and each model's default effort, out of
+    /// the same `model/list` answer — what a turn runs as when no config
+    /// layer names a model. Empty until codex has answered this launch.
+    /// Not published: nothing on screen is drawn from it.
+    private(set) var listedDefaults = CodexListedDefaults()
+
+    /// Whether codex is signed in with ChatGPT — the sign-in codex keeps a
+    /// downloaded list for. With an API key codex lists its built-in models
+    /// alone, and a saved list left from an earlier ChatGPT sign-in is not
+    /// codex's any more. Installed by the app at launch; nil reads as no.
+    static var chatGPTSignIn: (@MainActor () -> Bool)? = nil
+
+    /// Which of codex's two answers speaks for a model: its SAVED list
+    /// (`models_cache.json`, the newest list it downloaded for the account)
+    /// or what the installed codex answers `model/list` with. The saved
+    /// list comes first while codex is signed in with ChatGPT: the answer
+    /// is codex's built-in list whenever its saved copy is over five
+    /// minutes old and a fresh download does not finish in five seconds,
+    /// and that list knows nothing of the account — no Ultrafast, a default
+    /// speed and effort the account's list may not have. A download that
+    /// works rewrites the saved list before codex answers, so the saved
+    /// list is never older than an answer that came from one. With an API
+    /// key the answer comes first. A model only one side names is that
+    /// side's.
+    nonisolated static func preferred<T>(saved: T?, listed: T?, chatGPTSignIn: Bool) -> T? {
+        if chatGPTSignIn, let saved { return saved }
+        return listed ?? saved
+    }
+
+    private var signedInWithChatGPT: Bool { Self.chatGPTSignIn?() ?? false }
+
     /// The cache header's client version and fetch time; nil until a
     /// cache has been read.
     @Published private(set) var catalogStamp: CodexCatalogStamp? = nil
@@ -4289,14 +5674,48 @@ final class CodexCatalog: ObservableObject {
     /// folder once it has given one, else what the user's file says.
     func speedSettings(forFolder folder: String?) -> CodexSpeed.Settings {
         if let folder, let answered = folderSpeedSettings[folder] { return answered }
+        // Until codex answers for the folder, whether it gates its two
+        // speeds apart is read off the binary: one that has the
+        // `ultrafast_mode` feature does.
+        let gates = CodexSpeed.Gates(
+            fastMode: configuredFastMode, ultrafastMode: configuredUltrafastMode,
+            independent: featureNames?.contains("ultrafast_mode") == true)
         return CodexSpeed.Settings(configured: configuredServiceTier,
-                                   featureEnabled: fastModeFeatureEnabled,
-                                   model: defaultModel)
+                                   gates: gates,
+                                   model: defaultModel,
+                                   effort: configuredEffort)
     }
 
-    /// The model a send with no pick runs as in this folder.
+    /// The level a send with no effort pick runs at in this folder, by
+    /// codex's config — nil when the config names none.
+    func configuredEffort(forFolder folder: String?) -> String? {
+        speedSettings(forFolder: folder).effort.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// The level a model runs at when nothing else names one, from codex's
+    /// saved list or its `model/list` answer by `preferred`'s rule.
+    func modelDefaultEffort(forModel slug: String) -> String? {
+        let entry = models.first { $0.slug == slug }
+        return Self.preferred(saved: entry?.inSavedList == true ? entry?.defaultEffort : nil,
+                              listed: listedDefaults.efforts[slug],
+                              chatGPTSignIn: signedInWithChatGPT)
+            ?? entry?.defaultEffort
+    }
+
+    /// The model a send with no pick runs as in this folder, by codex's
+    /// config — nil when no layer of it names one.
     func defaultModel(forFolder folder: String?) -> String? {
         speedSettings(forFolder: folder).model.flatMap { $0.isEmpty ? nil : $0 }
+    }
+
+    /// The model a turn with no pick RUNS as in this folder: the config's,
+    /// else codex's own default — the one its `model/list` answer marks,
+    /// which is what a new thread is given and what `codex exec` runs when
+    /// no config layer names a model (measured). A turn through the
+    /// app-server must state it: the thread keeps whatever model an earlier
+    /// turn named, so "nothing configured" is not "nothing stated" there.
+    func turnDefaultModel(forFolder folder: String?) -> String? {
+        defaultModel(forFolder: folder) ?? listedDefaults.model
     }
 
     /// The model a send runs as — the pick, else the folder's default.
@@ -4305,23 +5724,42 @@ final class CodexCatalog: ObservableObject {
         return defaultModel(forFolder: folder)
     }
 
-    /// A model's advertised tiers and catalog default: the installed
-    /// codex's own `model/list` answer first, the cache file second.
-    /// nil for a model neither knows, since a guessed tier is dropped by
-    /// codex per request.
+    /// A model's advertised tiers and catalog default, from codex's saved
+    /// list or its `model/list` answer by `preferred`'s rule. nil for a
+    /// model neither knows, since a guessed tier is dropped by codex per
+    /// request.
     func speedTiers(forModel slug: String?, folder: String?) -> CodexSpeed.ModelTiers? {
         guard let slug = resolvedSlug(slug, folder: folder) else { return nil }
-        if let listed = listedTiers[slug] { return listed }
-        guard let model = models.first(where: { $0.slug == slug }) else { return nil }
-        return CodexSpeed.ModelTiers(tiers: model.serviceTiers,
-                                     defaultTier: model.defaultServiceTier)
+        let entry = models.first { $0.slug == slug }
+        let tiers = entry.map { CodexSpeed.ModelTiers(tiers: $0.serviceTiers,
+                                                      defaultTier: $0.defaultServiceTier) }
+        return Self.preferred(saved: entry?.inSavedList == true ? tiers : nil,
+                              listed: listedTiers[slug],
+                              chatGPTSignIn: signedInWithChatGPT)
+            ?? tiers
     }
 
-    /// Whether the composer offers a speed choice for this model: it
-    /// advertises a tier, and codex's `fast_mode` feature is on.
+    /// Whether the composer offers a speed choice for this model: one of
+    /// its speed switches can be turned on.
     func offersSpeed(forModel slug: String?, folder: String?) -> Bool {
-        speedSettings(forFolder: folder).featureEnabled
-            && !(speedTiers(forModel: slug, folder: folder)?.tiers.isEmpty ?? true)
+        speedSwitches(forModel: slug, folder: folder).contains { $0.enabled }
+    }
+
+    /// Every model's tiers, in the catalog's order — what decides which
+    /// speeds get a switch at all (`CodexSpeed.switches`) — each by the
+    /// rule that speaks for one model.
+    private var catalogTiers: [CodexSpeed.ModelTiers] {
+        var slugs = models.map(\.slug)
+        slugs += listedTiers.keys.filter { !slugs.contains($0) }.sorted()
+        return slugs.compactMap { speedTiers(forModel: $0, folder: nil) }
+    }
+
+    /// The speed switches the model menu and the task card draw for this
+    /// model, in this folder (`CodexSpeed.switches`).
+    func speedSwitches(forModel slug: String?, folder: String?) -> [CodexSpeed.SpeedSwitch] {
+        CodexSpeed.switches(model: speedTiers(forModel: slug, folder: folder),
+                            catalog: catalogTiers,
+                            gates: speedSettings(forFolder: folder).gates)
     }
 
     /// The pick a send carries: the session's own speed, else — for a
@@ -4333,8 +5771,8 @@ final class CodexCatalog: ObservableObject {
         return fastTier(forModel: options.model, folder: folder)?.id
     }
 
-    /// The tier the Fast mode switch turns on for this model
-    /// (`CodexSpeed.fastTier`), nil when the model advertises none.
+    /// The tier a legacy `fast_mode` flag stands for on this model
+    /// (`CodexSpeed.fastTier`), nil when the model lists none.
     func fastTier(forModel slug: String?, folder: String?) -> CodexServiceTier? {
         CodexSpeed.fastTier(speedTiers(forModel: slug, folder: folder))
     }
@@ -4346,7 +5784,7 @@ final class CodexCatalog: ObservableObject {
         return CodexSpeed.effective(pick: speedPick(for: options, folder: folder),
                                     configured: settings.configured,
                                     model: speedTiers(forModel: options.model, folder: folder),
-                                    featureEnabled: settings.featureEnabled)
+                                    gates: settings.gates)
     }
 
     /// The `-c service_tier=` value a composer send passes, nil for
@@ -4356,7 +5794,7 @@ final class CodexCatalog: ObservableObject {
             pick: speedPick(for: options, folder: folder),
             effective: effectiveServiceTier(for: options, folder: folder),
             model: speedTiers(forModel: options.model, folder: folder),
-            featureEnabled: speedSettings(forFolder: folder).featureEnabled)
+            gates: speedSettings(forFolder: folder).gates)
     }
 
     /// The tier a scheduled task's run gets in this folder (nil =
@@ -4367,7 +5805,7 @@ final class CodexCatalog: ObservableObject {
         let settings = speedSettings(forFolder: folder)
         return CodexSpeed.scheduled(pick: pick, configured: settings.configured,
                                     model: speedTiers(forModel: slug, folder: folder),
-                                    featureEnabled: settings.featureEnabled)
+                                    gates: settings.gates)
     }
 
     /// The advertised tier with this id on the model in force, for its
@@ -4392,7 +5830,7 @@ final class CodexCatalog: ObservableObject {
         folderSettingsInFlight.insert(folder)
         let generation = folderSettingsGeneration
         Task.detached(priority: .utility) {
-            let config = await CodexConfigRead.run(
+            let answer = await CodexConfigRead.run(
                 binary: binary, cwd: CodexConfigRead.physicalPath(folder))
             await MainActor.run {
                 self.folderSettingsInFlight.remove(folder)
@@ -4403,8 +5841,9 @@ final class CodexCatalog: ObservableObject {
                     return
                 }
                 self.folderSettingsAskedAt[folder] = Date()
-                guard let config else { return }
-                let settings = CodexSpeed.settings(fromEffectiveConfig: config)
+                guard let config = answer.config else { return }
+                let settings = CodexSpeed.settings(fromEffectiveConfig: config,
+                                                   requirements: answer.requirements)
                 if self.folderSpeedSettings[folder] != settings {
                     self.folderSpeedSettings[folder] = settings
                 }
@@ -4461,7 +5900,9 @@ final class CodexCatalog: ObservableObject {
                     self.configuredContextWindow = found.contextWindow
                     self.configuredAutoCompactLimit = found.autoCompactLimit
                     self.configuredServiceTier = found.serviceTier
-                    self.fastModeFeatureEnabled = found.fastModeFeature ?? true
+                    self.configuredFastMode = found.fastModeFeature
+                    self.configuredUltrafastMode = found.ultrafastModeFeature
+                    self.configuredEffort = found.effort
                     if let stamp = found.stamp { self.catalogStamp = stamp }
                     // A file that moved since the last harvest may have
                     // moved what codex answered for each folder too.
@@ -4502,6 +5943,7 @@ final class CodexCatalog: ObservableObject {
         // So is the tier answer: it described the binary that was
         // replaced, and the cache answers until the new one has spoken.
         listedTiers = [:]
+        listedDefaults = CodexListedDefaults()
         // And each folder's settings came from the old binary's merge.
         speedSettingsMayHaveMoved()
         loadedFingerprint = nil
@@ -4630,6 +6072,7 @@ final class CodexCatalog: ObservableObject {
         Task.detached(priority: .utility) {
             let answer = await CodexModelListRefresh.answer(binary: binary)
             let listed = Self.listedTiers(fromAnswer: answer)
+            let defaults = Self.listedDefaults(fromAnswer: answer)
             await MainActor.run {
                 self.refreshing = false
                 // An answer that named no tiers (no app-server, signed
@@ -4637,6 +6080,7 @@ final class CodexCatalog: ObservableObject {
                 if !listed.isEmpty, listed != self.listedTiers {
                     self.listedTiers = listed
                 }
+                if defaults != CodexListedDefaults() { self.listedDefaults = defaults }
                 self.ensureLoaded()
             }
         }
@@ -4663,7 +6107,8 @@ final class CodexCatalog: ObservableObject {
     nonisolated private static func harvest()
     -> (models: [CodexModel], efforts: [String], defaultModel: String?,
         contextWindow: Int?, autoCompactLimit: Int?, stamp: CodexCatalogStamp?,
-        serviceTier: String?, fastModeFeature: Bool?) {
+        serviceTier: String?, fastModeFeature: Bool?, ultrafastModeFeature: Bool?,
+        effort: String?) {
         let config = readConfigDefaults()
         let cache = readModelsCache(contextWindowOverride: config.contextWindow)
         var models = cache.visible
@@ -4719,7 +6164,8 @@ final class CodexCatalog: ObservableObject {
         efforts.sort { rank(of: $0) < rank(of: $1) }
         return (models, efforts, config.model, config.contextWindow,
                 config.autoCompactLimit, cache.stamp,
-                config.serviceTier, config.fastModeFeature)
+                config.serviceTier, config.fastModeFeature, config.ultrafastModeFeature,
+                config.effort)
     }
 
     nonisolated private static func rank(of effort: String) -> Int {
@@ -4816,6 +6262,8 @@ final class CodexCatalog: ObservableObject {
             let percent = pct.flatMap { $0 > 0 && $0 <= 100 ? Int($0.rounded()) : nil }
             out.append(CodexModel(slug: slug, displayName: name,
                                   priority: priority, efforts: efforts,
+                                  defaultEffort: (entry["default_reasoning_level"] as? String)
+                                      .flatMap { $0.isEmpty ? nil : $0 },
                                   serviceTiers: tiers,
                                   defaultServiceTier: defaultTier,
                                   contextWindow: usable(base),
@@ -4823,7 +6271,8 @@ final class CodexCatalog: ObservableObject {
                                   defaultContextWindowSetting: raw > 0 ? raw : nil,
                                   usablePercent: raw > 0 ? (percent ?? 100) : nil,
                                   maxContextWindow: larger ? usable(cap) : nil,
-                                  maxContextWindowSetting: larger ? cap : nil))
+                                  maxContextWindowSetting: larger ? cap : nil,
+                                  inSavedList: true))
         }
         return (out, hidden, stamp)
     }
@@ -4870,6 +6319,30 @@ final class CodexCatalog: ObservableObject {
         return out
     }
 
+    /// Codex's own default model and each model's default effort, out of
+    /// the same answer — `result.data[]`, the entry marked `isDefault` and
+    /// every entry's `defaultReasoningEffort`. A hidden entry is no
+    /// default; an answer that names nothing leaves both empty.
+    nonisolated static func listedDefaults(fromAnswer answer: [String: Any]?)
+    -> CodexListedDefaults {
+        guard let result = answer?["result"] as? [String: Any],
+              let data = result["data"] as? [Any] else { return CodexListedDefaults() }
+        var out = CodexListedDefaults()
+        for case let entry as [String: Any] in data {
+            guard let slug = ((entry["model"] as? String) ?? (entry["id"] as? String))?
+                    .trimmingCharacters(in: .whitespaces),
+                  !slug.isEmpty else { continue }
+            if let effort = entry["defaultReasoningEffort"] as? String, !effort.isEmpty {
+                out.efforts[slug] = effort
+            }
+            if out.model == nil, (entry["isDefault"] as? Bool) == true,
+               (entry["hidden"] as? Bool) != true {
+                out.model = slug
+            }
+        }
+        return out
+    }
+
     /// `fetched_at` as codex writes it — RFC 3339 with a six-digit
     /// fraction ("2026-09-10T03:34:26.359497Z"). `ISO8601DateFormatter`
     /// reads at most three fraction digits, so the fraction is cut to
@@ -4889,11 +6362,11 @@ final class CodexCatalog: ObservableObject {
     /// The config file, handed to `parseConfigDefaults`.
     nonisolated private static func readConfigDefaults()
     -> (model: String?, effort: String?, contextWindow: Int?, autoCompactLimit: Int?,
-        serviceTier: String?, fastModeFeature: Bool?) {
+        serviceTier: String?, fastModeFeature: Bool?, ultrafastModeFeature: Bool?) {
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/config.toml")
         guard let data = try? Data(contentsOf: url) else {
-            return (nil, nil, nil, nil, nil, nil)
+            return (nil, nil, nil, nil, nil, nil, nil)
         }
         return parseConfigDefaults(String(decoding: data, as: UTF8.self))
     }
@@ -4904,19 +6377,20 @@ final class CodexCatalog: ObservableObject {
     /// `[section]` header only — the file also carries
     /// `[marketplaces.*]`, `[plugins.*]` and `[profiles.*]` tables whose
     /// keys are not the global ones codex reads. Two tables are read by
-    /// name for the speed: `[features] fast_mode` (nil unless the file
-    /// says) and `[notice] fast_default_opt_out`, which codex's own
-    /// pickers read as `service_tier = "default"` when no tier is set.
-    /// The dotted top-level spellings of both count as well.
+    /// name for the speed: `[features] fast_mode` and `ultrafast_mode`
+    /// (nil unless the file says) and `[notice] fast_default_opt_out`,
+    /// which codex's own pickers read as `service_tier = "default"` when
+    /// no tier is set. The dotted top-level spellings count as well.
     nonisolated static func parseConfigDefaults(_ text: String)
     -> (model: String?, effort: String?, contextWindow: Int?, autoCompactLimit: Int?,
-        serviceTier: String?, fastModeFeature: Bool?) {
+        serviceTier: String?, fastModeFeature: Bool?, ultrafastModeFeature: Bool?) {
         var model: String? = nil
         var effort: String? = nil
         var contextWindow: Int? = nil
         var autoCompactLimit: Int? = nil
         var serviceTier: String? = nil
         var fastModeFeature: Bool? = nil
+        var ultrafastModeFeature: Bool? = nil
         var fastDefaultOptOut = false
         /// nil while still above the first table header.
         var table: String? = nil
@@ -4931,6 +6405,10 @@ final class CodexCatalog: ObservableObject {
                    let value = TomlScalar.bool(line, key: "fast_mode") {
                     fastModeFeature = value
                 }
+                if table == "features",
+                   let value = TomlScalar.bool(line, key: "ultrafast_mode") {
+                    ultrafastModeFeature = value
+                }
                 if table == "notice",
                    TomlScalar.bool(line, key: "fast_default_opt_out") == true {
                     fastDefaultOptOut = true
@@ -4939,6 +6417,9 @@ final class CodexCatalog: ObservableObject {
             }
             if let value = TomlScalar.bool(line, key: "features.fast_mode") {
                 fastModeFeature = value
+            }
+            if let value = TomlScalar.bool(line, key: "features.ultrafast_mode") {
+                ultrafastModeFeature = value
             }
             if TomlScalar.bool(line, key: "notice.fast_default_opt_out") == true {
                 fastDefaultOptOut = true
@@ -4966,7 +6447,8 @@ final class CodexCatalog: ObservableObject {
             }
         }
         if serviceTier == nil, fastDefaultOptOut { serviceTier = CodexSpeed.standard }
-        return (model, effort, contextWindow, autoCompactLimit, serviceTier, fastModeFeature)
+        return (model, effort, contextWindow, autoCompactLimit, serviceTier, fastModeFeature,
+                ultrafastModeFeature)
     }
 
     nonisolated private static func newestRollouts(limit: Int) -> [URL] {
@@ -4977,8 +6459,7 @@ final class CodexCatalog: ObservableObject {
             options: [.skipsHiddenFiles]) else { return [] }
         var found: [(url: URL, at: Date)] = []
         for case let url as URL in walker {
-            let name = url.lastPathComponent
-            guard name.hasPrefix("rollout-"), name.hasSuffix(".jsonl")
+            guard CodexSessionScanner.rolloutStem(url.lastPathComponent) != nil
             else { continue }
             let at = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?
                 .contentModificationDate ?? .distantPast
@@ -4993,11 +6474,9 @@ final class CodexCatalog: ObservableObject {
     /// other tools are writing to.
     nonisolated private static func readTurnContext(of url: URL)
     -> (model: String?, effort: String?) {
-        guard let handle = try? FileHandle(forReadingFrom: url) else {
+        guard let head = AgentSessionScanner.head(of: url, count: 512 * 1024) else {
             return (nil, nil)
         }
-        defer { try? handle.close() }
-        let head = handle.readData(ofLength: 512 * 1024)
         for line in String(decoding: head, as: UTF8.self)
             .split(separator: "\n", omittingEmptySubsequences: true) {
             guard line.contains("turn_context") else { continue }

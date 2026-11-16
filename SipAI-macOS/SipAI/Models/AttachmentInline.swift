@@ -35,17 +35,18 @@ enum AttachmentInline {
     /// name the user sees on the chip.
     static func block(name: String, text: String, truncated: Bool) -> String {
         let escaped = escapeName(name)
-        // The BODY must not be able to speak the wrapper's own tags. A
-        // file containing the literal closing tag would end the block
-        // early, and everything after it — content the file's author
-        // chose — would render as the user's own words. Escaping just
-        // the opening bracket breaks the match and is the smallest
-        // mutation of the file's text.
-        let safeText = text
-            .replacingOccurrences(of: closeTag, with: "&lt;" + closeTag.dropFirst())
-            .replacingOccurrences(of: openPrefix, with: "&lt;" + openPrefix.dropFirst())
         let mark = truncated ? " truncated=\"true\"" : ""
-        return "\(openPrefix)\(escaped)\"\(mark)>\n\(safeText)\n\(closeTag)"
+        return "\(openPrefix)\(escaped)\"\(mark)>\n\(safeBody(text))\n\(closeTag)"
+    }
+
+    /// A block's BODY must not be able to speak the wrapper's own tags. A
+    /// file containing the literal closing tag would end the block early,
+    /// and everything after it — content the file's author chose — would
+    /// render as the user's own words. Escaping just the opening bracket
+    /// breaks the match and is the smallest mutation of the text.
+    private static func safeBody(_ text: String) -> String {
+        text.replacingOccurrences(of: closeTag, with: "&lt;" + closeTag.dropFirst())
+            .replacingOccurrences(of: openPrefix, with: "&lt;" + openPrefix.dropFirst())
     }
 
     /// The DISPLAY marker for an image attachment — a name, no body.
@@ -60,6 +61,48 @@ enum AttachmentInline {
     /// kinds of marker apart.
     static func imageMarker(name: String) -> String {
         "\(openPrefix)\(escapeName(name))\" image=\"true\">\(closeTag)"
+    }
+
+    /// A file or folder an agent reads ITSELF. Outside Chat only an
+    /// agent has tools to open a path with, so an attached file stays
+    /// where it is and only its path rides the message — what the agent
+    /// would get from a path typed into its own terminal, without the
+    /// path standing in the user's words.
+    struct FileReference: Hashable {
+        let name: String
+        let path: String
+        let isFolder: Bool
+    }
+
+    /// The marker for a `FileReference`: the name and the path as
+    /// attributes, and one sentence for the MODEL saying where the file is
+    /// and to open it from there. The tag alone is not enough — a model
+    /// can take a bare tag naming a path for an attachment it cannot open,
+    /// and answer that it cannot see the file. The whole block is stripped
+    /// from what a bubble draws, and the paperclip line names the file
+    /// through the same `stripping` / `names` pair as every other marker.
+    /// The attributes are escaped like the name and the sentence like an
+    /// inlined file's text, so a `"`, `<` or `>` in a path can neither end
+    /// an attribute nor speak the closing tag.
+    static func referenceMarker(_ reference: FileReference) -> String {
+        let folder = reference.isFolder ? " folder=\"true\"" : ""
+        let words = reference.isFolder
+            ? "The user attached the folder \(reference.path). Its contents are not included in this message; look in it at that path."
+            : "The user attached the file \(reference.path). It is not included in this message; open it from that path."
+        return "\(openPrefix)\(escapeName(reference.name))\" path=\"\(escapeName(reference.path))\"\(folder)>"
+            + safeBody(words) + closeTag
+    }
+
+    /// The message an agent receives with files attached outside Chat
+    /// only: the user's words, then one marker per file. The markers go
+    /// AFTER the words: each CLI reads a command or a skill off the
+    /// start of the text (`/review`, kimi's `/skill:name`), and one in
+    /// front would turn the command into an ordinary message.
+    static func appendingReferences(_ references: [FileReference], to words: String) -> String {
+        let body = words.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !references.isEmpty else { return body }
+        let markers = references.map(referenceMarker).joined(separator: "\n")
+        return body.isEmpty ? markers : body + "\n\n" + markers
     }
 
     /// What the transcript DRAWS in place of an inlined block: nothing.
@@ -112,14 +155,6 @@ enum AttachmentInline {
             rest = rest[close.upperBound...]
         }
         return found
-    }
-
-    /// The paperclip line's text for a message, or nil when it carries
-    /// no attachment — the comma-joined shape `ChatMessage.files` uses,
-    /// so an agent bubble and a chat bubble read the same.
-    static func filesLine(in content: String) -> String? {
-        let list = names(in: content)
-        return list.isEmpty ? nil : list.joined(separator: ", ")
     }
 
     private static func escapeName(_ name: String) -> String {

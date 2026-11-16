@@ -185,6 +185,16 @@ check("…the inner agent.turn records and a mid-turn steer carry NO signal — 
         && marker(Kimi.text("OK", time: 1), kimiFormat) == nil)
 check("claude is left to its own rules (`progressState`)",
       marker(Codex.taskStarted("a", at: 1), .claude) == nil)
+func claudeUser(_ text: String) -> [String: Any] {
+    ["type": "user", "message": ["role": "user", "content": text]]
+}
+let fileRef = AttachmentInline.FileReference(name: "notes.md", path: "/tmp/example-project/notes.md", isFolder: false)
+check("claude: a user's words start a turn; a record of system wrappers alone is no signal",
+      AgentSessionTailer.progressState(forRawRecord: claudeUser("hi")) == true
+        && AgentSessionTailer.progressState(forRawRecord: claudeUser("<system-reminder>x</system-reminder>")) == nil)
+check("…and a message of attached files alone starts one too",
+      AgentSessionTailer.progressState(forRawRecord: claudeUser(
+          AttachmentInline.appendingReferences([fileRef], to: ""))) == true)
 
 let codexFile = scratch.appendingPathComponent("rollout-2026-01-01T00-00-00-00000000-0000-0000-0000-000000000001.jsonl")
 try! ([Codex.taskStarted("t1", at: 1_790_000_000), Codex.user("one"), Codex.assistant("OK"),
@@ -259,8 +269,10 @@ let mapped = [
     AgentSessionHistoryItem(kind: .interrupted(message: "Interrupted")),
     AgentSessionHistoryItem(kind: .compaction(preTokens: 9, postTokens: 1)),
 ].compactMap(AgentSessionTailer.liveEvent(for:))
-check("one decoded row, one live event — every kind but a thought",
-      mapped.map(kindName) == ["user:q", "assistant:a", "tool:shell", "result:out",
+// A thought reaches here only from a decoder asked for one — while compact
+// view is on (`CompactTranscript`) — and is then a live row like any other.
+check("one decoded row, one live event — every kind, a thought included",
+      mapped.map(kindName) == ["user:q", "assistant:a", "thinking", "tool:shell", "result:out",
                                "interrupted", "compaction"],
       "— got \(mapped.map(kindName))")
 check("…a notice stays a notice, and a user row keeps its attachment names",

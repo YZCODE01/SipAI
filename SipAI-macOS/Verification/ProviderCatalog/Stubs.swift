@@ -30,6 +30,12 @@ enum ShellEnvironment {
     static func resolve(_ name: String) -> String? { nil }
 }
 
+/// ConfigManager holds a Kimi skill pick to one skill — the real rule,
+/// from SkillModel.swift.
+enum SkillAgent {
+    static func oneSkillPerMessage(_ agent: String) -> Bool { agent == "kimi" }
+}
+
 enum AppTheme: String { case system, light, dark }
 enum AppLanguage: String {
     case english = "en"
@@ -47,6 +53,14 @@ struct AgentLaunchOptions: Equatable {
     var fastMode: Bool = false
     var serviceTier: String? = nil
     var chatOnly: Bool = false
+    var nonStop: Bool = false
+}
+
+enum AgentAskingMode {
+    static func normalized(_ mode: String?) -> String? {
+        guard let mode, !mode.isEmpty, mode != "codex-agent", mode != "kimi-manual" else { return nil }
+        return mode
+    }
 }
 
 enum ClaudeModelDisplay {
